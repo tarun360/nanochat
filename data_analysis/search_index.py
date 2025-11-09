@@ -12,8 +12,12 @@ import os
 import argparse
 import logging
 import time
+import json
+import tempfile
+import shutil
 import xapian
 import pyarrow.parquet as pq
+from multiprocessing import Pool, cpu_count
 
 from nanochat.common import get_base_dir
 from nanochat.dataset import list_parquet_files, DATA_DIR
@@ -34,16 +38,125 @@ def get_index_dir():
 # -----------------------------------------------------------------------------
 # Index building functions
 
-def build_index(data_dir=None, index_dir=None):
+def _index_worker(args):
     """
-    Build a Xapian search index from all parquet files.
+    Worker function for parallel indexing. Creates a shard of the index.
+    
+    Args:
+        args: Tuple of (worker_id, file_paths, shard_dir, data_dir, no_sync)
+    
+    Returns:
+        Tuple of (worker_id, num_docs_indexed, shard_dir)
+    """
+    worker_id, file_paths, shard_dir, data_dir, no_sync = args
+    
+    # Set up logging for worker
+    worker_logger = logging.getLogger(f"worker_{worker_id}")
+    
+    worker_logger.info(f"Worker {worker_id} starting: {len(file_paths)} files to process")
+    
+    # Create shard database
+    db_flags = xapian.DB_CREATE_OR_OVERWRITE
+    if no_sync:
+        db_flags |= xapian.DB_NO_SYNC
+    
+    database = xapian.WritableDatabase(shard_dir, db_flags)
+    
+    # Create term generator
+    termgenerator = xapian.TermGenerator()
+    termgenerator.set_stemmer(xapian.Stem("en"))
+    
+    total_docs = 0
+    start_time = time.time()
+    
+    try:
+        for file_idx_local, filepath in enumerate(file_paths):
+            filename = os.path.basename(filepath)
+            file_start = time.time()
+            
+            try:
+                pf = pq.ParquetFile(filepath)
+                num_row_groups = pf.num_row_groups
+                
+                file_doc_count = 0
+                for rg_idx in range(num_row_groups):
+                    rg = pf.read_row_group(rg_idx)
+                    texts = rg.column('text').to_pylist()
+                    
+                    for doc_idx, text in enumerate(texts):
+                        doc = xapian.Document()
+                        
+                        # Store metadata - file_idx will be adjusted by main process during merge
+                        doc.add_value(0, str(file_idx_local))
+                        doc.add_value(1, str(rg_idx))
+                        doc.add_value(2, str(doc_idx))
+                        
+                        # Index text
+                        termgenerator.set_document(doc)
+                        termgenerator.index_text(text)
+                        
+                        database.add_document(doc)
+                        total_docs += 1
+                        file_doc_count += 1
+                        
+                        # Log progress every 10000 documents
+                        if total_docs % 10000 == 0:
+                            elapsed = time.time() - start_time
+                            docs_per_sec = total_docs / elapsed if elapsed > 0 else 0
+                            worker_logger.info(f"Worker {worker_id}: Indexed {total_docs} documents ({docs_per_sec:.1f} docs/sec)")
+                
+                file_elapsed = time.time() - file_start
+                worker_logger.info(f"Worker {worker_id}: Completed {filename} - {file_doc_count} docs in {file_elapsed:.1f}s")
+                
+                # Commit after each file
+                database.commit()
+                
+            except Exception as e:
+                worker_logger.error(f"Worker {worker_id}: Error processing {filename}: {e}")
+                continue
+        
+        # Final commit
+        database.commit()
+        database.close()
+        
+        elapsed = time.time() - start_time
+        worker_logger.info(f"Worker {worker_id} finished: {total_docs} documents in {elapsed:.1f}s ({total_docs/elapsed:.1f} docs/sec)")
+        
+        return (worker_id, total_docs, shard_dir)
+        
+    except Exception as e:
+        worker_logger.error(f"Worker {worker_id} failed: {e}")
+        try:
+            database.close()
+        except:
+            pass
+        return (worker_id, 0, None)
+
+
+def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_workers=8):
+    """
+    Build a Xapian search index from all parquet files using parallel workers.
     
     Args:
         data_dir: Directory containing parquet files. If None, uses DATA_DIR from dataset.py
         index_dir: Directory to store the index. If None, uses get_index_dir()
+        resume: If True, resumes from previous progress. If False, starts fresh.
+        no_sync: If True, disables fsync for faster indexing (riskier if system crashes)
+        num_workers: Number of parallel workers to use (default: 8)
     
     Returns:
         Tuple of (index_dir, total_documents_indexed)
+    
+    Resumability:
+        - Progress is tracked at FILE level in .index_progress.json
+        - On resume, already-completed files are skipped
+        - Remaining files are distributed among workers
+        - Progress is saved AFTER all workers finish and merge completes
+        - If interrupted during worker execution:
+          * Files from previous completed runs are still tracked
+          * Current batch of files being processed by workers will be re-indexed
+          * This is safe - just re-does some work on next run
+        - Granularity: One batch of parallel processing at a time
     """
     if index_dir is None:
         index_dir = get_index_dir()
@@ -53,14 +166,22 @@ def build_index(data_dir=None, index_dir=None):
     
     logger.info(f"Building search index from data in: {data_dir}")
     logger.info(f"Index will be stored in: {index_dir}")
+    logger.info(f"Using {num_workers} parallel workers")
     
-    # Create or open the database
-    logger.info("Creating Xapian database...")
-    database = xapian.WritableDatabase(index_dir, xapian.DB_CREATE_OR_OVERWRITE)
+    # Progress tracking file
+    progress_file = os.path.join(index_dir, ".index_progress.json")
     
-    # Create term generator for indexing
-    termgenerator = xapian.TermGenerator()
-    termgenerator.set_stemmer(xapian.Stem("en"))
+    # Load progress if resuming
+    completed_files = set()
+    if resume and os.path.exists(progress_file):
+        try:
+            with open(progress_file, 'r') as f:
+                progress_data = json.load(f)
+                completed_files = set(progress_data.get('completed_files', []))
+                logger.info(f"Resuming from previous session: {len(completed_files)} files already indexed")
+        except Exception as e:
+            logger.warning(f"Could not load progress file: {e}. Starting fresh.")
+            completed_files = set()
     
     # Get all parquet files
     parquet_paths = list_parquet_files(data_dir)
@@ -69,68 +190,141 @@ def build_index(data_dir=None, index_dir=None):
     if len(parquet_paths) == 0:
         raise ValueError(f"No parquet files found in {data_dir}")
     
-    total_docs = 0
-    start_time = time.time()
+    # Filter out already completed files
+    remaining_files = [
+        fp for fp in parquet_paths 
+        if os.path.basename(fp) not in completed_files
+    ]
     
-    # Index each parquet file
-    for file_idx, filepath in enumerate(parquet_paths):
-        file_start_time = time.time()
-        logger.info(f"Processing file {file_idx + 1}/{len(parquet_paths)}: {os.path.basename(filepath)}")
+    if len(remaining_files) == 0:
+        logger.info("All files already indexed!")
+        # Just return stats from existing index
+        try:
+            db = xapian.Database(index_dir)
+            total_docs = db.get_doccount()
+            db.close()
+            return index_dir, total_docs
+        except:
+            return index_dir, 0
+    
+    logger.info(f"{len(remaining_files)} files remaining to index")
+    
+    # Create temporary directory for shards within the index directory
+    temp_dir = os.path.join(index_dir, "tmp")
+    os.makedirs(temp_dir, exist_ok=True)
+    logger.info(f"Creating temporary index shards in: {temp_dir}")
+    
+    try:
+        start_time = time.time()
+        
+        # Divide files among workers
+        files_per_worker = len(remaining_files) // num_workers
+        extra_files = len(remaining_files) % num_workers
+        
+        worker_args = []
+        file_idx = 0
+        for worker_id in range(num_workers):
+            # Calculate how many files this worker gets
+            worker_file_count = files_per_worker + (1 if worker_id < extra_files else 0)
+            worker_files = remaining_files[file_idx:file_idx + worker_file_count]
+            
+            if len(worker_files) == 0:
+                continue
+            
+            shard_dir = os.path.join(temp_dir, f"shard_{worker_id}")
+            os.makedirs(shard_dir, exist_ok=True)
+            
+            worker_args.append((worker_id, worker_files, shard_dir, data_dir, no_sync))
+            file_idx += worker_file_count
+            
+            logger.info(f"Worker {worker_id}: {len(worker_files)} files ({os.path.basename(worker_files[0])} to {os.path.basename(worker_files[-1])})")
+        
+        # Run workers in parallel
+        logger.info(f"Starting {len(worker_args)} workers...")
+        with Pool(processes=len(worker_args)) as pool:
+            results = pool.map(_index_worker, worker_args)
+        
+        # Check results
+        successful_shards = [(wid, docs, shard) for wid, docs, shard in results if shard is not None]
+        failed_workers = [wid for wid, docs, shard in results if shard is None]
+        
+        if failed_workers:
+            logger.warning(f"Workers {failed_workers} failed")
+        
+        if len(successful_shards) == 0:
+            raise RuntimeError("All workers failed!")
+        
+        total_docs_new = sum(docs for _, docs, _ in successful_shards)
+        logger.info(f"All workers completed: {total_docs_new} new documents indexed")
+        
+        # Merge shards into final index
+        logger.info("Merging shards into final index...")
+        merge_start = time.time()
+        
+        # Open or create final database
+        if resume and os.path.exists(index_dir):
+            # Open existing and add new shards
+            logger.info("Adding new shards to existing index...")
+            final_db = xapian.WritableDatabase(index_dir, xapian.DB_CREATE_OR_OPEN)
+        else:
+            logger.info("Creating new index from shards...")
+            final_db = xapian.WritableDatabase(index_dir, xapian.DB_CREATE_OR_OVERWRITE)
+        
+        # Add each shard to the final database
+        for worker_id, docs, shard_dir in successful_shards:
+            logger.info(f"Merging shard {worker_id} ({docs} docs)...")
+            shard_db = xapian.Database(shard_dir)
+            final_db.add_database(shard_db)
+            shard_db.close()
+        
+        # Commit and close
+        final_db.commit()
+        final_db.close()
+        
+        merge_time = time.time() - merge_start
+        logger.info(f"Merge completed in {merge_time:.1f}s")
+        
+        # Update progress file
+        for fp in remaining_files:
+            completed_files.add(os.path.basename(fp))
         
         try:
-            pf = pq.ParquetFile(filepath)
-            num_row_groups = pf.num_row_groups
-            logger.info(f"  File has {num_row_groups} row groups")
-            
-            file_doc_count = 0
-            for rg_idx in range(num_row_groups):
-                rg = pf.read_row_group(rg_idx)
-                texts = rg.column('text').to_pylist()
-                
-                for doc_idx, text in enumerate(texts):
-                    # Create a Xapian document
-                    doc = xapian.Document()
-                    
-                    # Store metadata about document location
-                    # Value slots: 0=file_idx, 1=rg_idx, 2=doc_idx
-                    doc.add_value(0, str(file_idx))
-                    doc.add_value(1, str(rg_idx))
-                    doc.add_value(2, str(doc_idx))
-                    
-                    # Index the text content
-                    termgenerator.set_document(doc)
-                    termgenerator.index_text(text)
-                    
-                    # Add to database
-                    database.add_document(doc)
-                    total_docs += 1
-                    file_doc_count += 1
-                    
-                    # Log progress every 10000 documents
-                    if total_docs % 10000 == 0:
-                        elapsed = time.time() - start_time
-                        docs_per_sec = total_docs / elapsed if elapsed > 0 else 0
-                        logger.info(f"  Indexed {total_docs} documents ({docs_per_sec:.1f} docs/sec)")
-            
-            file_elapsed = time.time() - file_start_time
-            logger.info(f"  Completed file {file_idx + 1}: {file_doc_count} documents in {file_elapsed:.1f}s")
-            
+            with open(progress_file, 'w') as f:
+                json.dump({'completed_files': list(completed_files)}, f)
         except Exception as e:
-            logger.error(f"Error processing file {filepath}: {e}")
-            continue
-    
-    # Commit changes
-    logger.info("Committing index to disk...")
-    database.commit()
-    database.close()
-    
-    total_elapsed = time.time() - start_time
-    logger.info(f"Index building complete!")
-    logger.info(f"Total documents indexed: {total_docs}")
-    logger.info(f"Total time: {total_elapsed:.1f}s ({total_docs / total_elapsed:.1f} docs/sec)")
-    logger.info(f"Index location: {index_dir}")
-    
-    return index_dir, total_docs
+            logger.warning(f"Could not save progress: {e}")
+        
+        # Get final document count
+        final_db = xapian.Database(index_dir)
+        total_docs = final_db.get_doccount()
+        final_db.close()
+        
+        total_elapsed = time.time() - start_time
+        logger.info(f"Index building complete!")
+        logger.info(f"Total documents in index: {total_docs}")
+        logger.info(f"New documents indexed: {total_docs_new}")
+        logger.info(f"Total files processed: {len(completed_files)}/{len(parquet_paths)}")
+        logger.info(f"Total time: {total_elapsed:.1f}s ({total_docs_new / total_elapsed:.1f} docs/sec)")
+        logger.info(f"Index location: {index_dir}")
+        
+        # Clean up progress file if all files are done
+        if len(completed_files) == len(parquet_paths):
+            logger.info("All files indexed successfully. Cleaning up progress file.")
+            try:
+                if os.path.exists(progress_file):
+                    os.remove(progress_file)
+            except Exception as e:
+                logger.warning(f"Could not remove progress file: {e}")
+        
+        return index_dir, total_docs
+        
+    finally:
+        # Clean up temporary shard directory
+        try:
+            logger.info(f"Cleaning up temporary shard directory: {temp_dir}")
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            logger.warning(f"Could not remove temp directory {temp_dir}: {e}")
 
 
 def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None):
@@ -348,6 +542,14 @@ Examples:
     parser.add_argument("--index-dir", type=str, help="Custom index directory (default: uses get_index_dir())")
     parser.add_argument("--data-dir", type=str, help="Custom data directory (default: uses DATA_DIR)")
     
+    # Build arguments
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Start indexing from scratch (default: resume from previous progress)")
+    parser.add_argument("--no-sync", action="store_true",
+                        help="Disable fsync for faster indexing (RISKY: data loss if crash)")
+    parser.add_argument("--workers", type=int, default=8,
+                        help="Number of parallel workers (default: 8)")
+    
     # Search arguments
     parser.add_argument("-n", "--max-results", type=int, default=10, 
                         help="Maximum number of search results (default: 10)")
@@ -371,7 +573,10 @@ Examples:
         logger.info("="*80)
         index_dir, total_docs = build_index(
             data_dir=args.data_dir,
-            index_dir=args.index_dir
+            index_dir=args.index_dir,
+            resume=not args.no_resume,
+            no_sync=args.no_sync,
+            num_workers=args.workers
         )
         logger.info("="*80)
         logger.info(f"Index built successfully with {total_docs} documents")

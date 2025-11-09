@@ -6,10 +6,16 @@ using Xapian search engine.
 
 INSTALLATION
 ------------
-The required dependencies (xapian-bindings, pyarrow, requests) have been added to 
+The required dependencies (xapian, pyarrow, requests) have been added to 
 pyproject.toml. Install them with:
 
-    uv sync
+    uv sync --extra gpu  (or --extra cpu)
+
+Note: Xapian must be installed via system package manager:
+    sudo apt-get install libxapian-dev python3-xapian
+    
+Then create a symlink in your venv:
+    ln -s /usr/lib/python3/dist-packages/xapian .venv/lib/python3.10/site-packages/xapian
 
 QUICK START
 -----------
@@ -23,17 +29,27 @@ QUICK START
    - Create a full-text search index
    - Store the index in ~/.cache/nanochat/search_index/
    - Take some time depending on how many parquet files you have
+   - Automatically resume if interrupted (progress is saved after each file)
+
+   To start fresh instead of resuming:
+    python -m data_analysis.search_index --build --no-resume
+    
+   For faster indexing (8 parallel workers by default):
+    python -m data_analysis.search_index --build --no-sync --workers 8
+    
+   Note: Use `python -m data_analysis.search_index` instead of `python data_analysis/search_index.py` 
+   to ensure proper module imports.
 
 2. Search the Index:
 
-    python data_analysis/search_index.py --search "your query here"
+    python -m data_analysis.search_index --search "your query here"
 
    Example:
-    python data_analysis/search_index.py --search "machine learning" -n 5
+    python -m data_analysis.search_index --search "machine learning" -n 5
 
 3. Get Index Statistics:
 
-    python data_analysis/search_index.py --stats
+    python -m data_analysis.search_index --stats
 
 
 COMMAND-LINE OPTIONS
@@ -41,6 +57,9 @@ COMMAND-LINE OPTIONS
 
 Building:
   --build                   Build the search index
+  --no-resume              Start from scratch (default: resume from previous progress)
+  --no-sync                Disable fsync for faster indexing (risky if crash)
+  --workers N              Number of parallel workers (default: 8)
   --index-dir DIR          Custom index directory
   --data-dir DIR           Custom data directory
 
@@ -93,4 +112,40 @@ NOTES
 - The first build will take time, but searches are very fast (milliseconds)
 - Index size depends on your data, expect a few GB for large datasets
 - Text is NOT stored in the index (retrieved from parquet files on demand for smaller index size)
+- Indexing is RESUMABLE: If interrupted (Ctrl+C), just run --build again to continue
+- Progress is saved after each file in .index_progress.json
+- PARALLEL INDEXING: Uses multiple workers (default 8) for ~8x speedup
+- Workers create separate index shards which are merged at the end
+
+
+CHECKING SYSTEM LIMITS (IMPORTANT for shared servers)
+------------------------------------------------------
+
+On shared servers, you may have cgroup limits that restrict CPU and memory usage.
+Check your limits before starting indexing:
+
+1. Check CPU limits:
+    python -c "
+    with open('/sys/fs/cgroup/user.slice/user-$(id -u).slice/cpu.max') as f:
+        content = f.read().strip().split()
+        print(f'CPU limit: {int(content[0])/int(content[1]):.1f} cores')
+    "
+
+2. Check memory limits:
+    python -c "
+    with open('/sys/fs/cgroup/user.slice/user-$(id -u).slice/memory.max') as f:
+        mem_gb = int(f.read().strip()) / (1024**3)
+        print(f'Memory hard limit: {mem_gb:.1f} GB')
+    with open('/sys/fs/cgroup/user.slice/user-$(id -u).slice/memory.high') as f:
+        mem_gb = int(f.read().strip()) / (1024**3)
+        print(f'Memory soft limit: {mem_gb:.1f} GB (throttling starts here)')
+    "
+
+3. Choose worker count based on limits:
+   - CPU limit of 16 cores → use 8-12 workers (leave headroom)
+   - Memory limit of 100 GB, soft 75 GB → each worker needs ~5 GB → use 8-10 workers max
+   - Avoid exceeding soft memory limit or your process will be throttled (very slow!)
+
+Example with custom worker count:
+    python -m data_analysis.search_index --build --workers 8 --no-sync
 

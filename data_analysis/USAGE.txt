@@ -1,0 +1,96 @@
+SEARCH INDEX USAGE GUIDE
+========================
+
+This module provides full-text fuzzy search capabilities across all parquet files 
+using Xapian search engine.
+
+INSTALLATION
+------------
+The required dependencies (xapian-bindings, pyarrow, requests) have been added to 
+pyproject.toml. Install them with:
+
+    uv sync
+
+QUICK START
+-----------
+
+1. Build the Index (one-time operation):
+
+    python data_analysis/search_index.py --build
+
+   This will:
+   - Read all parquet files from DATA_DIR (default: ~/.cache/nanochat/base_data/)
+   - Create a full-text search index
+   - Store the index in ~/.cache/nanochat/search_index/
+   - Take some time depending on how many parquet files you have
+
+2. Search the Index:
+
+    python data_analysis/search_index.py --search "your query here"
+
+   Example:
+    python data_analysis/search_index.py --search "machine learning" -n 5
+
+3. Get Index Statistics:
+
+    python data_analysis/search_index.py --stats
+
+
+COMMAND-LINE OPTIONS
+--------------------
+
+Building:
+  --build                   Build the search index
+  --index-dir DIR          Custom index directory
+  --data-dir DIR           Custom data directory
+
+Searching:
+  --search "QUERY"         Search for documents
+  -n, --max-results N      Number of results to return (default: 10)
+  --no-fuzzy              Disable fuzzy matching
+  --preview-length N       Length of text preview (default: 200)
+
+Statistics:
+  --stats                  Show index statistics
+
+
+PROGRAMMATIC USAGE
+------------------
+
+In your Python code:
+
+    from data_analysis import build_index, search, get_index_stats
+
+    # Build index (once)
+    index_dir, num_docs = build_index()
+    print(f"Indexed {num_docs} documents")
+
+    # Search (many times)
+    results = search("Tarun loves banana", max_results=10, fuzzy=True)
+    for result in results:
+        print(f"Score: {result['score']:.1%}")
+        print(f"Location: file {result['file_idx']}, rg {result['rg_idx']}, doc {result['doc_idx']}")
+        print(f"Text: {result['text'][:100]}...")
+        print()
+
+    # Get statistics
+    stats = get_index_stats()
+    print(f"Index has {stats['num_documents']} documents")
+
+
+EXAMPLE SCRIPT
+--------------
+
+See example_search.py for a complete working example.
+
+
+NOTES
+-----
+
+- The index is stored in ~/.cache/nanochat/search_index/ by default
+- You can override this location with NANOCHAT_BASE_DIR environment variable
+- Fuzzy matching is enabled by default (handles typos, partial matches)
+- The first build will take time, but searches are very fast (milliseconds)
+- Index size depends on your data, expect a few GB for large datasets
+- Text is NOT stored in the index (retrieved from parquet files on demand for smaller index size)
+

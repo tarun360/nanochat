@@ -370,6 +370,9 @@ def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None
         queryparser.set_stemmer(xapian.Stem("en"))
         queryparser.set_database(database)
         
+        # Set default operator to AND (require all search terms to be present)
+        queryparser.set_default_op(xapian.Query.OP_AND)
+        
         # Enable fuzzy matching flags
         flags = xapian.QueryParser.FLAG_DEFAULT
         if fuzzy:

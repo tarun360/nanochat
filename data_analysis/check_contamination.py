@@ -112,7 +112,7 @@ def check_single_example(example_idx, question, answer, index_dir=None):
     return result
 
 
-def check_dataset_split(dataset_name, split_name, dataset, index_dir=None):
+def check_dataset_split(dataset_name, split_name, dataset, index_dir=None, question_key='question', answer_key='answer'):
     """
     Check an entire dataset split for contamination.
     
@@ -121,6 +121,8 @@ def check_dataset_split(dataset_name, split_name, dataset, index_dir=None):
         split_name: Split name (e.g., "train", "test")
         dataset: HuggingFace dataset object
         index_dir: Path to search index
+        question_key: Key for question field (default: 'question')
+        answer_key: Key for answer field (default: 'answer')
     
     Returns:
         Dictionary with aggregated results
@@ -142,8 +144,8 @@ def check_dataset_split(dataset_name, split_name, dataset, index_dir=None):
     
     for idx in range(len(dataset)):
         example = dataset[idx]
-        question = example['question']
-        answer = example['answer']
+        question = example[question_key]
+        answer = example[answer_key]
         
         # Check this example
         check_result = check_single_example(idx, question, answer, index_dir)
@@ -211,9 +213,15 @@ def process_math_subject(subject, index_dir=None):
     
     logger.info(f"Loaded MATH/{subject}: {len(train_dataset)} train, {len(test_dataset)} test examples")
     
-    # Check both splits
-    train_results = check_dataset_split(f"MATH/{subject}", "train", train_dataset, index_dir)
-    test_results = check_dataset_split(f"MATH/{subject}", "test", test_dataset, index_dir)
+    # Check both splits (MATH uses 'problem' and 'solution' column names)
+    train_results = check_dataset_split(
+        f"MATH/{subject}", "train", train_dataset, index_dir,
+        question_key='problem', answer_key='solution'
+    )
+    test_results = check_dataset_split(
+        f"MATH/{subject}", "test", test_dataset, index_dir,
+        question_key='problem', answer_key='solution'
+    )
     
     return {
         'train': train_results,

@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 def get_index_dir():
     """Returns the directory where the search index is stored."""
     base_dir = get_base_dir()
-    index_dir = os.path.join(base_dir, "search_index")
+    index_dir = os.path.join(base_dir, "base_data_search_index")
     os.makedirs(index_dir, exist_ok=True)
     return index_dir
 
@@ -216,10 +216,10 @@ def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_w
     
     logger.info(f"{len(remaining_files)} files remaining to index")
     
-    # Create temporary directory for shards within the index directory
-    temp_dir = os.path.join(index_dir, "tmp")
-    os.makedirs(temp_dir, exist_ok=True)
-    logger.info(f"Creating temporary index shards in: {temp_dir}")
+    # Create directory for shards within the index directory
+    shards_dir = os.path.join(index_dir, "shards")
+    os.makedirs(shards_dir, exist_ok=True)
+    logger.info(f"Creating index shards in: {shards_dir}")
     
     try:
         start_time = time.time()
@@ -238,7 +238,7 @@ def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_w
             if len(worker_files) == 0:
                 continue
             
-            shard_dir = os.path.join(temp_dir, f"shard_{worker_id}")
+            shard_dir = os.path.join(shards_dir, f"shard_{worker_id}")
             os.makedirs(shard_dir, exist_ok=True)
             
             worker_args.append((worker_id, worker_files, shard_dir, data_dir, no_sync))
@@ -263,33 +263,8 @@ def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_w
         
         total_docs_new = sum(docs for _, docs, _ in successful_shards)
         logger.info(f"All workers completed: {total_docs_new} new documents indexed")
-        
-        # Merge shards into final index
-        logger.info("Merging shards into final index...")
-        merge_start = time.time()
-        
-        # Open or create final database
-        if resume and os.path.exists(index_dir):
-            # Open existing and add new shards
-            logger.info("Adding new shards to existing index...")
-            final_db = xapian.WritableDatabase(index_dir, xapian.DB_CREATE_OR_OPEN)
-        else:
-            logger.info("Creating new index from shards...")
-            final_db = xapian.WritableDatabase(index_dir, xapian.DB_CREATE_OR_OVERWRITE)
-        
-        # Add each shard to the final database
-        for worker_id, docs, shard_dir in successful_shards:
-            logger.info(f"Merging shard {worker_id} ({docs} docs)...")
-            shard_db = xapian.Database(shard_dir)
-            final_db.add_database(shard_db)
-            shard_db.close()
-        
-        # Commit and close
-        final_db.commit()
-        final_db.close()
-        
-        merge_time = time.time() - merge_start
-        logger.info(f"Merge completed in {merge_time:.1f}s")
+        logger.info(f"Shards stored in: {shards_dir}")
+        logger.info("Shards will be kept permanently for distributed searching")
         
         # Update progress file
         for fp in remaining_files:
@@ -301,18 +276,12 @@ def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_w
         except Exception as e:
             logger.warning(f"Could not save progress: {e}")
         
-        # Get final document count
-        final_db = xapian.Database(index_dir)
-        total_docs = final_db.get_doccount()
-        final_db.close()
-        
         total_elapsed = time.time() - start_time
         logger.info(f"Index building complete!")
-        logger.info(f"Total documents in index: {total_docs}")
-        logger.info(f"New documents indexed: {total_docs_new}")
+        logger.info(f"Total documents indexed: {total_docs_new}")
         logger.info(f"Total files processed: {len(completed_files)}/{len(parquet_paths)}")
         logger.info(f"Total time: {total_elapsed:.1f}s ({total_docs_new / total_elapsed:.1f} docs/sec)")
-        logger.info(f"Index location: {index_dir}")
+        logger.info(f"Shards location: {shards_dir}")
         
         # Clean up progress file if all files are done
         if len(completed_files) == len(parquet_paths):
@@ -323,27 +292,23 @@ def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_w
             except Exception as e:
                 logger.warning(f"Could not remove progress file: {e}")
         
-        return index_dir, total_docs
+        return index_dir, total_docs_new
         
-    finally:
-        # Clean up temporary shard directory
-        try:
-            logger.info(f"Cleaning up temporary shard directory: {temp_dir}")
-            shutil.rmtree(temp_dir)
-        except Exception as e:
-            logger.warning(f"Could not remove temp directory {temp_dir}: {e}")
+    except Exception as e:
+        logger.error(f"Build failed: {e}")
+        raise
 
 
 def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None):
     """
-    Search the index for documents matching the query.
+    Search the index for documents matching the query across all shards.
     
     Args:
         query_text: The text to search for
         index_dir: Directory containing the index. If None, uses get_index_dir()
         max_results: Maximum number of results to return
         fuzzy: If True, enables fuzzy matching (typo tolerance)
-        data_dir: Directory containing parquet files (needed if text not stored in index)
+        data_dir: Directory containing parquet files (needed to retrieve text)
     
     Returns:
         List of dictionaries with keys:
@@ -357,9 +322,11 @@ def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None
     if index_dir is None:
         index_dir = get_index_dir()
     
-    if not os.path.exists(index_dir):
+    shards_dir = os.path.join(index_dir, "shards")
+    
+    if not os.path.exists(shards_dir):
         raise FileNotFoundError(
-            f"Index directory does not exist: {index_dir}. "
+            f"Shards directory does not exist: {shards_dir}. "
             f"Please build the index first using build_index()"
         )
     
@@ -368,9 +335,27 @@ def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None
     logger.info(f"Fuzzy matching: {fuzzy}, Max results: {max_results}")
     
     try:
-        # Open the database for reading
-        database = xapian.Database(index_dir)
-        logger.info(f"Index contains {database.get_doccount()} documents")
+        # Open all shards and combine into one database for searching
+        database = xapian.Database()
+        
+        # Find all shard directories
+        shard_names = sorted([d for d in os.listdir(shards_dir) if d.startswith("shard_")])
+        
+        if len(shard_names) == 0:
+            raise FileNotFoundError(f"No shards found in {shards_dir}")
+        
+        logger.info(f"Found {len(shard_names)} shards to search")
+        
+        # Add each shard to the database
+        total_docs = 0
+        for shard_name in shard_names:
+            shard_path = os.path.join(shards_dir, shard_name)
+            database.add_database(xapian.Database(shard_path))
+            shard_db = xapian.Database(shard_path)
+            total_docs += shard_db.get_doccount()
+            shard_db.close()
+        
+        logger.info(f"Index contains {total_docs:,} documents across {len(shard_names)} shards")
         
         # Create query parser
         queryparser = xapian.QueryParser()
@@ -489,31 +474,52 @@ def retrieve_text_from_parquet(file_idx, rg_idx, doc_idx, data_dir=None):
 
 def get_index_stats(index_dir=None):
     """
-    Get statistics about the search index.
+    Get statistics about the search index (across all shards).
     
     Args:
         index_dir: Directory containing the index. If None, uses get_index_dir()
     
     Returns:
-        Dictionary with index statistics, or None if index doesn't exist
+        Dictionary with index statistics
     """
     if index_dir is None:
         index_dir = get_index_dir()
     
-    if not os.path.exists(index_dir):
-        raise FileNotFoundError(f"Index directory does not exist: {index_dir}")
+    shards_dir = os.path.join(index_dir, "shards")
+    
+    if not os.path.exists(shards_dir):
+        raise FileNotFoundError(f"Shards directory does not exist: {shards_dir}")
     
     try:
-        database = xapian.Database(index_dir)
+        # Find all shards
+        shard_names = sorted([d for d in os.listdir(shards_dir) if d.startswith("shard_")])
+        
+        if len(shard_names) == 0:
+            raise FileNotFoundError(f"No shards found in {shards_dir}")
+        
+        # Collect stats from all shards
+        total_docs = 0
+        total_length = 0.0
+        
+        for shard_name in shard_names:
+            shard_path = os.path.join(shards_dir, shard_name)
+            shard_db = xapian.Database(shard_path)
+            
+            shard_docs = shard_db.get_doccount()
+            total_docs += shard_docs
+            total_length += shard_db.get_avlength() * shard_docs
+            
+            shard_db.close()
+        
+        avg_doc_length = total_length / total_docs if total_docs > 0 else 0.0
         
         stats = {
             'index_dir': index_dir,
-            'num_documents': database.get_doccount(),
-            'last_docid': database.get_lastdocid(),
-            'avg_doc_length': database.get_avlength(),
+            'num_shards': len(shard_names),
+            'num_documents': total_docs,
+            'avg_doc_length': avg_doc_length,
         }
         
-        database.close()
         return stats
         
     except Exception as e:
@@ -633,7 +639,7 @@ Examples:
         stats = get_index_stats(index_dir=args.index_dir)
         
         print(f"\nIndex Directory: {stats['index_dir']}")
+        print(f"Number of Shards: {stats['num_shards']}")
         print(f"Total Documents: {stats['num_documents']:,}")
-        print(f"Last Document ID: {stats['last_docid']:,}")
         print(f"Average Document Length: {stats['avg_doc_length']:.1f} terms")
 

@@ -2,7 +2,7 @@
 # Script to monitor the build progress
 # Usage: ./monitor_build.sh
 
-LOG_DIR="/data/users/tarun/.cache/nanochat/search_index/logs"
+LOG_DIR="/data/users/tarun/.cache/nanochat/base_data_search_index/logs"
 
 # Find the most recent log file
 LATEST_LOG=$(ls -t ${LOG_DIR}/build_*.log 2>/dev/null | head -n 1)

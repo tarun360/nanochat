@@ -8,7 +8,7 @@ set -e  # Exit on error
 # Configuration
 WORKERS=8
 MAX_FILES="${1:-}"  # Optional: first argument = max number of files to process
-LOG_DIR="/data/users/tarun/.cache/nanochat/search_index/logs"
+LOG_DIR="/data/users/tarun/.cache/nanochat/base_data_search_index/logs"
 LOG_FILE="${LOG_DIR}/build_$(date +%Y%m%d_%H%M%S).log"
 
 # Create log directory

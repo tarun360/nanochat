@@ -29,7 +29,7 @@ else
 fi
 
 # Check progress file
-PROGRESS_FILE="/data/users/tarun/.cache/nanochat/search_index/.index_progress.json"
+PROGRESS_FILE="/data/users/tarun/.cache/nanochat/base_data_search_index/.index_progress.json"
 if [ -f "$PROGRESS_FILE" ]; then
     echo "Progress file found:"
     COMPLETED=$(python3 -c "import json; print(len(json.load(open('$PROGRESS_FILE'))['completed_files']))" 2>/dev/null || echo "0")
@@ -40,7 +40,7 @@ fi
 echo ""
 
 # Show latest log entries
-LOG_DIR="/data/users/tarun/.cache/nanochat/search_index/logs"
+LOG_DIR="/data/users/tarun/.cache/nanochat/base_data_search_index/logs"
 LATEST_LOG=$(ls -t ${LOG_DIR}/build_*.log 2>/dev/null | head -n 1)
 
 if [ -n "$LATEST_LOG" ]; then

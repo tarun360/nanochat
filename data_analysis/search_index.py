@@ -510,7 +510,6 @@ def get_index_stats(index_dir=None):
             'index_dir': index_dir,
             'num_documents': database.get_doccount(),
             'last_docid': database.get_lastdocid(),
-            'num_terms': database.get_total_term_freq(),
             'avg_doc_length': database.get_avlength(),
         }
         
@@ -636,6 +635,5 @@ Examples:
         print(f"\nIndex Directory: {stats['index_dir']}")
         print(f"Total Documents: {stats['num_documents']:,}")
         print(f"Last Document ID: {stats['last_docid']:,}")
-        print(f"Total Terms: {stats['num_terms']:,}")
         print(f"Average Document Length: {stats['avg_doc_length']:.1f} terms")
 

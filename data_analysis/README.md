@@ -1,346 +1,205 @@
 # Data Analysis Tools
 
-Tools for analyzing and searching nanochat's training data.
-
-## Quick Links
-
-- **[Search Index Usage](PARALLEL_INDEXING.md)** - How to build and search the index
-- **[Run Scripts](RUN_SCRIPTS.md)** - Background execution and monitoring
-- **[Contamination Check](CONTAMINATION_CHECK.md)** - Dataset contamination detection
-
-## Overview
-
-This package provides two main functionalities:
-
-### 1. **Full-Text Search Index** (`search_index.py`)
-Build a searchable index of all parquet files for fast fuzzy searching.
-
-**Features:**
-- ✅ Parallel indexing with 8 workers (6-8x faster)
-- ✅ Resumable indexing (survives interruptions)
-- ✅ Fuzzy search with typo tolerance
-- ✅ ~1 billion docs searchable in milliseconds
-
-**Quick Start:**
-```bash
-# Build index (8 workers, optimized)
-nohup ./data_analysis/run_build_index.sh &
-
-# Monitor progress
-./data_analysis/check_status.sh
-
-# Search
-python -m data_analysis.search_index --search "your query" -n 10
-```
-
-### 2. **Contamination Detection** (`check_contamination.py`)
-Check if evaluation datasets (GSM8K, MATH) appear in training data.
-
-**Features:**
-- ✅ Checks GSM8K (train + test)
-- ✅ Checks MATH (7 subjects × train + test)
-- ✅ Strong/moderate match categorization
-- ✅ Detailed reports in text + JSON
-
-**Quick Start:**
-```bash
-# Check all datasets
-python -m data_analysis.check_contamination --all --save-detailed
-
-# View report
-cat contamination_results/contamination_report.txt
-```
+Tools for searching nanochat's training data and checking dataset contamination.
 
 ## Installation
 
-### Prerequisites
-
-1. **System packages:**
-   ```bash
-   sudo apt-get install libxapian-dev python3-xapian
-   ```
-
-2. **Python packages:**
-   ```bash
-   uv sync --extra gpu  # or --extra cpu
-   ```
-
-3. **Symlink xapian to venv:**
-   ```bash
-   ln -s /usr/lib/python3/dist-packages/xapian .venv/lib/python3.10/site-packages/xapian
-   ```
-
-### Verify Installation
-
 ```bash
-python -c "import xapian; print(f'Xapian {xapian.major_version()}.{xapian.minor_version()}.{xapian.revision()}')"
+# System packages
+sudo apt-get install libxapian-dev python3-xapian
+
+# Python packages
+uv sync --extra gpu
+
+# Symlink xapian to venv
+ln -s /usr/lib/python3/dist-packages/xapian .venv/lib/python3.10/site-packages/xapian
 ```
 
-## Files in This Directory
+## 1. Build Search Index
 
-### Core Scripts
-- **`search_index.py`** - Main search index implementation
-- **`check_contamination.py`** - Contamination detection tool
-- **`example_search.py`** - Example usage of search API
-
-### Shell Scripts
-- **`run_build_index.sh`** - Build index in background with nohup
-- **`check_status.sh`** - Check indexing status and progress
-- **`monitor_build.sh`** - Monitor build logs in real-time
-- **`test_contamination.sh`** - Test contamination checker
-
-### Documentation
-- **`README.md`** - This file
-- **`PARALLEL_INDEXING.md`** - Detailed indexing implementation
-- **`RUN_SCRIPTS.md`** - Shell script documentation
-- **`CONTAMINATION_CHECK.md`** - Contamination checking guide
-
-### Configuration
-- **`__init__.py`** - Package initialization
-
-## Typical Workflow
-
-### Step 1: Build the Index
-
+### Quick Start
 ```bash
-cd /home/tarun/nanochat
-
-# For testing (240 files, ~2 hours)
+# Build with 240 files (~2-3 hours, for testing)
 nohup ./data_analysis/run_build_index.sh 240 &
 
-# For full index (1820 files, ~24-30 hours)
+# Or all 1820 files (~24-30 hours)
 nohup ./data_analysis/run_build_index.sh &
 
-# Check status
+# Monitor
 ./data_analysis/check_status.sh
-
-# Monitor live
 ./data_analysis/monitor_build.sh
 ```
 
-### Step 2: Search the Data
-
+### Direct Command
 ```bash
-# Search for text
-python -m data_analysis.search_index --search "machine learning" -n 10
-
-# Get index statistics
-python -m data_analysis.search_index --stats
-
-# Programmatic usage
-python -c "
-from data_analysis import search
-results = search('neural networks', max_results=5)
-for r in results:
-    print(f'{r[\"score\"]:.1%}: {r[\"text\"][:100]}...')
-"
+python -m data_analysis.search_index --build --no-sync --workers 8 --max-files 240
 ```
 
-### Step 3: Check Contamination
+### Key Options
+- `--workers N`: Parallel workers (default: 8, adjust based on CPU/memory limits)
+- `--max-files N`: Limit to first N files (for testing)
+- `--no-sync`: Faster writes (recommended)
+- `--no-resume`: Start fresh instead of resuming
+
+### Architecture
+- Uses **8 worker processes** to build separate index shards in parallel
+- Shards stored permanently in `~/.cache/nanochat/base_data_search_index/shards/`
+- Search automatically queries across all shards (distributed search)
+- No merge step = faster completion
+
+### Check System Limits (Shared Servers)
+```bash
+# CPU limit
+python -c "with open('/sys/fs/cgroup/user.slice/user-$(id -u).slice/cpu.max') as f: content = f.read().strip().split(); print(f'CPU: {int(content[0])/int(content[1]):.0f} cores')"
+
+# Memory limit
+python -c "with open('/sys/fs/cgroup/user.slice/user-$(id -u).slice/memory.high') as f: print(f'Memory soft: {int(f.read().strip())/(1024**3):.0f} GB')"
+```
+Adjust `--workers` based on limits: ~5 GB RAM per worker, stay under CPU limit.
+
+## 2. Search the Index
+
+```bash
+# CLI
+python -m data_analysis.search_index --search "machine learning" -n 10
+
+# Stats
+python -m data_analysis.search_index --stats
+
+# Programmatic
+python -c "from data_analysis import search; results = search('neural networks', max_results=5); print(results[0]['text'][:200] if results else 'No results')"
+```
+
+### Search Tips
+- Use quotes for phrases: `'"machine learning"'`
+- Fuzzy matching enabled by default (typos, stemming, partial matches)
+- Uses `AND` operator (all terms must be present)
+- Searches across all shards automatically
+
+## 3. Check Dataset Contamination
+
+Check if GSM8K and MATH evaluation datasets appear in training data.
 
 ```bash
 # Check all datasets
 python -m data_analysis.check_contamination --all --save-detailed
 
+# Check specific dataset
+python -m data_analysis.check_contamination --dataset gsm8k
+python -m data_analysis.check_contamination --dataset math --subject algebra
+
 # View report
 cat contamination_results/contamination_report.txt
-
-# Review specific matches
-cat contamination_results/detailed_matches/gsm8k_test.json
 ```
 
-## System Requirements
+### What It Checks
+- **GSM8K**: train (7,473) and test (1,319) splits
+- **MATH**: 7 subjects × train/test splits
+  - algebra, counting_and_probability, geometry, intermediate_algebra, number_theory, prealgebra, precalculus
 
-### For Building Index
+### Match Categories
+- **Strong (≥90%)**: High confidence contamination
+- **Moderate (50-89%)**: Possible contamination, review needed
+- Checks both "Question + Answer" and "Question only"
 
-**Minimum:**
-- 4 CPU cores
-- 20 GB RAM
-- 50 GB disk space
+### Output
+```
+contamination_results/
+├── contamination_report.txt       # Human-readable summary
+├── contamination_report.json      # Complete structured data
+└── detailed_matches/               # (with --save-detailed)
+    ├── gsm8k_test.json
+    ├── math_algebra_test.json
+    └── ...
+```
 
-**Recommended (your system):**
-- 16 CPU cores (cgroup limit)
-- 75 GB RAM (soft limit, 100 GB hard)
-- 100+ GB disk space
-- 8 workers
+## Files
 
-### For Searching
+### Scripts
+- `search_index.py` - Core search implementation (build, search, stats)
+- `check_contamination.py` - Contamination detection
+- `run_build_index.sh` - Build in background with nohup
+- `check_status.sh` - Check build status/progress
+- `monitor_build.sh` - Watch build logs live
+- `example_search.py` - API usage examples
 
-**Minimum:**
-- 1 CPU core
-- 2 GB RAM
-- Index must be built
-
-### For Contamination Check
-
-**Minimum:**
-- 2 CPU cores
-- 4 GB RAM
-- Index must be built
-- ~1-2 hours runtime
+### Data Storage
+```
+~/.cache/nanochat/base_data_search_index/
+├── shards/
+│   ├── shard_0/ ... shard_7/    # Xapian databases
+├── logs/                          # Build logs
+└── .index_progress.json           # Resume tracking
+```
 
 ## Performance
 
-### Indexing (8 workers, --no-sync)
-- **Speed:** ~900-1200 docs/sec
-- **Time for 1820 files:** ~24-30 hours
-- **Index size:** ~5-10 GB (for 100B tokens)
+| Task | Time | Notes |
+|------|------|-------|
+| Build 240 files | ~2-3 hours | 8 workers, --no-sync |
+| Build all 1820 files | ~24-30 hours | 8 workers, --no-sync |
+| Search query | 10-50ms | Across all shards |
+| Contamination check | 1-2 hours | ~96K searches |
 
-### Searching
-- **Speed:** ~10-50 ms per query
-- **Index:** 97M documents searchable
-- **Memory:** ~2-4 GB loaded
+## Resumability
 
-### Contamination Check
-- **Searches:** ~96K total (GSM8K + MATH)
-- **Time:** ~1-2 hours
-- **Output:** Text + JSON reports
-
-## Checking System Limits
-
-On shared servers, check your cgroup limits:
-
-```bash
-# CPU limit
-python -c "
-with open('/sys/fs/cgroup/user.slice/user-$(id -u).slice/cpu.max') as f:
-    content = f.read().strip().split()
-    print(f'CPU limit: {int(content[0])/int(content[1]):.1f} cores')
-"
-
-# Memory limit
-python -c "
-with open('/sys/fs/cgroup/user.slice/user-$(id -u).slice/memory.max') as f:
-    mem_gb = int(f.read().strip()) / (1024**3)
-    print(f'Memory hard limit: {mem_gb:.1f} GB')
-with open('/sys/fs/cgroup/user.slice/user-$(id -u).slice/memory.high') as f:
-    mem_gb = int(f.read().strip()) / (1024**3)
-    print(f'Memory soft limit: {mem_gb:.1f} GB')
-"
-```
-
-Adjust `--workers` based on your limits.
+- Progress tracked at **file level** in `.index_progress.json`
+- Saved after all workers complete
+- On resume, completed files are skipped and remaining files re-distributed
+- If interrupted during worker execution, current batch will be re-indexed (safe, just re-does work)
 
 ## Troubleshooting
 
-### Xapian Import Error
+**Import Error:**
 ```bash
-# Install system package
-sudo apt-get install python3-xapian
-
-# Create symlink
 ln -s /usr/lib/python3/dist-packages/xapian .venv/lib/python3.10/site-packages/xapian
-
-# Verify
-python -c "import xapian; print('OK')"
 ```
 
-### Index Build Stuck
+**Index empty/not found:**
 ```bash
-# Check if running
-ps aux | grep search_index
-
-# Check resources
-./data_analysis/check_status.sh
-
-# View logs
-tail -f /data/users/tarun/.cache/nanochat/search_index/logs/build_*.log
+python -m data_analysis.search_index --stats  # Should show num_shards and documents
+ls ~/.cache/nanochat/base_data_search_index/shards/  # Should list shard_0 through shard_7
 ```
 
-### Out of Memory
+**Out of memory:**
+- Edit `run_build_index.sh`: reduce `WORKERS=4`
+- Check usage: `python -c "with open('/sys/fs/cgroup/user.slice/user-$(id -u).slice/memory.current') as f: print(f'{int(f.read())/(1024**3):.1f} GB')"`
+
+**Kill orphaned workers:**
 ```bash
-# Check current usage
-python -c "
-with open('/sys/fs/cgroup/user.slice/user-$(id -u).slice/memory.current') as f:
-    print(f'{int(f.read().strip())/(1024**3):.1f} GB')
-"
-
-# If approaching limit, reduce workers
-# Edit run_build_index.sh: WORKERS=4
-```
-
-### Search Returns No Results
-```bash
-# Verify index has documents
-python -m data_analysis.search_index --stats
-
-# Try simpler query
-python -m data_analysis.search_index --search "test" -n 1
-
-# Try without fuzzy
-python -m data_analysis.search_index --search "test" --no-fuzzy -n 1
+pkill -9 -f "data_analysis.search_index --build"
 ```
 
 ## API Reference
 
-### Search Index
-
 ```python
-from data_analysis import build_index, search, get_index_stats, get_index_dir
+from data_analysis import build_index, search, get_index_stats
 
-# Build index
+# Build
 index_dir, num_docs = build_index(
-    data_dir=None,           # Default: ~/.cache/nanochat/base_data
-    index_dir=None,          # Default: ~/.cache/nanochat/search_index
-    resume=True,             # Resume from previous progress
-    no_sync=False,           # Disable fsync (faster but riskier)
-    num_workers=8,           # Parallel workers
-    max_files=None           # Limit number of files (None = all)
+    num_workers=8,
+    max_files=240,    # None for all files
+    no_sync=True,     # Faster
+    resume=True       # Resume from previous
 )
 
 # Search
 results = search(
-    query_text="machine learning",
-    index_dir=None,          # Default: uses get_index_dir()
+    "machine learning",
     max_results=10,
-    fuzzy=True,              # Enable fuzzy matching
-    data_dir=None            # Needed to retrieve text from parquet
+    fuzzy=True        # Typo tolerance, stemming
 )
+# Returns: [{'text': ..., 'score': 0.95, 'file_idx': 12, ...}, ...]
 
-# Get stats
-stats = get_index_stats(index_dir=None)
-print(f"Documents: {stats['num_documents']}")
+# Stats
+stats = get_index_stats()
+# Returns: {'num_documents': 12789760, 'num_shards': 8, ...}
 ```
 
-### Contamination Check
+## Notes
 
-Run via CLI (see `CONTAMINATION_CHECK.md` for details):
-```bash
-python -m data_analysis.check_contamination --all
-```
-
-## Data Flow
-
-```
-Parquet Files (1820 shards)
-      ↓
-  [Build Index]
-      ↓
-Search Index (~5-10 GB)
-      ↓
-  [Search Query] → Results
-      ↓
-  [Contamination Check] → Reports
-```
-
-## Next Steps
-
-1. **Build the index** - See `RUN_SCRIPTS.md`
-2. **Test search** - Try a few queries
-3. **Check contamination** - See `CONTAMINATION_CHECK.md`
-4. **Review results** - Analyze contamination reports
-
-## Support
-
-For issues or questions:
-- Check the documentation files in this directory
-- Review the code comments in `search_index.py` and `check_contamination.py`
-- Verify system requirements and cgroup limits
-
----
-
-**Key Files to Read:**
-- New user? Start with `PARALLEL_INDEXING.md`
-- Running builds? See `RUN_SCRIPTS.md`
-- Checking contamination? See `CONTAMINATION_CHECK.md`
-
+- Index stored at `~/.cache/nanochat/base_data_search_index/` (override with `NANOCHAT_BASE_DIR`)
+- Shards kept permanently (no merge step)
+- Search uses distributed querying across shards
+- Text retrieved from parquet files on demand (not stored in index)
+- All 8 workers should maintain ~400 docs/sec throughput

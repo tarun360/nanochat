@@ -133,7 +133,7 @@ def _index_worker(args):
         return (worker_id, 0, None)
 
 
-def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_workers=8):
+def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_workers=8, max_files=None):
     """
     Build a Xapian search index from all parquet files using parallel workers.
     
@@ -143,6 +143,7 @@ def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_w
         resume: If True, resumes from previous progress. If False, starts fresh.
         no_sync: If True, disables fsync for faster indexing (riskier if system crashes)
         num_workers: Number of parallel workers to use (default: 8)
+        max_files: Maximum number of parquet files to process. If None, processes all files.
     
     Returns:
         Tuple of (index_dir, total_documents_indexed)
@@ -185,6 +186,12 @@ def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_w
     
     # Get all parquet files
     parquet_paths = list_parquet_files(data_dir)
+    
+    # Limit to max_files if specified
+    if max_files is not None and max_files > 0:
+        parquet_paths = parquet_paths[:max_files]
+        logger.info(f"Limited to first {max_files} parquet files")
+    
     logger.info(f"Found {len(parquet_paths)} parquet files to index")
     
     if len(parquet_paths) == 0:
@@ -552,6 +559,8 @@ Examples:
                         help="Disable fsync for faster indexing (RISKY: data loss if crash)")
     parser.add_argument("--workers", type=int, default=8,
                         help="Number of parallel workers (default: 8)")
+    parser.add_argument("--max-files", type=int, default=None,
+                        help="Maximum number of parquet files to process (default: all files)")
     
     # Search arguments
     parser.add_argument("-n", "--max-results", type=int, default=10, 
@@ -579,7 +588,8 @@ Examples:
             index_dir=args.index_dir,
             resume=not args.no_resume,
             no_sync=args.no_sync,
-            num_workers=args.workers
+            num_workers=args.workers,
+            max_files=args.max_files
         )
         logger.info("="*80)
         logger.info(f"Index built successfully with {total_docs} documents")

@@ -36,6 +36,130 @@ def get_index_dir():
     return index_dir
 
 # -----------------------------------------------------------------------------
+# Search context class for efficient batch searching
+
+class SearchContext:
+    """
+    Context manager for efficient batch searching.
+    Opens all shards once and keeps them open for multiple queries.
+    
+    Usage:
+        with SearchContext() as ctx:
+            for query in queries:
+                results = ctx.search(query)
+    """
+    
+    def __init__(self, index_dir=None, data_dir=None):
+        self.index_dir = index_dir if index_dir else get_index_dir()
+        self.data_dir = data_dir
+        self.database = None
+        self.queryparser = None
+        self.num_docs = 0
+        
+    def __enter__(self):
+        """Open all shards and prepare for searching."""
+        shards_dir = os.path.join(self.index_dir, "shards")
+        
+        if not os.path.exists(shards_dir):
+            raise FileNotFoundError(f"Shards directory does not exist: {shards_dir}")
+        
+        # Create combined database
+        self.database = xapian.Database()
+        
+        # Find and add all shards
+        shard_names = sorted([d for d in os.listdir(shards_dir) if d.startswith("shard_")])
+        
+        if len(shard_names) == 0:
+            raise FileNotFoundError(f"No shards found in {shards_dir}")
+        
+        for shard_name in shard_names:
+            shard_path = os.path.join(shards_dir, shard_name)
+            self.database.add_database(xapian.Database(shard_path))
+        
+        # Count total documents
+        for shard_name in shard_names:
+            shard_path = os.path.join(shards_dir, shard_name)
+            shard_db = xapian.Database(shard_path)
+            self.num_docs += shard_db.get_doccount()
+            shard_db.close()
+        
+        # Create query parser
+        self.queryparser = xapian.QueryParser()
+        self.queryparser.set_stemmer(xapian.Stem("en"))
+        self.queryparser.set_database(self.database)
+        self.queryparser.set_default_op(xapian.Query.OP_AND)
+        
+        logger.debug(f"SearchContext opened: {self.num_docs:,} documents across {len(shard_names)} shards")
+        
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Close the database."""
+        if self.database:
+            self.database.close()
+        return False
+    
+    def search(self, query_text, max_results=10, fuzzy=True):
+        """
+        Search using the open database context.
+        
+        Args:
+            query_text: The text to search for
+            max_results: Maximum number of results to return
+            fuzzy: If True, enables fuzzy matching
+        
+        Returns:
+            List of result dictionaries
+        """
+        if not self.database:
+            raise RuntimeError("SearchContext not initialized. Use 'with SearchContext() as ctx:'")
+        
+        # Enable fuzzy matching flags
+        flags = xapian.QueryParser.FLAG_DEFAULT
+        if fuzzy:
+            flags |= xapian.QueryParser.FLAG_SPELLING_CORRECTION
+            flags |= xapian.QueryParser.FLAG_PARTIAL
+        
+        # Parse the query
+        query = self.queryparser.parse_query(query_text, flags)
+        
+        # Perform the search
+        enquire = xapian.Enquire(self.database)
+        enquire.set_query(query)
+        
+        # Get results
+        matches = enquire.get_mset(0, max_results)
+        
+        # Extract results
+        results = []
+        for match in matches:
+            doc = match.document
+            
+            # Extract metadata
+            file_idx = int(doc.get_value(0))
+            rg_idx = int(doc.get_value(1))
+            doc_idx = int(doc.get_value(2))
+            
+            # Retrieve text from parquet file
+            text = retrieve_text_from_parquet(file_idx, rg_idx, doc_idx, self.data_dir)
+            
+            # Get relevance score
+            score = match.percent / 100.0
+            
+            result = {
+                'file_idx': file_idx,
+                'rg_idx': rg_idx,
+                'doc_idx': doc_idx,
+                'text': text,
+                'score': score,
+                'rank': match.rank + 1
+            }
+            results.append(result)
+        
+        return results
+
+
+# -----------------------------------------------------------------------------
 # Index building functions
 
 def _index_worker(args):
@@ -303,6 +427,9 @@ def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None
     """
     Search the index for documents matching the query across all shards.
     
+    For single queries, this is convenient. For batch searching (e.g., contamination checking),
+    use SearchContext for better performance.
+    
     Args:
         query_text: The text to search for
         index_dir: Directory containing the index. If None, uses get_index_dir()
@@ -319,6 +446,26 @@ def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None
             - score: Relevance score (0-1)
             - rank: Result rank (1-based)
     """
+    logger.info(f"Searching for: '{query_text[:100]}...' (max_results={max_results})")
+    
+    # Use SearchContext for efficient searching
+    with SearchContext(index_dir=index_dir, data_dir=data_dir) as ctx:
+        logger.info(f"Index contains {ctx.num_docs:,} documents")
+        
+        search_start = time.time()
+        results = ctx.search(query_text, max_results=max_results, fuzzy=fuzzy)
+        search_time = time.time() - search_start
+        
+        logger.info(f"Found {len(results)} results (search took {search_time:.3f}s)")
+        
+        return results
+
+
+def _legacy_search_implementation(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None):
+    """
+    Legacy single-query search implementation (kept for reference).
+    Use search() or SearchContext instead.
+    """
     if index_dir is None:
         index_dir = get_index_dir()
     
@@ -330,9 +477,9 @@ def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None
             f"Please build the index first using build_index()"
         )
     
-    logger.info(f"Searching index at: {index_dir}")
-    logger.info(f"Query: '{query_text}'")
-    logger.info(f"Fuzzy matching: {fuzzy}, Max results: {max_results}")
+    logger.debug(f"Searching index at: {index_dir}")
+    logger.debug(f"Query: '{query_text}'")
+    logger.debug(f"Fuzzy matching: {fuzzy}, Max results: {max_results}")
     
     try:
         # Open all shards and combine into one database for searching
@@ -344,7 +491,7 @@ def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None
         if len(shard_names) == 0:
             raise FileNotFoundError(f"No shards found in {shards_dir}")
         
-        logger.info(f"Found {len(shard_names)} shards to search")
+        logger.debug(f"Found {len(shard_names)} shards to search")
         
         # Add each shard to the database
         total_docs = 0
@@ -355,7 +502,7 @@ def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None
             total_docs += shard_db.get_doccount()
             shard_db.close()
         
-        logger.info(f"Index contains {total_docs:,} documents across {len(shard_names)} shards")
+        logger.debug(f"Index contains {total_docs:,} documents across {len(shard_names)} shards")
         
         # Create query parser
         queryparser = xapian.QueryParser()

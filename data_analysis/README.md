@@ -81,7 +81,10 @@ python -c "from data_analysis import search; results = search('neural networks',
 Check if GSM8K and MATH evaluation datasets appear in training data.
 
 ```bash
-# Check all datasets
+# Quick test (50 examples per split, ~1 minute)
+python -m data_analysis.check_contamination --all --limit 50
+
+# Full check (~1-2 hours)
 python -m data_analysis.check_contamination --all --save-detailed
 
 # Check specific dataset
@@ -173,7 +176,7 @@ pkill -9 -f "data_analysis.search_index --build"
 ## API Reference
 
 ```python
-from data_analysis import build_index, search, get_index_stats
+from data_analysis import build_index, search, get_index_stats, SearchContext
 
 # Build
 index_dir, num_docs = build_index(
@@ -183,13 +186,18 @@ index_dir, num_docs = build_index(
     resume=True       # Resume from previous
 )
 
-# Search
+# Single search
 results = search(
     "machine learning",
     max_results=10,
     fuzzy=True        # Typo tolerance, stemming
 )
 # Returns: [{'text': ..., 'score': 0.95, 'file_idx': 12, ...}, ...]
+
+# Batch searching (much faster - opens shards once)
+with SearchContext() as ctx:
+    for query in queries:
+        results = ctx.search(query, max_results=10)
 
 # Stats
 stats = get_index_stats()

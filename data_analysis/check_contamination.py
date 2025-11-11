@@ -23,7 +23,7 @@ import time
 from datetime import datetime
 from datasets import load_dataset
 
-from data_analysis.search_index import search, get_index_stats, get_index_dir
+from data_analysis.search_index import SearchContext, get_index_stats, get_index_dir
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ def categorize_score(score):
         return 'weak'
 
 
-def check_single_example(example_idx, question, answer, index_dir=None):
+def check_single_example(example_idx, question, answer, search_ctx):
     """
     Check a single example for contamination.
     
@@ -60,7 +60,7 @@ def check_single_example(example_idx, question, answer, index_dir=None):
         example_idx: Index of the example in the dataset
         question: Question text
         answer: Answer text
-        index_dir: Path to search index
+        search_ctx: SearchContext instance (database already open)
     
     Returns:
         Dictionary with contamination results
@@ -79,7 +79,7 @@ def check_single_example(example_idx, question, answer, index_dir=None):
     try:
         # Search Question + Answer combined
         qa_query = question + " " + answer
-        qa_matches = search(qa_query, index_dir=index_dir, max_results=1, fuzzy=True)
+        qa_matches = search_ctx.search(qa_query, max_results=1, fuzzy=True)
         
         if qa_matches and len(qa_matches) > 0:
             result['qa_score'] = qa_matches[0]['score']
@@ -93,7 +93,7 @@ def check_single_example(example_idx, question, answer, index_dir=None):
             }
         
         # Search Question only
-        q_matches = search(question, index_dir=index_dir, max_results=1, fuzzy=True)
+        q_matches = search_ctx.search(question, max_results=1, fuzzy=True)
         
         if q_matches and len(q_matches) > 0:
             result['q_score'] = q_matches[0]['score']
@@ -112,7 +112,7 @@ def check_single_example(example_idx, question, answer, index_dir=None):
     return result
 
 
-def check_dataset_split(dataset_name, split_name, dataset, index_dir=None, question_key='question', answer_key='answer'):
+def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_key='question', answer_key='answer', limit=None):
     """
     Check an entire dataset split for contamination.
     
@@ -120,19 +120,22 @@ def check_dataset_split(dataset_name, split_name, dataset, index_dir=None, quest
         dataset_name: Name of the dataset (e.g., "GSM8K", "MATH/algebra")
         split_name: Split name (e.g., "train", "test")
         dataset: HuggingFace dataset object
-        index_dir: Path to search index
+        search_ctx: SearchContext instance (database already open)
         question_key: Key for question field (default: 'question')
         answer_key: Key for answer field (default: 'answer')
+        limit: Maximum number of examples to check (None = all)
     
     Returns:
         Dictionary with aggregated results
     """
-    logger.info(f"Checking {dataset_name} {split_name} split ({len(dataset)} examples)...")
+    total_to_check = min(len(dataset), limit) if limit else len(dataset)
+    logger.info(f"Checking {dataset_name} {split_name}: {total_to_check}/{len(dataset)} examples...")
     
     results = {
         'dataset_name': dataset_name,
         'split_name': split_name,
         'total_examples': len(dataset),
+        'checked_examples': total_to_check,
         'qa_strong': [],
         'qa_moderate': [],
         'q_strong': [],
@@ -142,13 +145,13 @@ def check_dataset_split(dataset_name, split_name, dataset, index_dir=None, quest
     
     start_time = time.time()
     
-    for idx in range(len(dataset)):
+    for idx in range(total_to_check):
         example = dataset[idx]
         question = example[question_key]
         answer = example[answer_key]
         
         # Check this example
-        check_result = check_single_example(idx, question, answer, index_dir)
+        check_result = check_single_example(idx, question, answer, search_ctx)
         
         # Categorize based on Q+A score
         if check_result['qa_category'] == 'strong':
@@ -166,14 +169,14 @@ def check_dataset_split(dataset_name, split_name, dataset, index_dir=None, quest
         elif check_result['q_category'] == 'moderate':
             results['q_moderate'].append(idx)
         
-        # Log progress every 100 examples
-        if (idx + 1) % 100 == 0:
+        # Log progress every 500 examples
+        if (idx + 1) % 500 == 0:
             elapsed = time.time() - start_time
             rate = (idx + 1) / elapsed if elapsed > 0 else 0
-            logger.info(f"  Checked {idx + 1}/{len(dataset)} examples ({rate:.1f} ex/sec)")
+            logger.info(f"  Progress: {idx + 1}/{total_to_check} ({rate:.1f} ex/sec)")
     
     elapsed = time.time() - start_time
-    logger.info(f"  Completed {dataset_name} {split_name}: {len(dataset)} examples in {elapsed:.1f}s")
+    logger.info(f"  Completed {dataset_name} {split_name}: {total_to_check} examples in {elapsed:.1f}s")
     
     return results
 
@@ -181,22 +184,22 @@ def check_dataset_split(dataset_name, split_name, dataset, index_dir=None, quest
 # -----------------------------------------------------------------------------
 # Dataset-specific processing functions
 
-def process_gsm8k(index_dir=None):
+def process_gsm8k(search_ctx, limit=None):
     """Process GSM8K dataset (both train and test splits)."""
     logger.info("=" * 80)
     logger.info("Processing GSM8K Dataset")
     logger.info("=" * 80)
     
     # Load dataset
-    logger.info("Loading GSM8K dataset from HuggingFace...")
+    logger.info("Loading GSM8K from HuggingFace...")
     train_dataset = load_dataset("openai/gsm8k", "main", split="train")
     test_dataset = load_dataset("openai/gsm8k", "main", split="test")
     
     logger.info(f"Loaded: {len(train_dataset)} train, {len(test_dataset)} test examples")
     
     # Check both splits
-    train_results = check_dataset_split("GSM8K", "train", train_dataset, index_dir)
-    test_results = check_dataset_split("GSM8K", "test", test_dataset, index_dir)
+    train_results = check_dataset_split("GSM8K", "train", train_dataset, search_ctx, limit=limit)
+    test_results = check_dataset_split("GSM8K", "test", test_dataset, search_ctx, limit=limit)
     
     return {
         'train': train_results,
@@ -204,23 +207,23 @@ def process_gsm8k(index_dir=None):
     }
 
 
-def process_math_subject(subject, index_dir=None):
+def process_math_subject(subject, search_ctx, limit=None):
     """Process one subject of MATH dataset (both train and test splits)."""
-    logger.info(f"Loading MATH/{subject} dataset from HuggingFace...")
+    logger.info(f"Loading MATH/{subject}...")
     
     train_dataset = load_dataset("EleutherAI/hendrycks_math", subject, split="train")
     test_dataset = load_dataset("EleutherAI/hendrycks_math", subject, split="test")
     
-    logger.info(f"Loaded MATH/{subject}: {len(train_dataset)} train, {len(test_dataset)} test examples")
+    logger.info(f"Loaded: {len(train_dataset)} train, {len(test_dataset)} test examples")
     
     # Check both splits (MATH uses 'problem' and 'solution' column names)
     train_results = check_dataset_split(
-        f"MATH/{subject}", "train", train_dataset, index_dir,
-        question_key='problem', answer_key='solution'
+        f"MATH/{subject}", "train", train_dataset, search_ctx,
+        question_key='problem', answer_key='solution', limit=limit
     )
     test_results = check_dataset_split(
-        f"MATH/{subject}", "test", test_dataset, index_dir,
-        question_key='problem', answer_key='solution'
+        f"MATH/{subject}", "test", test_dataset, search_ctx,
+        question_key='problem', answer_key='solution', limit=limit
     )
     
     return {
@@ -229,7 +232,7 @@ def process_math_subject(subject, index_dir=None):
     }
 
 
-def process_math_all(index_dir=None):
+def process_math_all(search_ctx, limit=None):
     """Process all MATH dataset subjects."""
     logger.info("=" * 80)
     logger.info("Processing MATH Dataset (all subjects)")
@@ -237,9 +240,8 @@ def process_math_all(index_dir=None):
     
     results = {}
     for subject in MATH_SUBJECTS:
-        logger.info(f"\nProcessing subject: {subject}")
-        logger.info("-" * 80)
-        subject_results = process_math_subject(subject, index_dir)
+        logger.info(f"Processing: {subject}")
+        subject_results = process_math_subject(subject, search_ctx, limit=limit)
         if subject_results:
             results[subject] = subject_results
     
@@ -393,20 +395,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Check all datasets
-  python -m data_analysis.check_contamination --all
+  # Quick test (50 examples per split)
+  python -m data_analysis.check_contamination --all --limit 50
+  
+  # Check all datasets (full)
+  python -m data_analysis.check_contamination --all --save-detailed
   
   # Check only GSM8K
   python -m data_analysis.check_contamination --dataset gsm8k
   
-  # Check only MATH dataset (all subjects)
-  python -m data_analysis.check_contamination --dataset math
-  
   # Check specific MATH subject
   python -m data_analysis.check_contamination --dataset math --subject algebra
-  
-  # Custom output location
-  python -m data_analysis.check_contamination --all --output-dir ./contamination_results
         """
     )
     
@@ -423,6 +422,8 @@ Examples:
                         help="Output directory for reports (default: ./contamination_results)")
     parser.add_argument("--save-detailed", action="store_true",
                         help="Save detailed match information to JSON files")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Limit each split to first N examples (for quick testing)")
     
     args = parser.parse_args()
     
@@ -470,21 +471,29 @@ Examples:
     
     start_time = time.time()
     
-    # Process datasets based on arguments
-    if args.all or args.dataset == 'gsm8k':
-        gsm8k_results = process_gsm8k(index_dir)
-    
-    if args.all or args.dataset == 'math':
-        if args.subject:
-            # Process only one subject
-            logger.info("=" * 80)
-            logger.info(f"Processing MATH Dataset - {args.subject}")
-            logger.info("=" * 80)
-            subject_results = process_math_subject(args.subject, index_dir)
-            math_results = {args.subject: subject_results} if subject_results else {}
-        else:
-            # Process all subjects
-            math_results = process_math_all(index_dir)
+    # Open search context once for all queries
+    logger.info("Opening search context...")
+    with SearchContext(index_dir=index_dir) as search_ctx:
+        logger.info(f"SearchContext ready: {search_ctx.num_docs:,} documents")
+        
+        if args.limit:
+            logger.info(f"Quick mode: limiting to {args.limit} examples per split")
+        
+        # Process datasets based on arguments
+        if args.all or args.dataset == 'gsm8k':
+            gsm8k_results = process_gsm8k(search_ctx, limit=args.limit)
+        
+        if args.all or args.dataset == 'math':
+            if args.subject:
+                # Process only one subject
+                logger.info("=" * 80)
+                logger.info(f"Processing MATH - {args.subject}")
+                logger.info("=" * 80)
+                subject_results = process_math_subject(args.subject, search_ctx, limit=args.limit)
+                math_results = {args.subject: subject_results} if subject_results else {}
+            else:
+                # Process all subjects
+                math_results = process_math_all(search_ctx, limit=args.limit)
     
     total_elapsed = time.time() - start_time
     

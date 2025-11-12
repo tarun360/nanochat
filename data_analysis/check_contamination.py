@@ -22,6 +22,7 @@ import json
 import time
 from datetime import datetime
 from datasets import load_dataset
+from tqdm import tqdm
 
 from data_analysis.search_index import SearchContext, get_index_stats, get_index_dir
 
@@ -145,7 +146,15 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
     
     start_time = time.time()
     
-    for idx in range(total_to_check):
+    # Use tqdm for progress bar
+    progress_bar = tqdm(
+        range(total_to_check), 
+        desc=f"{dataset_name} {split_name}",
+        unit="ex",
+        ncols=100
+    )
+    
+    for idx in progress_bar:
         example = dataset[idx]
         question = example[question_key]
         answer = example[answer_key]
@@ -169,14 +178,18 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
         elif check_result['q_category'] == 'moderate':
             results['q_moderate'].append(idx)
         
-        # Log progress every 500 examples
-        if (idx + 1) % 500 == 0:
+        # Update progress bar with stats every 10 checks
+        if (idx + 1) % 10 == 0:
             elapsed = time.time() - start_time
             rate = (idx + 1) / elapsed if elapsed > 0 else 0
-            logger.info(f"  Progress: {idx + 1}/{total_to_check} ({rate:.1f} ex/sec)")
+            progress_bar.set_postfix({
+                'QA≥90%': len(results['qa_strong']),
+                'Q≥90%': len(results['q_strong']),
+                'rate': f'{rate:.1f}/s'
+            })
     
     elapsed = time.time() - start_time
-    logger.info(f"  Completed {dataset_name} {split_name}: {total_to_check} examples in {elapsed:.1f}s")
+    logger.info(f"  Completed: {total_to_check} examples in {elapsed:.1f}s ({total_to_check/elapsed:.1f} ex/sec)")
     
     return results
 
@@ -278,14 +291,19 @@ def generate_text_report(gsm8k_results, math_results, output_file):
         for split in ['test', 'train']:
             split_data = gsm8k_results[split]
             total = split_data['total_examples']
+            checked = split_data['checked_examples']
             
-            f.write(f"{split.upper()} Split ({total:,} examples):\n")
+            if checked < total:
+                f.write(f"{split.upper()} Split (checked {checked:,} of {total:,} examples):\n")
+            else:
+                f.write(f"{split.upper()} Split ({total:,} examples):\n")
+            
             f.write(f"\n  Question + Answer:\n")
-            f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['qa_strong'])} ({len(split_data['qa_strong'])/total*100:.2f}%)\n")
-            f.write(f"    └─ Moderate matches (50-89%): {len(split_data['qa_moderate'])} ({len(split_data['qa_moderate'])/total*100:.2f}%)\n")
+            f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['qa_strong'])} ({len(split_data['qa_strong'])/checked*100:.2f}%)\n")
+            f.write(f"    └─ Moderate matches (50-89%): {len(split_data['qa_moderate'])} ({len(split_data['qa_moderate'])/checked*100:.2f}%)\n")
             f.write(f"\n  Question Only:\n")
-            f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['q_strong'])} ({len(split_data['q_strong'])/total*100:.2f}%)\n")
-            f.write(f"    └─ Moderate matches (50-89%): {len(split_data['q_moderate'])} ({len(split_data['q_moderate'])/total*100:.2f}%)\n")
+            f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['q_strong'])} ({len(split_data['q_strong'])/checked*100:.2f}%)\n")
+            f.write(f"    └─ Moderate matches (50-89%): {len(split_data['q_moderate'])} ({len(split_data['q_moderate'])/checked*100:.2f}%)\n")
             f.write("\n")
         
         # MATH Section
@@ -303,14 +321,19 @@ def generate_text_report(gsm8k_results, math_results, output_file):
             for split in ['test', 'train']:
                 split_data = math_results[subject][split]
                 total = split_data['total_examples']
+                checked = split_data['checked_examples']
                 
-                f.write(f"\n  {split.upper()} Split ({total:,} examples):\n")
+                if checked < total:
+                    f.write(f"\n  {split.upper()} Split (checked {checked:,} of {total:,}):\n")
+                else:
+                    f.write(f"\n  {split.upper()} Split ({total:,} examples):\n")
+                
                 f.write(f"    Question + Answer:\n")
-                f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['qa_strong'])} ({len(split_data['qa_strong'])/total*100:.2f}%)\n")
-                f.write(f"      └─ Moderate matches (50-89%): {len(split_data['qa_moderate'])} ({len(split_data['qa_moderate'])/total*100:.2f}%)\n")
+                f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['qa_strong'])} ({len(split_data['qa_strong'])/checked*100:.2f}%)\n")
+                f.write(f"      └─ Moderate matches (50-89%): {len(split_data['qa_moderate'])} ({len(split_data['qa_moderate'])/checked*100:.2f}%)\n")
                 f.write(f"    Question Only:\n")
-                f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['q_strong'])} ({len(split_data['q_strong'])/total*100:.2f}%)\n")
-                f.write(f"      └─ Moderate matches (50-89%): {len(split_data['q_moderate'])} ({len(split_data['q_moderate'])/total*100:.2f}%)\n")
+                f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['q_strong'])} ({len(split_data['q_strong'])/checked*100:.2f}%)\n")
+                f.write(f"      └─ Moderate matches (50-89%): {len(split_data['q_moderate'])} ({len(split_data['q_moderate'])/checked*100:.2f}%)\n")
         
         # Summary
         f.write("\n\n" + "=" * 80 + "\n")
@@ -322,7 +345,8 @@ def generate_text_report(gsm8k_results, math_results, output_file):
         # Collect GSM8K
         for split in ['test', 'train']:
             split_data = gsm8k_results[split]
-            pct = len(split_data['qa_strong']) / split_data['total_examples'] * 100
+            checked = split_data['checked_examples']
+            pct = len(split_data['qa_strong']) / checked * 100 if checked > 0 else 0.0
             contamination_list.append((f"GSM8K/{split}", pct, len(split_data['qa_strong'])))
         
         # Collect MATH
@@ -331,7 +355,8 @@ def generate_text_report(gsm8k_results, math_results, output_file):
                 continue
             for split in ['test', 'train']:
                 split_data = math_results[subject][split]
-                pct = len(split_data['qa_strong']) / split_data['total_examples'] * 100
+                checked = split_data['checked_examples']
+                pct = len(split_data['qa_strong']) / checked * 100 if checked > 0 else 0.0
                 contamination_list.append((f"MATH/{subject}/{split}", pct, len(split_data['qa_strong'])))
         
         # Sort by contamination percentage

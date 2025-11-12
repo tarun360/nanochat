@@ -248,12 +248,12 @@ def _index_worker(args):
     Worker function for parallel indexing. Creates a shard of the index.
     
     Args:
-        args: Tuple of (worker_id, file_paths, shard_dir, data_dir, no_sync)
+        args: Tuple of (worker_id, file_paths, shard_dir, data_dir, no_sync, start_file_idx)
     
     Returns:
         Tuple of (worker_id, num_docs_indexed, shard_dir)
     """
-    worker_id, file_paths, shard_dir, data_dir, no_sync = args
+    worker_id, file_paths, shard_dir, data_dir, no_sync, start_file_idx = args
     
     # Set up logging for worker
     worker_logger = logging.getLogger(f"worker_{worker_id}")
@@ -279,6 +279,9 @@ def _index_worker(args):
             filename = os.path.basename(filepath)
             file_start = time.time()
             
+            # Calculate global file index
+            global_file_idx = start_file_idx + file_idx_local
+            
             try:
                 pf = pq.ParquetFile(filepath)
                 num_row_groups = pf.num_row_groups
@@ -291,8 +294,8 @@ def _index_worker(args):
                     for doc_idx, text in enumerate(texts):
                         doc = xapian.Document()
                         
-                        # Store metadata - file_idx will be adjusted by main process during merge
-                        doc.add_value(0, str(file_idx_local))
+                        # Store metadata with global file index
+                        doc.add_value(0, str(global_file_idx))
                         doc.add_value(1, str(rg_idx))
                         doc.add_value(2, str(doc_idx))
                         
@@ -446,10 +449,14 @@ def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_w
             shard_dir = os.path.join(shards_dir, f"shard_{worker_id}")
             os.makedirs(shard_dir, exist_ok=True)
             
-            worker_args.append((worker_id, worker_files, shard_dir, data_dir, no_sync))
+            # Calculate the starting global file index for this worker
+            # Need to account for all files in parquet_paths, not just remaining_files
+            start_file_idx = parquet_paths.index(worker_files[0])
+            
+            worker_args.append((worker_id, worker_files, shard_dir, data_dir, no_sync, start_file_idx))
             file_idx += worker_file_count
             
-            logger.info(f"Worker {worker_id}: {len(worker_files)} files ({os.path.basename(worker_files[0])} to {os.path.basename(worker_files[-1])})")
+            logger.info(f"Worker {worker_id}: {len(worker_files)} files, starting at global index {start_file_idx} ({os.path.basename(worker_files[0])} to {os.path.basename(worker_files[-1])})")
         
         # Run workers in parallel
         logger.info(f"Starting {len(worker_args)} workers...")

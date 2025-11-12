@@ -13,7 +13,7 @@ def test_phrase(ctx, phrase, expected_in_result=True):
     print(f"Testing phrase: '{phrase[:80]}...'")
     print('='*80)
     
-    results = ctx.search_phrase(phrase, max_results=3, slop=10)
+    results = ctx.search_phrase(phrase, max_results=3, slop=0)
     
     if not results:
         print("❌ NO RESULTS FOUND")

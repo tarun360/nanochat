@@ -158,15 +158,17 @@ class SearchContext:
         
         return results
     
-    def search_phrase(self, phrase_text, max_results=10, window=10):
+    def search_phrase(self, phrase_text, max_results=10, slop=20):
         """
-        Search for an exact phrase using programmatic query construction.
-        Bypasses query parser to avoid issues with special characters.
+        Search for a phrase using OP_PHRASE.
+        Uses TermGenerator to process the query text the same way it was indexed,
+        ensuring consistent tokenization, stemming, and handling of special characters.
         
         Args:
-            phrase_text: The exact phrase to search for
+            phrase_text: The phrase to search for
             max_results: Maximum number of results to return
-            window: Max word distance for phrase (default: 10)
+            slop: Extra distance allowed between terms (default: 20)
+                  Window size will be len(terms) + slop
         
         Returns:
             List of result dictionaries
@@ -174,29 +176,42 @@ class SearchContext:
         if not self.database:
             raise RuntimeError("SearchContext not initialized. Use 'with SearchContext() as ctx:'")
         
-        # Generate terms from phrase using stemmer (same as indexing)
-        stemmer = xapian.Stem("english")
-        terms = []
+        # Use TermGenerator to process query text the same way as indexing
+        tg = xapian.TermGenerator()
+        tg.set_stemmer(xapian.Stem("en"))
         
-        # Split and stem each word
-        words = phrase_text.lower().split()
-        for word in words:
-            if len(word) < 2:
-                continue
-            stemmed = stemmer(word)
-            terms.append(stemmed)
+        # Create temporary document and index the query text
+        tmp = xapian.Document()
+        tg.set_document(tmp)
+        tg.index_text(phrase_text)
         
-        if not terms:
+        # Extract terms in position order
+        pos_to_terms = {}
+        for titem in tmp.termlist():
+            termname = titem.term
+            pos_iter = titem.positer
+            for pos in pos_iter:
+                pos_to_terms.setdefault(pos, []).append(termname)
+        
+        if not pos_to_terms:
             logger.warning(f"No valid terms from phrase: {phrase_text[:100]}")
             return []
         
-        # Construct phrase query
-        if len(terms) == 1:
-            query = xapian.Query(terms[0])
-        else:
-            query = xapian.Query(xapian.Query.OP_PHRASE, terms, window)
+        # Build term sequence by position order
+        sequence = []
+        for pos in sorted(pos_to_terms.keys()):
+            sequence.extend(pos_to_terms[pos])
         
-        logger.debug(f"Phrase search: {len(terms)} terms, window={window}")
+        # Calculate window: base phrase length + allowed slop
+        window = len(sequence) + slop
+        
+        # Construct OP_PHRASE query from the term sequence
+        if len(sequence) == 1:
+            query = xapian.Query(sequence[0])
+        else:
+            query = xapian.Query(xapian.Query.OP_PHRASE, sequence, window)
+        
+        logger.debug(f"Phrase query: {len(sequence)} terms, slop={slop}, window={window}")
         
         # Perform search
         enquire = xapian.Enquire(self.database)
@@ -525,124 +540,6 @@ def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None
         logger.info(f"Found {len(results)} results (search took {search_time:.3f}s)")
         
         return results
-
-
-def _legacy_search_implementation(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None):
-    """
-    Legacy single-query search implementation (kept for reference).
-    Use search() or SearchContext instead.
-    """
-    if index_dir is None:
-        index_dir = get_index_dir()
-    
-    shards_dir = os.path.join(index_dir, "shards")
-    
-    if not os.path.exists(shards_dir):
-        raise FileNotFoundError(
-            f"Shards directory does not exist: {shards_dir}. "
-            f"Please build the index first using build_index()"
-        )
-    
-    logger.debug(f"Searching index at: {index_dir}")
-    logger.debug(f"Query: '{query_text}'")
-    logger.debug(f"Fuzzy matching: {fuzzy}, Max results: {max_results}")
-    
-    try:
-        # Open all shards and combine into one database for searching
-        database = xapian.Database()
-        
-        # Find all shard directories
-        shard_names = sorted([d for d in os.listdir(shards_dir) if d.startswith("shard_")])
-        
-        if len(shard_names) == 0:
-            raise FileNotFoundError(f"No shards found in {shards_dir}")
-        
-        logger.debug(f"Found {len(shard_names)} shards to search")
-        
-        # Add each shard to the database
-        total_docs = 0
-        for shard_name in shard_names:
-            shard_path = os.path.join(shards_dir, shard_name)
-            database.add_database(xapian.Database(shard_path))
-            shard_db = xapian.Database(shard_path)
-            total_docs += shard_db.get_doccount()
-            shard_db.close()
-        
-        logger.debug(f"Index contains {total_docs:,} documents across {len(shard_names)} shards")
-        
-        # Create query parser
-        queryparser = xapian.QueryParser()
-        queryparser.set_stemmer(xapian.Stem("en"))
-        queryparser.set_database(database)
-        
-        # Set default operator to AND (require all search terms to be present)
-        queryparser.set_default_op(xapian.Query.OP_AND)
-        
-        # Enable fuzzy matching flags
-        flags = xapian.QueryParser.FLAG_DEFAULT
-        if fuzzy:
-            # FLAG_SPELLING_CORRECTION allows fuzzy matching
-            flags |= xapian.QueryParser.FLAG_SPELLING_CORRECTION
-            # FLAG_PARTIAL allows partial word matching
-            flags |= xapian.QueryParser.FLAG_PARTIAL
-        
-        # Parse the query
-        query = queryparser.parse_query(query_text, flags)
-        logger.debug(f"Parsed query: {query}")
-        
-        # Perform the search
-        enquire = xapian.Enquire(database)
-        enquire.set_query(query)
-        
-        # Get results
-        search_start = time.time()
-        matches = enquire.get_mset(0, max_results)
-        search_time = time.time() - search_start
-        
-        logger.info(f"Found {matches.get_matches_estimated()} matching documents")
-        logger.info(f"Returning top {len(matches)} results (search took {search_time:.3f}s)")
-        
-        # Extract results
-        results = []
-        for match in matches:
-            doc = match.document
-            
-            # Extract metadata
-            file_idx = int(doc.get_value(0))
-            rg_idx = int(doc.get_value(1))
-            doc_idx = int(doc.get_value(2))
-            
-            # Retrieve text from parquet file
-            if data_dir is None:
-                data_dir = DATA_DIR
-            text = retrieve_text_from_parquet(file_idx, rg_idx, doc_idx, data_dir)
-            
-            # Get relevance score (as percentage, convert to 0-1)
-            score = match.percent / 100.0
-            
-            result = {
-                'file_idx': file_idx,
-                'rg_idx': rg_idx,
-                'doc_idx': doc_idx,
-                'text': text,
-                'score': score,
-                'rank': match.rank + 1
-            }
-            results.append(result)
-            
-            logger.debug(f"  Result {match.rank + 1}: score={score:.2%}, location=({file_idx},{rg_idx},{doc_idx})")
-        
-        database.close()
-        return results
-        
-    except xapian.DatabaseOpeningError as e:
-        raise FileNotFoundError(
-            f"Failed to open index: {e}. "
-            f"Please build the index first using build_index()"
-        )
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        raise
 
 
 def retrieve_text_from_parquet(file_idx, rg_idx, doc_idx, data_dir=None):

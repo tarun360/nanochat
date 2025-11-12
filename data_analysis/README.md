@@ -80,6 +80,20 @@ python -c "from data_analysis import search; results = search('neural networks',
 
 Check if GSM8K and MATH evaluation datasets appear in training data.
 
+### Quick Start (Background Run)
+```bash
+# Run full contamination check in background
+./data_analysis/run_contamination_check.sh
+
+# Or test with limited examples
+./data_analysis/run_contamination_check.sh --limit 50
+
+# Monitor progress
+./data_analysis/check_contamination_status.sh
+./data_analysis/monitor_contamination.sh
+```
+
+### Direct Commands
 ```bash
 # Quick test (50 examples per split, ~1 minute)
 python -m data_analysis.check_contamination --all --limit 50
@@ -103,7 +117,7 @@ cat contamination_results/contamination_report.txt
 ### Match Categories
 - **Strong (≥90%)**: High confidence contamination
 - **Moderate (50-89%)**: Possible contamination, review needed
-- Checks both "Question + Answer" and "Question only"
+- Checks both "Question" and "Answer" separately using exact phrase search
 
 ### Output
 ```
@@ -116,23 +130,44 @@ contamination_results/
     └── ...
 ```
 
+### Inspect Matches
+```bash
+# View Question strong matches from GSM8K test
+python -m data_analysis.inspect_matches contamination_results/contamination_report.json \
+  --dataset gsm8k --match-type q_strong
+
+# View Answer strong matches
+python -m data_analysis.inspect_matches contamination_results/contamination_report.json \
+  --match-type a_strong --limit 5
+```
+
 ## Files
 
 ### Scripts
 - `search_index.py` - Core search implementation (build, search, stats)
 - `check_contamination.py` - Contamination detection
-- `run_build_index.sh` - Build in background with nohup
-- `check_status.sh` - Check build status/progress
-- `monitor_build.sh` - Watch build logs live
-- `example_search.py` - API usage examples
+- `inspect_matches.py` - Retrieve full documents from contamination matches
+- `run_build_index.sh` - Build index in background with nohup
+- `check_build_status.sh` - Check index build status/progress
+- `monitor_build.sh` - Watch index build logs live
+- `run_contamination_check.sh` - Run contamination check in background
+- `check_contamination_status.sh` - Check contamination check status
+- `monitor_contamination.sh` - Watch contamination check logs live
 
 ### Data Storage
 ```
 ~/.cache/nanochat/base_data_search_index/
 ├── shards/
-│   ├── shard_0/ ... shard_7/    # Xapian databases
-├── logs/                          # Build logs
-└── .index_progress.json           # Resume tracking
+│   ├── shard_0/ ... shard_7/         # Xapian databases
+├── logs/                               # Build logs
+└── .index_progress.json                # Resume tracking
+
+contamination_results/
+├── contamination_report.txt            # Text summary
+├── contamination_report.json           # Structured results
+├── detailed_matches/                   # Detailed match data
+├── logs/                               # Check logs
+└── .contamination_check.pid            # Running process PID
 ```
 
 ## Performance

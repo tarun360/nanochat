@@ -78,11 +78,9 @@ def check_single_example(example_idx, question, answer, search_ctx):
     }
     
     try:
-        # Search Question (exact phrase using programmatic query)
-        # Use larger window for longer questions
-        q_word_count = len(question.split())
-        q_window = max(q_word_count, 10)
-        q_matches = search_ctx.search_phrase(question, max_results=1, window=q_window)
+        # Search Question (exact phrase using TermGenerator-based OP_PHRASE)
+        # Use slop=10 for relatively strict phrase matching
+        q_matches = search_ctx.search_phrase(question, max_results=1, slop=10)
         
         if q_matches and len(q_matches) > 0:
             result['q_score'] = q_matches[0]['score']
@@ -95,11 +93,9 @@ def check_single_example(example_idx, question, answer, search_ctx):
                 'text_preview': q_matches[0]['text'][:200] if q_matches[0]['text'] else None
             }
         
-        # Search Answer (exact phrase using programmatic query)
-        # Use larger window for longer answers
-        a_word_count = len(answer.split())
-        a_window = max(a_word_count, 10)
-        a_matches = search_ctx.search_phrase(answer, max_results=1, window=a_window)
+        # Search Answer (exact phrase using TermGenerator-based OP_PHRASE)
+        # Use slop=10 for relatively strict phrase matching
+        a_matches = search_ctx.search_phrase(answer, max_results=1, slop=10)
         
         if a_matches and len(a_matches) > 0:
             result['a_score'] = a_matches[0]['score']

@@ -157,6 +157,72 @@ class SearchContext:
             results.append(result)
         
         return results
+    
+    def search_phrase(self, phrase_text, max_results=10, window=10):
+        """
+        Search for an exact phrase using programmatic query construction.
+        Bypasses query parser to avoid issues with special characters.
+        
+        Args:
+            phrase_text: The exact phrase to search for
+            max_results: Maximum number of results to return
+            window: Max word distance for phrase (default: 10)
+        
+        Returns:
+            List of result dictionaries
+        """
+        if not self.database:
+            raise RuntimeError("SearchContext not initialized. Use 'with SearchContext() as ctx:'")
+        
+        # Generate terms from phrase using stemmer (same as indexing)
+        stemmer = xapian.Stem("english")
+        terms = []
+        
+        # Split and stem each word
+        words = phrase_text.lower().split()
+        for word in words:
+            if len(word) < 2:
+                continue
+            stemmed = stemmer(word)
+            terms.append(stemmed)
+        
+        if not terms:
+            logger.warning(f"No valid terms from phrase: {phrase_text[:100]}")
+            return []
+        
+        # Construct phrase query
+        if len(terms) == 1:
+            query = xapian.Query(terms[0])
+        else:
+            query = xapian.Query(xapian.Query.OP_PHRASE, terms, window)
+        
+        logger.debug(f"Phrase search: {len(terms)} terms, window={window}")
+        
+        # Perform search
+        enquire = xapian.Enquire(self.database)
+        enquire.set_query(query)
+        matches = enquire.get_mset(0, max_results)
+        
+        # Extract results
+        results = []
+        for match in matches:
+            doc = match.document
+            file_idx = int(doc.get_value(0))
+            rg_idx = int(doc.get_value(1))
+            doc_idx = int(doc.get_value(2))
+            text = retrieve_text_from_parquet(file_idx, rg_idx, doc_idx, self.data_dir)
+            score = match.percent / 100.0
+            
+            results.append({
+                'file_idx': file_idx,
+                'rg_idx': rg_idx,
+                'doc_idx': doc_idx,
+                'text': text,
+                'score': score,
+                'rank': match.rank + 1
+            })
+        
+        return results
 
 
 # -----------------------------------------------------------------------------

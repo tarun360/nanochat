@@ -69,32 +69,20 @@ def check_single_example(example_idx, question, answer, search_ctx):
     result = {
         'example_idx': example_idx,
         'question_preview': question[:100],
-        'qa_score': 0.0,
-        'qa_category': 'weak',
-        'qa_match': None,
         'q_score': 0.0,
         'q_category': 'weak',
         'q_match': None,
+        'a_score': 0.0,
+        'a_category': 'weak',
+        'a_match': None,
     }
     
     try:
-        # Search Question + Answer combined
-        qa_query = question + " " + answer
-        qa_matches = search_ctx.search(qa_query, max_results=1, fuzzy=True)
-        
-        if qa_matches and len(qa_matches) > 0:
-            result['qa_score'] = qa_matches[0]['score']
-            result['qa_category'] = categorize_score(qa_matches[0]['score'])
-            result['qa_match'] = {
-                'score': qa_matches[0]['score'],
-                'file_idx': qa_matches[0]['file_idx'],
-                'rg_idx': qa_matches[0]['rg_idx'],
-                'doc_idx': qa_matches[0]['doc_idx'],
-                'text_preview': qa_matches[0]['text'][:200] if qa_matches[0]['text'] else None
-            }
-        
-        # Search Question only
-        q_matches = search_ctx.search(question, max_results=1, fuzzy=True)
+        # Search Question (exact phrase using programmatic query)
+        # Use larger window for longer questions
+        q_word_count = len(question.split())
+        q_window = max(q_word_count, 10)
+        q_matches = search_ctx.search_phrase(question, max_results=1, window=q_window)
         
         if q_matches and len(q_matches) > 0:
             result['q_score'] = q_matches[0]['score']
@@ -105,6 +93,23 @@ def check_single_example(example_idx, question, answer, search_ctx):
                 'rg_idx': q_matches[0]['rg_idx'],
                 'doc_idx': q_matches[0]['doc_idx'],
                 'text_preview': q_matches[0]['text'][:200] if q_matches[0]['text'] else None
+            }
+        
+        # Search Answer (exact phrase using programmatic query)
+        # Use larger window for longer answers
+        a_word_count = len(answer.split())
+        a_window = max(a_word_count, 10)
+        a_matches = search_ctx.search_phrase(answer, max_results=1, window=a_window)
+        
+        if a_matches and len(a_matches) > 0:
+            result['a_score'] = a_matches[0]['score']
+            result['a_category'] = categorize_score(a_matches[0]['score'])
+            result['a_match'] = {
+                'score': a_matches[0]['score'],
+                'file_idx': a_matches[0]['file_idx'],
+                'rg_idx': a_matches[0]['rg_idx'],
+                'doc_idx': a_matches[0]['doc_idx'],
+                'text_preview': a_matches[0]['text'][:200] if a_matches[0]['text'] else None
             }
     
     except Exception as e:
@@ -137,10 +142,10 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
         'split_name': split_name,
         'total_examples': len(dataset),
         'checked_examples': total_to_check,
-        'qa_strong': [],
-        'qa_moderate': [],
         'q_strong': [],
         'q_moderate': [],
+        'a_strong': [],
+        'a_moderate': [],
         'detailed_matches': []
     }
     
@@ -162,29 +167,28 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
         # Check this example
         check_result = check_single_example(idx, question, answer, search_ctx)
         
-        # Categorize based on Q+A score
-        if check_result['qa_category'] == 'strong':
-            results['qa_strong'].append(idx)
-            results['detailed_matches'].append(check_result)
-        elif check_result['qa_category'] == 'moderate':
-            results['qa_moderate'].append(idx)
-            results['detailed_matches'].append(check_result)
-        
-        # Categorize based on Q-only score
+        # Categorize based on Question score
         if check_result['q_category'] == 'strong':
             results['q_strong'].append(idx)
-            if check_result['qa_category'] == 'weak':  # Only add if not already in detailed
-                results['detailed_matches'].append(check_result)
+            results['detailed_matches'].append(check_result)
         elif check_result['q_category'] == 'moderate':
             results['q_moderate'].append(idx)
+        
+        # Categorize based on Answer score
+        if check_result['a_category'] == 'strong':
+            results['a_strong'].append(idx)
+            if check_result['q_category'] == 'weak':  # Only add if not already in detailed
+                results['detailed_matches'].append(check_result)
+        elif check_result['a_category'] == 'moderate':
+            results['a_moderate'].append(idx)
         
         # Update progress bar with stats every 10 checks
         if (idx + 1) % 10 == 0:
             elapsed = time.time() - start_time
             rate = (idx + 1) / elapsed if elapsed > 0 else 0
             progress_bar.set_postfix({
-                'QA≥90%': len(results['qa_strong']),
                 'Q≥90%': len(results['q_strong']),
+                'A≥90%': len(results['a_strong']),
                 'rate': f'{rate:.1f}/s'
             })
     
@@ -298,12 +302,12 @@ def generate_text_report(gsm8k_results, math_results, output_file):
             else:
                 f.write(f"{split.upper()} Split ({total:,} examples):\n")
             
-            f.write(f"\n  Question + Answer:\n")
-            f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['qa_strong'])} ({len(split_data['qa_strong'])/checked*100:.2f}%)\n")
-            f.write(f"    └─ Moderate matches (50-89%): {len(split_data['qa_moderate'])} ({len(split_data['qa_moderate'])/checked*100:.2f}%)\n")
-            f.write(f"\n  Question Only:\n")
+            f.write(f"\n  Question:\n")
             f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['q_strong'])} ({len(split_data['q_strong'])/checked*100:.2f}%)\n")
             f.write(f"    └─ Moderate matches (50-89%): {len(split_data['q_moderate'])} ({len(split_data['q_moderate'])/checked*100:.2f}%)\n")
+            f.write(f"\n  Answer:\n")
+            f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['a_strong'])} ({len(split_data['a_strong'])/checked*100:.2f}%)\n")
+            f.write(f"    └─ Moderate matches (50-89%): {len(split_data['a_moderate'])} ({len(split_data['a_moderate'])/checked*100:.2f}%)\n")
             f.write("\n")
         
         # MATH Section
@@ -328,16 +332,16 @@ def generate_text_report(gsm8k_results, math_results, output_file):
                 else:
                     f.write(f"\n  {split.upper()} Split ({total:,} examples):\n")
                 
-                f.write(f"    Question + Answer:\n")
-                f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['qa_strong'])} ({len(split_data['qa_strong'])/checked*100:.2f}%)\n")
-                f.write(f"      └─ Moderate matches (50-89%): {len(split_data['qa_moderate'])} ({len(split_data['qa_moderate'])/checked*100:.2f}%)\n")
-                f.write(f"    Question Only:\n")
+                f.write(f"    Question:\n")
                 f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['q_strong'])} ({len(split_data['q_strong'])/checked*100:.2f}%)\n")
                 f.write(f"      └─ Moderate matches (50-89%): {len(split_data['q_moderate'])} ({len(split_data['q_moderate'])/checked*100:.2f}%)\n")
+                f.write(f"    Answer:\n")
+                f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['a_strong'])} ({len(split_data['a_strong'])/checked*100:.2f}%)\n")
+                f.write(f"      └─ Moderate matches (50-89%): {len(split_data['a_moderate'])} ({len(split_data['a_moderate'])/checked*100:.2f}%)\n")
         
         # Summary
         f.write("\n\n" + "=" * 80 + "\n")
-        f.write("SUMMARY - Most Contaminated (by strong Q+A matches)\n")
+        f.write("SUMMARY - All Splits Ranked by Question Strong Matches\n")
         f.write("=" * 80 + "\n\n")
         
         contamination_list = []
@@ -346,8 +350,15 @@ def generate_text_report(gsm8k_results, math_results, output_file):
         for split in ['test', 'train']:
             split_data = gsm8k_results[split]
             checked = split_data['checked_examples']
-            pct = len(split_data['qa_strong']) / checked * 100 if checked > 0 else 0.0
-            contamination_list.append((f"GSM8K/{split}", pct, len(split_data['qa_strong'])))
+            q_pct = len(split_data['q_strong']) / checked * 100 if checked > 0 else 0.0
+            a_pct = len(split_data['a_strong']) / checked * 100 if checked > 0 else 0.0
+            contamination_list.append((
+                f"GSM8K/{split}", 
+                q_pct, 
+                len(split_data['q_strong']),
+                a_pct,
+                len(split_data['a_strong'])
+            ))
         
         # Collect MATH
         for subject in MATH_SUBJECTS:
@@ -356,14 +367,23 @@ def generate_text_report(gsm8k_results, math_results, output_file):
             for split in ['test', 'train']:
                 split_data = math_results[subject][split]
                 checked = split_data['checked_examples']
-                pct = len(split_data['qa_strong']) / checked * 100 if checked > 0 else 0.0
-                contamination_list.append((f"MATH/{subject}/{split}", pct, len(split_data['qa_strong'])))
+                q_pct = len(split_data['q_strong']) / checked * 100 if checked > 0 else 0.0
+                a_pct = len(split_data['a_strong']) / checked * 100 if checked > 0 else 0.0
+                contamination_list.append((
+                    f"MATH/{subject}/{split}", 
+                    q_pct, 
+                    len(split_data['q_strong']),
+                    a_pct,
+                    len(split_data['a_strong'])
+                ))
         
-        # Sort by contamination percentage
+        # Sort by question contamination percentage
         contamination_list.sort(key=lambda x: x[1], reverse=True)
         
-        for rank, (name, pct, count) in enumerate(contamination_list[:10], 1):
-            f.write(f"  {rank:2d}. {name:40s} {pct:6.2f}% ({count} matches)\n")
+        f.write(f"{'Rank':<6} {'Dataset/Split':<45} {'Q Strong':<15} {'A Strong':<15}\n")
+        f.write("-" * 80 + "\n")
+        for rank, (name, q_pct, q_count, a_pct, a_count) in enumerate(contamination_list, 1):
+            f.write(f"{rank:<6} {name:<45} {q_pct:5.2f}% ({q_count:<3}) {a_pct:5.2f}% ({a_count:<3})\n")
     
     logger.info(f"Text report saved to: {output_file}")
 

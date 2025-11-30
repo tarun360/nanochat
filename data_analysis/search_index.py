@@ -181,6 +181,172 @@ class SearchContext:
             })
         
         return results
+    
+    def search_phrase_ngrams(self, phrase_text, ngram_size=10, num_ngrams=3, max_results=10, slop=5):
+        """
+        Search for a phrase using n-gram matching.
+        
+        Extracts multiple n-grams (e.g., start, middle, end) from the phrase after
+        TermGenerator processing, then searches for each. Returns the maximum score
+        across all n-grams and details about which n-grams matched.
+        
+        This is useful for detecting partial contamination when the full phrase
+        might not be present in the training data.
+        
+        Args:
+            phrase_text: The phrase to search for (can contain special characters)
+            ngram_size: Number of terms per n-gram (default: 10)
+            num_ngrams: Number of n-grams to extract (default: 3)
+            max_results: Maximum number of results to return per n-gram
+            slop: Extra distance allowed between terms in phrase matching (default: 5)
+        
+        Returns:
+            Dictionary with keys:
+                - max_score: Maximum score across all n-grams (0-1)
+                - best_match: Best result dictionary (same format as search_phrase)
+                - ngram_details: List of n-gram match info with keys:
+                    - position: 'start', 'middle', or 'end'
+                    - matched: Boolean indicating if any match found
+                    - score: Maximum score for this n-gram (0 if no match)
+                    - match_count: Number of matches found
+        """
+        if not self.database:
+            raise RuntimeError("SearchContext not initialized. Use 'with SearchContext() as ctx:'")
+        
+        # Use TermGenerator to process query text the same way as indexing
+        tg = xapian.TermGenerator()
+        tg.set_stemmer(xapian.Stem("en"))
+        
+        # Create temporary document and index the query text
+        tmp = xapian.Document()
+        tg.set_document(tmp)
+        tg.index_text(phrase_text)
+        
+        # Extract terms in position order
+        pos_to_terms = {}
+        for titem in tmp.termlist():
+            termname = titem.term
+            pos_iter = titem.positer
+            for pos in pos_iter:
+                pos_to_terms.setdefault(pos, []).append(termname)
+        
+        if not pos_to_terms:
+            logger.warning(f"No valid terms from phrase: {phrase_text[:100]}")
+            return {
+                'max_score': 0.0,
+                'best_match': None,
+                'ngram_details': []
+            }
+        
+        # Build term sequence by position order
+        sequence = []
+        for pos in sorted(pos_to_terms.keys()):
+            sequence.extend(pos_to_terms[pos])
+        
+        # Check if phrase is too short - fallback to full phrase search
+        if len(sequence) <= ngram_size:
+            logger.debug(f"Phrase too short ({len(sequence)} terms), using full phrase search")
+            results = self.search_phrase(phrase_text, max_results=max_results, slop=slop)
+            return {
+                'max_score': results[0]['score'] if results else 0.0,
+                'best_match': results[0] if results else None,
+                'ngram_details': [{
+                    'position': 'full',
+                    'matched': len(results) > 0,
+                    'score': results[0]['score'] if results else 0.0,
+                    'match_count': len(results)
+                }]
+            }
+        
+        # Extract n-grams from term sequence
+        ngrams = []
+        total_terms = len(sequence)
+        
+        # Extract n-grams based on num_ngrams parameter
+        if num_ngrams >= 1:
+            # Start n-gram
+            ngrams.append(('start', sequence[0:ngram_size]))
+        
+        if num_ngrams >= 3:
+            # Middle n-gram (only when extracting 3 or more n-grams)
+            mid_start = total_terms // 2 - ngram_size // 2
+            mid_start = max(0, min(mid_start, total_terms - ngram_size))
+            ngrams.append(('middle', sequence[mid_start:mid_start + ngram_size]))
+        
+        if num_ngrams >= 2:
+            # End n-gram (for 2 or more n-grams)
+            ngrams.append(('end', sequence[-ngram_size:]))
+        
+        # Search each n-gram
+        ngram_details = []
+        best_score = 0.0
+        best_match = None
+        
+        # Reuse Enquire object for all n-gram searches
+        enquire = xapian.Enquire(self.database)
+        
+        for position, term_subsequence in ngrams:
+            # Construct OP_PHRASE query from term subsequence
+            if len(term_subsequence) == 1:
+                query = xapian.Query(term_subsequence[0])
+            else:
+                window = len(term_subsequence) + slop
+                query = xapian.Query(xapian.Query.OP_PHRASE, term_subsequence, window)
+            
+            # Perform search (reusing Enquire object)
+            enquire.set_query(query)
+            matches = enquire.get_mset(0, max_results)
+            
+            match_count = matches.size()
+            max_ngram_score = 0.0
+            
+            # Get the first (best) match for this n-gram if any exist
+            if match_count > 0:
+                match = next(iter(matches))
+                doc = match.document
+                score = match.percent / 100.0
+                max_ngram_score = score
+                
+                # Extract metadata (don't retrieve text yet - only for best match)
+                file_idx = int(doc.get_value(0))
+                rg_idx = int(doc.get_value(1))
+                doc_idx = int(doc.get_value(2))
+                
+                # Store match info without text (lazy retrieval)
+                ngram_match_info = {
+                    'file_idx': file_idx,
+                    'rg_idx': rg_idx,
+                    'doc_idx': doc_idx,
+                    'score': score,
+                    'rank': match.rank + 1
+                }
+                
+                # Update overall best match (only if this is better)
+                if score > best_score:
+                    best_score = score
+                    # Only retrieve text for the best match
+                    text = retrieve_text_from_parquet(file_idx, rg_idx, doc_idx, self.data_dir)
+                    best_match = {
+                        'file_idx': file_idx,
+                        'rg_idx': rg_idx,
+                        'doc_idx': doc_idx,
+                        'text': text,
+                        'score': score,
+                        'rank': match.rank + 1
+                    }
+            
+            ngram_details.append({
+                'position': position,
+                'matched': match_count > 0,
+                'score': max_ngram_score,
+                'match_count': match_count
+            })
+        
+        return {
+            'max_score': best_score,
+            'best_match': best_match,
+            'ngram_details': ngram_details
+        }
 
 
 # -----------------------------------------------------------------------------

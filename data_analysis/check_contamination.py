@@ -53,7 +53,7 @@ def categorize_score(score):
         return 'weak'
 
 
-def check_single_example(example_idx, question, answer, search_ctx):
+def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=False, ngram_size=10, num_ngrams=3):
     """
     Check a single example for contamination.
     
@@ -62,6 +62,9 @@ def check_single_example(example_idx, question, answer, search_ctx):
         question: Question text
         answer: Answer text
         search_ctx: SearchContext instance (database already open)
+        use_ngrams: If True, use n-gram based search instead of full phrase
+        ngram_size: Number of terms per n-gram (only used if use_ngrams=True)
+        num_ngrams: Number of n-grams to extract (only used if use_ngrams=True)
     
     Returns:
         Dictionary with contamination results
@@ -78,35 +81,82 @@ def check_single_example(example_idx, question, answer, search_ctx):
     }
     
     try:
-        # Search Question (exact phrase using TermGenerator-based OP_PHRASE)
-        # Use slop=10 for relatively strict phrase matching
-        q_matches = search_ctx.search_phrase(question, max_results=1, slop=10)
-        
-        if q_matches and len(q_matches) > 0:
-            result['q_score'] = q_matches[0]['score']
-            result['q_category'] = categorize_score(q_matches[0]['score'])
-            result['q_match'] = {
-                'score': q_matches[0]['score'],
-                'file_idx': q_matches[0]['file_idx'],
-                'rg_idx': q_matches[0]['rg_idx'],
-                'doc_idx': q_matches[0]['doc_idx'],
-                'text_preview': q_matches[0]['text'][:200] if q_matches[0]['text'] else None
-            }
-        
-        # Search Answer (exact phrase using TermGenerator-based OP_PHRASE)
-        # Use slop=10 for relatively strict phrase matching
-        a_matches = search_ctx.search_phrase(answer, max_results=1, slop=10)
-        
-        if a_matches and len(a_matches) > 0:
-            result['a_score'] = a_matches[0]['score']
-            result['a_category'] = categorize_score(a_matches[0]['score'])
-            result['a_match'] = {
-                'score': a_matches[0]['score'],
-                'file_idx': a_matches[0]['file_idx'],
-                'rg_idx': a_matches[0]['rg_idx'],
-                'doc_idx': a_matches[0]['doc_idx'],
-                'text_preview': a_matches[0]['text'][:200] if a_matches[0]['text'] else None
-            }
+        if use_ngrams:
+            # Use n-gram based search
+            # Search Question
+            q_ngram_result = search_ctx.search_phrase_ngrams(
+                question, 
+                ngram_size=ngram_size,
+                num_ngrams=num_ngrams,
+                max_results=1,
+                slop=5
+            )
+            
+            if q_ngram_result['max_score'] > 0:
+                result['q_score'] = q_ngram_result['max_score']
+                result['q_category'] = categorize_score(q_ngram_result['max_score'])
+                if q_ngram_result['best_match']:
+                    result['q_match'] = {
+                        'score': q_ngram_result['best_match']['score'],
+                        'file_idx': q_ngram_result['best_match']['file_idx'],
+                        'rg_idx': q_ngram_result['best_match']['rg_idx'],
+                        'doc_idx': q_ngram_result['best_match']['doc_idx'],
+                        'text_preview': q_ngram_result['best_match']['text'][:200] if q_ngram_result['best_match']['text'] else None,
+                        'ngram_details': q_ngram_result['ngram_details']
+                    }
+            
+            # Search Answer
+            a_ngram_result = search_ctx.search_phrase_ngrams(
+                answer,
+                ngram_size=ngram_size,
+                num_ngrams=num_ngrams,
+                max_results=1,
+                slop=5
+            )
+            
+            if a_ngram_result['max_score'] > 0:
+                result['a_score'] = a_ngram_result['max_score']
+                result['a_category'] = categorize_score(a_ngram_result['max_score'])
+                if a_ngram_result['best_match']:
+                    result['a_match'] = {
+                        'score': a_ngram_result['best_match']['score'],
+                        'file_idx': a_ngram_result['best_match']['file_idx'],
+                        'rg_idx': a_ngram_result['best_match']['rg_idx'],
+                        'doc_idx': a_ngram_result['best_match']['doc_idx'],
+                        'text_preview': a_ngram_result['best_match']['text'][:200] if a_ngram_result['best_match']['text'] else None,
+                        'ngram_details': a_ngram_result['ngram_details']
+                    }
+        else:
+            # Use full phrase search (original method)
+            # Search Question (exact phrase using TermGenerator-based OP_PHRASE)
+            # Use slop=10 for relatively strict phrase matching
+            q_matches = search_ctx.search_phrase(question, max_results=1, slop=10)
+            
+            if q_matches and len(q_matches) > 0:
+                result['q_score'] = q_matches[0]['score']
+                result['q_category'] = categorize_score(q_matches[0]['score'])
+                result['q_match'] = {
+                    'score': q_matches[0]['score'],
+                    'file_idx': q_matches[0]['file_idx'],
+                    'rg_idx': q_matches[0]['rg_idx'],
+                    'doc_idx': q_matches[0]['doc_idx'],
+                    'text_preview': q_matches[0]['text'][:200] if q_matches[0]['text'] else None
+                }
+            
+            # Search Answer (exact phrase using TermGenerator-based OP_PHRASE)
+            # Use slop=10 for relatively strict phrase matching
+            a_matches = search_ctx.search_phrase(answer, max_results=1, slop=10)
+            
+            if a_matches and len(a_matches) > 0:
+                result['a_score'] = a_matches[0]['score']
+                result['a_category'] = categorize_score(a_matches[0]['score'])
+                result['a_match'] = {
+                    'score': a_matches[0]['score'],
+                    'file_idx': a_matches[0]['file_idx'],
+                    'rg_idx': a_matches[0]['rg_idx'],
+                    'doc_idx': a_matches[0]['doc_idx'],
+                    'text_preview': a_matches[0]['text'][:200] if a_matches[0]['text'] else None
+                }
     
     except Exception as e:
         logger.error(f"Error checking example {example_idx}: {e}")
@@ -114,7 +164,7 @@ def check_single_example(example_idx, question, answer, search_ctx):
     return result
 
 
-def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_key='question', answer_key='answer', limit=None):
+def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_key='question', answer_key='answer', limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3):
     """
     Check an entire dataset split for contamination.
     
@@ -161,7 +211,7 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
         answer = example[answer_key]
         
         # Check this example
-        check_result = check_single_example(idx, question, answer, search_ctx)
+        check_result = check_single_example(idx, question, answer, search_ctx, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams)
         
         # Categorize based on Question score
         if check_result['q_category'] == 'strong':
@@ -197,7 +247,7 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
 # -----------------------------------------------------------------------------
 # Dataset-specific processing functions
 
-def process_gsm8k(search_ctx, limit=None):
+def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3):
     """Process GSM8K dataset (both train and test splits)."""
     logger.info("=" * 80)
     logger.info("Processing GSM8K Dataset")
@@ -211,8 +261,8 @@ def process_gsm8k(search_ctx, limit=None):
     logger.info(f"Loaded: {len(train_dataset)} train, {len(test_dataset)} test examples")
     
     # Check both splits
-    train_results = check_dataset_split("GSM8K", "train", train_dataset, search_ctx, limit=limit)
-    test_results = check_dataset_split("GSM8K", "test", test_dataset, search_ctx, limit=limit)
+    train_results = check_dataset_split("GSM8K", "train", train_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams)
+    test_results = check_dataset_split("GSM8K", "test", test_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams)
     
     return {
         'train': train_results,
@@ -220,7 +270,7 @@ def process_gsm8k(search_ctx, limit=None):
     }
 
 
-def process_math_subject(subject, search_ctx, limit=None):
+def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3):
     """Process one subject of MATH dataset (both train and test splits)."""
     logger.info(f"Loading MATH/{subject}...")
     
@@ -232,11 +282,13 @@ def process_math_subject(subject, search_ctx, limit=None):
     # Check both splits (MATH uses 'problem' and 'solution' column names)
     train_results = check_dataset_split(
         f"MATH/{subject}", "train", train_dataset, search_ctx,
-        question_key='problem', answer_key='solution', limit=limit
+        question_key='problem', answer_key='solution', limit=limit,
+        use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams
     )
     test_results = check_dataset_split(
         f"MATH/{subject}", "test", test_dataset, search_ctx,
-        question_key='problem', answer_key='solution', limit=limit
+        question_key='problem', answer_key='solution', limit=limit,
+        use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams
     )
     
     return {
@@ -245,7 +297,7 @@ def process_math_subject(subject, search_ctx, limit=None):
     }
 
 
-def process_math_all(search_ctx, limit=None):
+def process_math_all(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3):
     """Process all MATH dataset subjects."""
     logger.info("=" * 80)
     logger.info("Processing MATH Dataset (all subjects)")
@@ -254,7 +306,7 @@ def process_math_all(search_ctx, limit=None):
     results = {}
     for subject in MATH_SUBJECTS:
         logger.info(f"Processing: {subject}")
-        subject_results = process_math_subject(subject, search_ctx, limit=limit)
+        subject_results = process_math_subject(subject, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams)
         if subject_results:
             results[subject] = subject_results
     
@@ -447,6 +499,9 @@ Examples:
   
   # Check specific MATH subject
   python -m data_analysis.check_contamination --dataset math --subject algebra
+  
+  # Use n-gram based search (for partial contamination detection)
+  python -m data_analysis.check_contamination --all --use-ngrams --ngram-size 10 --num-ngrams 3
         """
     )
     
@@ -465,6 +520,14 @@ Examples:
                         help="Save detailed match information to JSON files")
     parser.add_argument("--limit", type=int, default=None,
                         help="Limit each split to first N examples (for quick testing)")
+    
+    # N-gram search options
+    parser.add_argument("--use-ngrams", action="store_true",
+                        help="Use n-gram based search instead of full phrase search")
+    parser.add_argument("--ngram-size", type=int, default=10,
+                        help="Number of terms per n-gram (default: 10)")
+    parser.add_argument("--num-ngrams", type=int, default=3,
+                        help="Number of n-grams to extract (default: 3)")
     
     args = parser.parse_args()
     
@@ -504,7 +567,10 @@ Examples:
         'thresholds': {
             'strong': 0.90,
             'moderate': 0.50
-        }
+        },
+        'use_ngrams': args.use_ngrams,
+        'ngram_size': args.ngram_size,
+        'num_ngrams': args.num_ngrams
     }
     
     gsm8k_results = None
@@ -520,9 +586,18 @@ Examples:
         if args.limit:
             logger.info(f"Quick mode: limiting to {args.limit} examples per split")
         
+        if args.use_ngrams:
+            logger.info(f"N-gram mode enabled: {args.num_ngrams} n-grams of {args.ngram_size} terms each")
+        
         # Process datasets based on arguments
         if args.all or args.dataset == 'gsm8k':
-            gsm8k_results = process_gsm8k(search_ctx, limit=args.limit)
+            gsm8k_results = process_gsm8k(
+                search_ctx, 
+                limit=args.limit,
+                use_ngrams=args.use_ngrams,
+                ngram_size=args.ngram_size,
+                num_ngrams=args.num_ngrams
+            )
         
         if args.all or args.dataset == 'math':
             if args.subject:
@@ -530,11 +605,24 @@ Examples:
                 logger.info("=" * 80)
                 logger.info(f"Processing MATH - {args.subject}")
                 logger.info("=" * 80)
-                subject_results = process_math_subject(args.subject, search_ctx, limit=args.limit)
+                subject_results = process_math_subject(
+                    args.subject, 
+                    search_ctx, 
+                    limit=args.limit,
+                    use_ngrams=args.use_ngrams,
+                    ngram_size=args.ngram_size,
+                    num_ngrams=args.num_ngrams
+                )
                 math_results = {args.subject: subject_results} if subject_results else {}
             else:
                 # Process all subjects
-                math_results = process_math_all(search_ctx, limit=args.limit)
+                math_results = process_math_all(
+                    search_ctx, 
+                    limit=args.limit,
+                    use_ngrams=args.use_ngrams,
+                    ngram_size=args.ngram_size,
+                    num_ngrams=args.num_ngrams
+                )
     
     total_elapsed = time.time() - start_time
     

@@ -34,6 +34,14 @@ def print_match_details(match_info, dataset_name, split_name, example_idx, data_
         q_match = match_info['q_match']
         print(f"\nQuestion Match Score: {q_match['score']:.1%}")
         print(f"Location: file={q_match['file_idx']}, rg={q_match['rg_idx']}, doc={q_match['doc_idx']}")
+        
+        # Display n-gram details if present
+        if 'ngram_details' in q_match:
+            print(f"\nN-gram Match Details:")
+            for ngram in q_match['ngram_details']:
+                status = "✓ MATCHED" if ngram['matched'] else "✗ No match"
+                print(f"  {ngram['position'].upper():8} - {status:12} - Score: {ngram['score']:.1%} ({ngram['match_count']} matches)")
+        
         print(f"\nRetrieving full document from parquet...")
         
         full_text = retrieve_text_from_parquet(
@@ -54,10 +62,20 @@ def print_match_details(match_info, dataset_name, split_name, example_idx, data_
     
     # Display Answer match if exists and different from Question match
     if match_info['a_match'] and (not match_info['q_match'] or 
-                                   match_info['a_match']['file_idx'] != match_info.get('q_match', {}).get('file_idx')):
+                                   match_info['a_match']['file_idx'] != match_info.get('q_match', {}).get('file_idx') or
+                                   match_info['a_match']['rg_idx'] != match_info.get('q_match', {}).get('rg_idx') or
+                                   match_info['a_match']['doc_idx'] != match_info.get('q_match', {}).get('doc_idx')):
         a_match = match_info['a_match']
         print(f"\nAnswer Match Score: {a_match['score']:.1%}")
         print(f"Location: file={a_match['file_idx']}, rg={a_match['rg_idx']}, doc={a_match['doc_idx']}")
+        
+        # Display n-gram details if present
+        if 'ngram_details' in a_match:
+            print(f"\nN-gram Match Details:")
+            for ngram in a_match['ngram_details']:
+                status = "✓ MATCHED" if ngram['matched'] else "✗ No match"
+                print(f"  {ngram['position'].upper():8} - {status:12} - Score: {ngram['score']:.1%} ({ngram['match_count']} matches)")
+        
         print(f"\nRetrieving full document from parquet...")
         
         full_text = retrieve_text_from_parquet(

@@ -221,18 +221,15 @@ index_dir, num_docs = build_index(
     resume=True       # Resume from previous
 )
 
-# Single search
-results = search(
-    "machine learning",
-    max_results=10,
-    fuzzy=True        # Typo tolerance, stemming
-)
+# Phrase search (recommended - handles special characters robustly)
+with SearchContext() as ctx:
+    results = ctx.search_phrase("machine learning", max_results=10, slop=20)
 # Returns: [{'text': ..., 'score': 0.95, 'file_idx': 12, ...}, ...]
 
 # Batch searching (much faster - opens shards once)
 with SearchContext() as ctx:
     for query in queries:
-        results = ctx.search(query, max_results=10)
+        results = ctx.search_phrase(query, max_results=10, slop=20)
 
 # Stats
 stats = get_index_stats()

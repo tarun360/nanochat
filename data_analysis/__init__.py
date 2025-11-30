@@ -6,7 +6,7 @@ This package provides tools for analyzing and searching the training data:
 - check_contamination: Dataset contamination detection for GSM8K and MATH datasets
 """
 
-from .search_index import build_index, search, get_index_stats, get_index_dir, SearchContext
+from .search_index import build_index, get_index_stats, get_index_dir, SearchContext
 
-__all__ = ['build_index', 'search', 'get_index_stats', 'get_index_dir', 'SearchContext']
+__all__ = ['build_index', 'get_index_stats', 'get_index_dir', 'SearchContext']
 

@@ -46,14 +46,13 @@ class SearchContext:
     Usage:
         with SearchContext() as ctx:
             for query in queries:
-                results = ctx.search(query)
+                results = ctx.search_phrase(query, max_results=10)
     """
     
     def __init__(self, index_dir=None, data_dir=None):
         self.index_dir = index_dir if index_dir else get_index_dir()
         self.data_dir = data_dir
         self.database = None
-        self.queryparser = None
         self.num_docs = 0
         
     def __enter__(self):
@@ -83,12 +82,6 @@ class SearchContext:
             self.num_docs += shard_db.get_doccount()
             shard_db.close()
         
-        # Create query parser
-        self.queryparser = xapian.QueryParser()
-        self.queryparser.set_stemmer(xapian.Stem("en"))
-        self.queryparser.set_database(self.database)
-        self.queryparser.set_default_op(xapian.Query.OP_AND)
-        
         logger.debug(f"SearchContext opened: {self.num_docs:,} documents across {len(shard_names)} shards")
         
         return self
@@ -99,79 +92,29 @@ class SearchContext:
             self.database.close()
         return False
     
-    def search(self, query_text, max_results=10, fuzzy=True):
-        """
-        Search using the open database context.
-        
-        Args:
-            query_text: The text to search for
-            max_results: Maximum number of results to return
-            fuzzy: If True, enables fuzzy matching
-        
-        Returns:
-            List of result dictionaries
-        """
-        if not self.database:
-            raise RuntimeError("SearchContext not initialized. Use 'with SearchContext() as ctx:'")
-        
-        # Enable fuzzy matching flags
-        flags = xapian.QueryParser.FLAG_DEFAULT
-        if fuzzy:
-            flags |= xapian.QueryParser.FLAG_SPELLING_CORRECTION
-            flags |= xapian.QueryParser.FLAG_PARTIAL
-        
-        # Parse the query
-        query = self.queryparser.parse_query(query_text, flags)
-        
-        # Perform the search
-        enquire = xapian.Enquire(self.database)
-        enquire.set_query(query)
-        
-        # Get results
-        matches = enquire.get_mset(0, max_results)
-        
-        # Extract results
-        results = []
-        for match in matches:
-            doc = match.document
-            
-            # Extract metadata
-            file_idx = int(doc.get_value(0))
-            rg_idx = int(doc.get_value(1))
-            doc_idx = int(doc.get_value(2))
-            
-            # Retrieve text from parquet file
-            text = retrieve_text_from_parquet(file_idx, rg_idx, doc_idx, self.data_dir)
-            
-            # Get relevance score
-            score = match.percent / 100.0
-            
-            result = {
-                'file_idx': file_idx,
-                'rg_idx': rg_idx,
-                'doc_idx': doc_idx,
-                'text': text,
-                'score': score,
-                'rank': match.rank + 1
-            }
-            results.append(result)
-        
-        return results
-    
     def search_phrase(self, phrase_text, max_results=10, slop=20):
         """
         Search for a phrase using OP_PHRASE.
-        Uses TermGenerator to process the query text the same way it was indexed,
-        ensuring consistent tokenization, stemming, and handling of special characters.
+        
+        This is the preferred search method because it robustly handles special characters,
+        punctuation, and mathematical notation (e.g., "$(8,-8)$", "3^x") that would break
+        QueryParser-based search. It uses TermGenerator to process the query text the same
+        way it was indexed, ensuring consistent tokenization, stemming, and term extraction.
         
         Args:
-            phrase_text: The phrase to search for
+            phrase_text: The phrase to search for (can contain special characters)
             max_results: Maximum number of results to return
             slop: Extra distance allowed between terms (default: 20)
                   Window size will be len(terms) + slop
         
         Returns:
-            List of result dictionaries
+            List of result dictionaries with keys:
+                - file_idx: Index of the parquet file
+                - rg_idx: Row group index within the file
+                - doc_idx: Document index within the row group
+                - text: The document text
+                - score: Relevance score (0-1)
+                - rank: Result rank (1-based)
         """
         if not self.database:
             raise RuntimeError("SearchContext not initialized. Use 'with SearchContext() as ctx:'")
@@ -511,44 +454,6 @@ def build_index(data_dir=None, index_dir=None, resume=True, no_sync=False, num_w
         raise
 
 
-def search(query_text, index_dir=None, max_results=10, fuzzy=True, data_dir=None):
-    """
-    Search the index for documents matching the query across all shards.
-    
-    For single queries, this is convenient. For batch searching (e.g., contamination checking),
-    use SearchContext for better performance.
-    
-    Args:
-        query_text: The text to search for
-        index_dir: Directory containing the index. If None, uses get_index_dir()
-        max_results: Maximum number of results to return
-        fuzzy: If True, enables fuzzy matching (typo tolerance)
-        data_dir: Directory containing parquet files (needed to retrieve text)
-    
-    Returns:
-        List of dictionaries with keys:
-            - file_idx: Index of the parquet file
-            - rg_idx: Row group index within the file
-            - doc_idx: Document index within the row group
-            - text: The document text
-            - score: Relevance score (0-1)
-            - rank: Result rank (1-based)
-    """
-    logger.info(f"Searching for: '{query_text[:100]}...' (max_results={max_results})")
-    
-    # Use SearchContext for efficient searching
-    with SearchContext(index_dir=index_dir, data_dir=data_dir) as ctx:
-        logger.info(f"Index contains {ctx.num_docs:,} documents")
-        
-        search_start = time.time()
-        results = ctx.search(query_text, max_results=max_results, fuzzy=fuzzy)
-        search_time = time.time() - search_start
-        
-        logger.info(f"Found {len(results)} results (search took {search_time:.3f}s)")
-        
-        return results
-
-
 def retrieve_text_from_parquet(file_idx, rg_idx, doc_idx, data_dir=None):
     """
     Retrieve the original text from a parquet file given its location.
@@ -687,8 +592,8 @@ Examples:
     # Search arguments
     parser.add_argument("-n", "--max-results", type=int, default=10, 
                         help="Maximum number of search results (default: 10)")
-    parser.add_argument("--no-fuzzy", action="store_true", 
-                        help="Disable fuzzy matching (exact matches only)")
+    parser.add_argument("--slop", type=int, default=20,
+                        help="Phrase matching flexibility - extra distance allowed between terms (default: 20)")
     parser.add_argument("--preview-length", type=int, default=200,
                         help="Length of text preview in results (default: 200)")
     
@@ -721,13 +626,16 @@ Examples:
         logger.info("="*80)
         logger.info("Searching index")
         logger.info("="*80)
-        results = search(
-            query_text=args.search,
-            index_dir=args.index_dir,
-            max_results=args.max_results,
-            fuzzy=not args.no_fuzzy,
-            data_dir=args.data_dir
-        )
+        
+        # Use SearchContext with search_phrase for robust phrase matching
+        with SearchContext(index_dir=args.index_dir, data_dir=args.data_dir) as ctx:
+            logger.info(f"Index contains {ctx.num_docs:,} documents")
+            
+            results = ctx.search_phrase(
+                phrase_text=args.search,
+                max_results=args.max_results,
+                slop=args.slop
+            )
         
         logger.info("="*80)
         logger.info(f"Search Results ({len(results)} matches)")
@@ -747,7 +655,7 @@ Examples:
             print("-" * 80)
         
         if len(results) == 0:
-            logger.warning("No results found. Try different search terms or enable fuzzy matching.")
+            logger.warning("No results found. Try different search terms.")
     
     elif args.stats:
         logger.info("="*80)

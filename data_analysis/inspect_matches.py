@@ -12,11 +12,39 @@ Usage:
 
 import json
 import argparse
+from datasets import load_dataset
 from data_analysis.search_index import retrieve_text_from_parquet
 
 def print_separator(char='=', length=80):
     """Print a separator line."""
     print(char * length)
+
+# Cache for loaded datasets to avoid reloading
+_dataset_cache = {}
+
+def load_dataset_example(dataset_name, split_name, example_idx):
+    """Load a specific example from a dataset (with caching)."""
+    cache_key = (dataset_name, split_name)
+    
+    # Check cache first
+    if cache_key not in _dataset_cache:
+        if dataset_name == 'GSM8K':
+            _dataset_cache[cache_key] = load_dataset("openai/gsm8k", "main", split=split_name)
+        elif dataset_name.startswith('MATH/'):
+            subject = dataset_name.split('/')[1]
+            _dataset_cache[cache_key] = load_dataset("EleutherAI/hendrycks_math", subject, split=split_name)
+        else:
+            raise ValueError(f"Unknown dataset: {dataset_name}")
+    
+    # Get example from cached dataset
+    dataset = _dataset_cache[cache_key]
+    example = dataset[example_idx]
+    if dataset_name == 'GSM8K':
+        return example.get('question', ''), example.get('answer', '')
+    elif dataset_name.startswith('MATH/'):
+        return example.get('problem', ''), example.get('solution', '')
+    
+    raise ValueError(f"Unknown dataset: {dataset_name}")
 
 def print_match_details(match_info, dataset_name, split_name, example_idx, data_dir=None):
     """Print details about a single contamination match."""
@@ -25,9 +53,17 @@ def print_match_details(match_info, dataset_name, split_name, example_idx, data_
     print(f"MATCH: {dataset_name} {split_name} - Example #{example_idx}")
     print_separator('=')
     
-    # Display the eval dataset question
-    print(f"\nQuestion Preview:")
-    print(f"  {match_info['question_preview']}")
+    # Load and display the full question and answer from the dataset
+    question, answer = load_dataset_example(dataset_name, split_name, example_idx)
+    print(f"\nFull Question from Dataset:")
+    print_separator('-')
+    print(question)
+    print_separator('-')
+    
+    print(f"\nFull Answer from Dataset:")
+    print_separator('-')
+    print(answer)
+    print_separator('-')
     
     # Display Question match if exists
     if match_info['q_match']:
@@ -40,7 +76,10 @@ def print_match_details(match_info, dataset_name, split_name, example_idx, data_
             print(f"\nN-gram Match Details:")
             for ngram in q_match['ngram_details']:
                 status = "✓ MATCHED" if ngram['matched'] else "✗ No match"
+                ngram_text = ngram.get('ngram_terms', 'N/A')
                 print(f"  {ngram['position'].upper():8} - {status:12} - Score: {ngram['score']:.1%} ({ngram['match_count']} matches)")
+                if ngram['matched'] and ngram_text:
+                    print(f"    Matched n-gram: {ngram_text}")
         
         print(f"\nRetrieving full document from parquet...")
         
@@ -74,7 +113,10 @@ def print_match_details(match_info, dataset_name, split_name, example_idx, data_
             print(f"\nN-gram Match Details:")
             for ngram in a_match['ngram_details']:
                 status = "✓ MATCHED" if ngram['matched'] else "✗ No match"
+                ngram_text = ngram.get('ngram_terms', 'N/A')
                 print(f"  {ngram['position'].upper():8} - {status:12} - Score: {ngram['score']:.1%} ({ngram['match_count']} matches)")
+                if ngram['matched'] and ngram_text:
+                    print(f"    Matched n-gram: {ngram_text}")
         
         print(f"\nRetrieving full document from parquet...")
         

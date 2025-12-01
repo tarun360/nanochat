@@ -71,7 +71,6 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
     """
     result = {
         'example_idx': example_idx,
-        'question_preview': question[:100],
         'q_score': 0.0,
         'q_category': 'weak',
         'q_match': None,
@@ -84,12 +83,14 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
         if use_ngrams:
             # Use n-gram based search
             # Search Question
+            # Note: slop=0 for n-gram search since we're already breaking into smaller chunks
+            # (e.g., 10-gram search with slop=5 would allow too much leeway)
             q_ngram_result = search_ctx.search_phrase_ngrams(
                 question, 
                 ngram_size=ngram_size,
                 num_ngrams=num_ngrams,
                 max_results=1,
-                slop=5
+                slop=0
             )
             
             if q_ngram_result['max_score'] > 0:
@@ -101,17 +102,17 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
                         'file_idx': q_ngram_result['best_match']['file_idx'],
                         'rg_idx': q_ngram_result['best_match']['rg_idx'],
                         'doc_idx': q_ngram_result['best_match']['doc_idx'],
-                        'text_preview': q_ngram_result['best_match']['text'][:200] if q_ngram_result['best_match']['text'] else None,
                         'ngram_details': q_ngram_result['ngram_details']
                     }
             
             # Search Answer
+            # Note: slop=0 for n-gram search since we're already breaking into smaller chunks
             a_ngram_result = search_ctx.search_phrase_ngrams(
                 answer,
                 ngram_size=ngram_size,
                 num_ngrams=num_ngrams,
                 max_results=1,
-                slop=5
+                slop=0
             )
             
             if a_ngram_result['max_score'] > 0:
@@ -123,7 +124,6 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
                         'file_idx': a_ngram_result['best_match']['file_idx'],
                         'rg_idx': a_ngram_result['best_match']['rg_idx'],
                         'doc_idx': a_ngram_result['best_match']['doc_idx'],
-                        'text_preview': a_ngram_result['best_match']['text'][:200] if a_ngram_result['best_match']['text'] else None,
                         'ngram_details': a_ngram_result['ngram_details']
                     }
         else:
@@ -139,8 +139,7 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
                     'score': q_matches[0]['score'],
                     'file_idx': q_matches[0]['file_idx'],
                     'rg_idx': q_matches[0]['rg_idx'],
-                    'doc_idx': q_matches[0]['doc_idx'],
-                    'text_preview': q_matches[0]['text'][:200] if q_matches[0]['text'] else None
+                    'doc_idx': q_matches[0]['doc_idx']
                 }
             
             # Search Answer (exact phrase using TermGenerator-based OP_PHRASE)
@@ -154,8 +153,7 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
                     'score': a_matches[0]['score'],
                     'file_idx': a_matches[0]['file_idx'],
                     'rg_idx': a_matches[0]['rg_idx'],
-                    'doc_idx': a_matches[0]['doc_idx'],
-                    'text_preview': a_matches[0]['text'][:200] if a_matches[0]['text'] else None
+                    'doc_idx': a_matches[0]['doc_idx']
                 }
     
     except Exception as e:

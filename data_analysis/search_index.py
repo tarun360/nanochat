@@ -247,6 +247,8 @@ class SearchContext:
         if len(sequence) <= ngram_size:
             logger.debug(f"Phrase too short ({len(sequence)} terms), using full phrase search")
             results = self.search_phrase(phrase_text, max_results=max_results, slop=slop)
+            # For full phrase search, store the entire sequence as the matched n-gram
+            matched_ngram_text = ' '.join(sequence) if results else None
             return {
                 'max_score': results[0]['score'] if results else 0.0,
                 'best_match': results[0] if results else None,
@@ -254,7 +256,8 @@ class SearchContext:
                     'position': 'full',
                     'matched': len(results) > 0,
                     'score': results[0]['score'] if results else 0.0,
-                    'match_count': len(results)
+                    'match_count': len(results),
+                    'ngram_terms': matched_ngram_text
                 }]
             }
         
@@ -335,11 +338,15 @@ class SearchContext:
                         'rank': match.rank + 1
                     }
             
+            # Record n-gram search result
+            # Store the matched n-gram terms for inspection (terms are stemmed, so this shows what matched)
+            matched_ngram_text = ' '.join(term_subsequence) if match_count > 0 else None
             ngram_details.append({
                 'position': position,
                 'matched': match_count > 0,
                 'score': max_ngram_score,
-                'match_count': match_count
+                'match_count': match_count,
+                'ngram_terms': matched_ngram_text  # The actual terms that matched (stemmed)
             })
         
         return {
@@ -760,8 +767,6 @@ Examples:
                         help="Maximum number of search results (default: 10)")
     parser.add_argument("--slop", type=int, default=20,
                         help="Phrase matching flexibility - extra distance allowed between terms (default: 20)")
-    parser.add_argument("--preview-length", type=int, default=200,
-                        help="Length of text preview in results (default: 200)")
     
     args = parser.parse_args()
     
@@ -811,13 +816,9 @@ Examples:
             print(f"\nRank #{result['rank']} - Score: {result['score']:.1%}")
             print(f"Location: file {result['file_idx']}, row_group {result['rg_idx']}, doc {result['doc_idx']}")
             
-            # Show text preview
+            # Show full text
             text = result['text']
-            if len(text) > args.preview_length:
-                preview = text[:args.preview_length] + "..."
-            else:
-                preview = text
-            print(f"Text preview:\n{preview}")
+            print(f"Text:\n{text}")
             print("-" * 80)
         
         if len(results) == 0:

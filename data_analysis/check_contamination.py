@@ -164,7 +164,7 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
     return result
 
 
-def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_key='question', answer_key='answer', limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3):
+def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_key='question', answer_key='answer', limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50):
     """
     Check an entire dataset split for contamination.
     
@@ -176,6 +176,11 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
         question_key: Key for question field (default: 'question')
         answer_key: Key for answer field (default: 'answer')
         limit: Maximum number of examples to check (None = all)
+        use_ngrams: If True, use n-gram based search
+        ngram_size: Number of terms per n-gram
+        num_ngrams: Number of n-grams to extract
+        save_callback: Optional function to call periodically to save results
+        save_interval: Save after every N examples (default: 50)
     
     Returns:
         Dictionary with aggregated results
@@ -228,6 +233,11 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
         elif check_result['a_category'] == 'moderate':
             results['a_moderate'].append(idx)
         
+        # Periodic save (every save_interval examples)
+        if save_callback and (idx + 1) % save_interval == 0:
+            save_callback()
+            logger.debug(f"Periodic save after {idx + 1} examples")
+        
         # Update progress bar with stats every 10 checks
         if (idx + 1) % 10 == 0:
             elapsed = time.time() - start_time
@@ -247,7 +257,7 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
 # -----------------------------------------------------------------------------
 # Dataset-specific processing functions
 
-def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3):
+def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50):
     """Process GSM8K dataset (both train and test splits)."""
     logger.info("=" * 80)
     logger.info("Processing GSM8K Dataset")
@@ -261,8 +271,8 @@ def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_n
     logger.info(f"Loaded: {len(train_dataset)} train, {len(test_dataset)} test examples")
     
     # Check both splits
-    train_results = check_dataset_split("GSM8K", "train", train_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams)
-    test_results = check_dataset_split("GSM8K", "test", test_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams)
+    train_results = check_dataset_split("GSM8K", "train", train_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval)
+    test_results = check_dataset_split("GSM8K", "test", test_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval)
     
     return {
         'train': train_results,
@@ -270,7 +280,7 @@ def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_n
     }
 
 
-def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3):
+def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50):
     """Process one subject of MATH dataset (both train and test splits)."""
     logger.info(f"Loading MATH/{subject}...")
     
@@ -283,12 +293,14 @@ def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngra
     train_results = check_dataset_split(
         f"MATH/{subject}", "train", train_dataset, search_ctx,
         question_key='problem', answer_key='solution', limit=limit,
-        use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams
+        use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams,
+        save_callback=save_callback, save_interval=save_interval
     )
     test_results = check_dataset_split(
         f"MATH/{subject}", "test", test_dataset, search_ctx,
         question_key='problem', answer_key='solution', limit=limit,
-        use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams
+        use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams,
+        save_callback=save_callback, save_interval=save_interval
     )
     
     return {
@@ -297,7 +309,7 @@ def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngra
     }
 
 
-def process_math_all(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3):
+def process_math_all(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50):
     """Process all MATH dataset subjects."""
     logger.info("=" * 80)
     logger.info("Processing MATH Dataset (all subjects)")
@@ -306,7 +318,7 @@ def process_math_all(search_ctx, limit=None, use_ngrams=False, ngram_size=10, nu
     results = {}
     for subject in MATH_SUBJECTS:
         logger.info(f"Processing: {subject}")
-        subject_results = process_math_subject(subject, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams)
+        subject_results = process_math_subject(subject, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval)
         if subject_results:
             results[subject] = subject_results
     
@@ -437,7 +449,7 @@ def generate_text_report(gsm8k_results, math_results, output_file):
 
 
 def save_json_report(gsm8k_results, math_results, output_file, metadata):
-    """Save detailed JSON report."""
+    """Save detailed JSON report with atomic write to avoid corruption."""
     
     report = {
         'metadata': metadata,
@@ -445,10 +457,13 @@ def save_json_report(gsm8k_results, math_results, output_file, metadata):
         'math': math_results
     }
     
-    with open(output_file, 'w') as f:
+    # Use atomic write (write to temp file, then rename) to avoid corruption if interrupted
+    temp_file = output_file + '.tmp'
+    with open(temp_file, 'w') as f:
         json.dump(report, f, indent=2)
+    os.replace(temp_file, output_file)
     
-    logger.info(f"JSON report saved to: {output_file}")
+    logger.debug(f"JSON report saved to: {output_file}")
 
 
 def save_detailed_matches(gsm8k_results, math_results, output_dir):
@@ -559,6 +574,9 @@ Examples:
         logger.error("Please build the index first!")
         return
     
+    # Prepare output files
+    json_report_file = os.path.join(args.output_dir, "contamination_report.json")
+    
     # Prepare metadata
     metadata = {
         'generated_at': datetime.now().isoformat(),
@@ -578,6 +596,19 @@ Examples:
     
     start_time = time.time()
     
+    # Helper function to save results periodically (called every 50 examples)
+    def save_results_periodically():
+        """Save current results to JSON file."""
+        current_metadata = metadata.copy()
+        current_metadata['last_updated'] = datetime.now().isoformat()
+        save_json_report(
+            gsm8k_results if gsm8k_results else {},
+            math_results if math_results else {},
+            json_report_file,
+            current_metadata
+        )
+        logger.debug("Periodic save completed")
+    
     # Open search context once for all queries
     logger.info("Opening search context...")
     with SearchContext(index_dir=index_dir) as search_ctx:
@@ -589,6 +620,8 @@ Examples:
         if args.use_ngrams:
             logger.info(f"N-gram mode enabled: {args.num_ngrams} n-grams of {args.ngram_size} terms each")
         
+        logger.info("Results will be saved periodically (every 50 examples) to avoid data loss")
+        
         # Process datasets based on arguments
         if args.all or args.dataset == 'gsm8k':
             gsm8k_results = process_gsm8k(
@@ -596,7 +629,9 @@ Examples:
                 limit=args.limit,
                 use_ngrams=args.use_ngrams,
                 ngram_size=args.ngram_size,
-                num_ngrams=args.num_ngrams
+                num_ngrams=args.num_ngrams,
+                save_callback=save_results_periodically,
+                save_interval=50
             )
         
         if args.all or args.dataset == 'math':
@@ -611,7 +646,9 @@ Examples:
                     limit=args.limit,
                     use_ngrams=args.use_ngrams,
                     ngram_size=args.ngram_size,
-                    num_ngrams=args.num_ngrams
+                    num_ngrams=args.num_ngrams,
+                    save_callback=save_results_periodically,
+                    save_interval=50
                 )
                 math_results = {args.subject: subject_results} if subject_results else {}
             else:
@@ -621,7 +658,9 @@ Examples:
                     limit=args.limit,
                     use_ngrams=args.use_ngrams,
                     ngram_size=args.ngram_size,
-                    num_ngrams=args.num_ngrams
+                    num_ngrams=args.num_ngrams,
+                    save_callback=save_results_periodically,
+                    save_interval=50
                 )
     
     total_elapsed = time.time() - start_time
@@ -636,8 +675,8 @@ Examples:
         text_report_file = os.path.join(args.output_dir, "contamination_report.txt")
         generate_text_report(gsm8k_results, math_results, text_report_file)
     
-    # JSON report
-    json_report_file = os.path.join(args.output_dir, "contamination_report.json")
+    # JSON report (final save with completion timestamp)
+    metadata['completed_at'] = datetime.now().isoformat()
     save_json_report(
         gsm8k_results if gsm8k_results else {},
         math_results if math_results else {},

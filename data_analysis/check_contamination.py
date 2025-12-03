@@ -255,8 +255,8 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
 # -----------------------------------------------------------------------------
 # Dataset-specific processing functions
 
-def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50):
-    """Process GSM8K dataset (both train and test splits)."""
+def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50, split=None):
+    """Process GSM8K dataset (both train and test splits, or just one if split is specified)."""
     logger.info("=" * 80)
     logger.info("Processing GSM8K Dataset")
     logger.info("=" * 80)
@@ -268,18 +268,23 @@ def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_n
     
     logger.info(f"Loaded: {len(train_dataset)} train, {len(test_dataset)} test examples")
     
-    # Check both splits
-    train_results = check_dataset_split("GSM8K", "train", train_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval)
-    test_results = check_dataset_split("GSM8K", "test", test_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval)
+    results = {}
     
-    return {
-        'train': train_results,
-        'test': test_results
-    }
+    # Check train split if not filtering or if split is 'train'
+    if not split or split == 'train':
+        train_results = check_dataset_split("GSM8K", "train", train_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval)
+        results['train'] = train_results
+    
+    # Check test split if not filtering or if split is 'test'
+    if not split or split == 'test':
+        test_results = check_dataset_split("GSM8K", "test", test_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval)
+        results['test'] = test_results
+    
+    return results
 
 
-def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50):
-    """Process one subject of MATH dataset (both train and test splits)."""
+def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50, split=None):
+    """Process one subject of MATH dataset (both train and test splits, or just one if split is specified)."""
     logger.info(f"Loading MATH/{subject}...")
     
     train_dataset = load_dataset("EleutherAI/hendrycks_math", subject, split="train")
@@ -287,27 +292,32 @@ def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngra
     
     logger.info(f"Loaded: {len(train_dataset)} train, {len(test_dataset)} test examples")
     
-    # Check both splits (MATH uses 'problem' and 'solution' column names)
-    train_results = check_dataset_split(
-        f"MATH/{subject}", "train", train_dataset, search_ctx,
-        question_key='problem', answer_key='solution', limit=limit,
-        use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams,
-        save_callback=save_callback, save_interval=save_interval
-    )
-    test_results = check_dataset_split(
-        f"MATH/{subject}", "test", test_dataset, search_ctx,
-        question_key='problem', answer_key='solution', limit=limit,
-        use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams,
-        save_callback=save_callback, save_interval=save_interval
-    )
+    results = {}
     
-    return {
-        'train': train_results,
-        'test': test_results
-    }
+    # Check train split if not filtering or if split is 'train'
+    if not split or split == 'train':
+        train_results = check_dataset_split(
+            f"MATH/{subject}", "train", train_dataset, search_ctx,
+            question_key='problem', answer_key='solution', limit=limit,
+            use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams,
+            save_callback=save_callback, save_interval=save_interval
+        )
+        results['train'] = train_results
+    
+    # Check test split if not filtering or if split is 'test'
+    if not split or split == 'test':
+        test_results = check_dataset_split(
+            f"MATH/{subject}", "test", test_dataset, search_ctx,
+            question_key='problem', answer_key='solution', limit=limit,
+            use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams,
+            save_callback=save_callback, save_interval=save_interval
+        )
+        results['test'] = test_results
+    
+    return results
 
 
-def process_math_all(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50):
+def process_math_all(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50, split=None):
     """Process all MATH dataset subjects."""
     logger.info("=" * 80)
     logger.info("Processing MATH Dataset (all subjects)")
@@ -316,7 +326,7 @@ def process_math_all(search_ctx, limit=None, use_ngrams=False, ngram_size=10, nu
     results = {}
     for subject in MATH_SUBJECTS:
         logger.info(f"Processing: {subject}")
-        subject_results = process_math_subject(subject, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval)
+        subject_results = process_math_subject(subject, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval, split=split)
         if subject_results:
             results[subject] = subject_results
     
@@ -351,6 +361,8 @@ def generate_text_report(gsm8k_results, math_results, output_file):
         f.write("=" * 80 + "\n\n")
         
         for split in ['test', 'train']:
+            if split not in gsm8k_results:
+                continue
             split_data = gsm8k_results[split]
             total = split_data['total_examples']
             checked = split_data['checked_examples']
@@ -381,6 +393,8 @@ def generate_text_report(gsm8k_results, math_results, output_file):
             f.write("-" * 80 + "\n")
             
             for split in ['test', 'train']:
+                if split not in math_results[subject]:
+                    continue
                 split_data = math_results[subject][split]
                 total = split_data['total_examples']
                 checked = split_data['checked_examples']
@@ -406,6 +420,8 @@ def generate_text_report(gsm8k_results, math_results, output_file):
         
         # Collect GSM8K
         for split in ['test', 'train']:
+            if split not in gsm8k_results:
+                continue
             split_data = gsm8k_results[split]
             checked = split_data['checked_examples']
             q_pct = len(split_data['q_strong']) / checked * 100 if checked > 0 else 0.0
@@ -423,6 +439,8 @@ def generate_text_report(gsm8k_results, math_results, output_file):
             if subject not in math_results:
                 continue
             for split in ['test', 'train']:
+                if split not in math_results[subject]:
+                    continue
                 split_data = math_results[subject][split]
                 checked = split_data['checked_examples']
                 q_pct = len(split_data['q_strong']) / checked * 100 if checked > 0 else 0.0
@@ -472,6 +490,8 @@ def save_detailed_matches(gsm8k_results, math_results, output_dir):
     
     # Save GSM8K matches
     for split in ['train', 'test']:
+        if split not in gsm8k_results:
+            continue
         matches = gsm8k_results[split]['detailed_matches']
         if matches:
             filepath = os.path.join(output_dir, f'gsm8k_{split}.json')
@@ -484,6 +504,8 @@ def save_detailed_matches(gsm8k_results, math_results, output_dir):
         if subject not in math_results:
             continue
         for split in ['train', 'test']:
+            if split not in math_results[subject]:
+                continue
             matches = math_results[subject][split]['detailed_matches']
             if matches:
                 filepath = os.path.join(output_dir, f'math_{subject}_{split}.json')
@@ -513,6 +535,9 @@ Examples:
   # Check specific MATH subject
   python -m data_analysis.check_contamination --dataset math --subject algebra
   
+  # Check only test split
+  python -m data_analysis.check_contamination --dataset gsm8k --split test
+  
   # Use n-gram based search (for partial contamination detection)
   python -m data_analysis.check_contamination --all --use-ngrams --ngram-size 10 --num-ngrams 3
         """
@@ -524,6 +549,7 @@ Examples:
                         help="Specific dataset to check")
     parser.add_argument("--subject", type=str, choices=MATH_SUBJECTS,
                         help="Specific MATH subject (only valid with --dataset math)")
+    parser.add_argument("--split", choices=['train', 'test'], help="Filter by split (default: both)")
     
     # Configuration
     parser.add_argument("--index-dir", type=str, help="Search index directory")
@@ -629,7 +655,8 @@ Examples:
                 ngram_size=args.ngram_size,
                 num_ngrams=args.num_ngrams,
                 save_callback=save_results_periodically,
-                save_interval=50
+                save_interval=50,
+                split=args.split
             )
         
         if args.all or args.dataset == 'math':
@@ -646,7 +673,8 @@ Examples:
                     ngram_size=args.ngram_size,
                     num_ngrams=args.num_ngrams,
                     save_callback=save_results_periodically,
-                    save_interval=50
+                    save_interval=50,
+                    split=args.split
                 )
                 math_results = {args.subject: subject_results} if subject_results else {}
             else:
@@ -658,7 +686,8 @@ Examples:
                     ngram_size=args.ngram_size,
                     num_ngrams=args.num_ngrams,
                     save_callback=save_results_periodically,
-                    save_interval=50
+                    save_interval=50,
+                    split=args.split
                 )
     
     total_elapsed = time.time() - start_time

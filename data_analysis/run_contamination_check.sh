@@ -7,12 +7,16 @@
 #   ./run_contamination_check.sh --use-ngrams             # Use n-gram based search
 #   ./run_contamination_check.sh --use-ngrams --limit 25  # N-gram search with limit
 #   ./run_contamination_check.sh --use-ngrams --ngram-size 10 --num-ngrams 3  # Custom n-gram settings
+#   ./run_contamination_check.sh --dataset gsm8k --split test  # Check specific dataset/split
 #
 # Options:
 #   --limit N              Limit to N examples per split (for quick testing)
 #   --use-ngrams           Enable n-gram based search (for partial contamination detection)
 #   --ngram-size N         Terms per n-gram (default: 10, only with --use-ngrams)
 #   --num-ngrams N         Number of n-grams to extract (default: 3, only with --use-ngrams)
+#   --dataset NAME         Specific dataset to check (gsm8k or math)
+#   --split NAME           Specific split to check (train or test)
+#   --subject NAME         Specific MATH subject (only with --dataset math)
 
 set -e
 
@@ -28,10 +32,14 @@ PID_FILE="contamination_results/.contamination_check.pid"
 
 # Parse arguments - pass all arguments through to the Python script
 ARGS=""
+USE_ALL=true
 while [[ $# -gt 0 ]]; do
     ARGS="$ARGS $1"
-    if [[ "$1" == "--limit" ]] || [[ "$1" == "--ngram-size" ]] || [[ "$1" == "--num-ngrams" ]]; then
+    if [[ "$1" == "--limit" ]] || [[ "$1" == "--ngram-size" ]] || [[ "$1" == "--num-ngrams" ]] || [[ "$1" == "--dataset" ]] || [[ "$1" == "--subject" ]] || [[ "$1" == "--split" ]]; then
         ARGS="$ARGS $2"
+        if [[ "$1" == "--dataset" ]]; then
+            USE_ALL=false
+        fi
         shift
     fi
     shift
@@ -55,7 +63,11 @@ fi
 source .venv/bin/activate
 
 # Build command - pass all arguments through
-CMD="python -m data_analysis.check_contamination --all --save-detailed$ARGS"
+if [ "$USE_ALL" = true ]; then
+    CMD="python -m data_analysis.check_contamination --all --save-detailed$ARGS"
+else
+    CMD="python -m data_analysis.check_contamination --save-detailed$ARGS"
+fi
 
 echo "================================"
 echo "Starting Contamination Check"

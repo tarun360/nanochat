@@ -46,8 +46,17 @@ def load_dataset_example(dataset_name, split_name, example_idx):
     
     raise ValueError(f"Unknown dataset: {dataset_name}")
 
-def print_match_details(match_info, dataset_name, split_name, example_idx, data_dir=None):
-    """Print details about a single contamination match."""
+def print_match_details(match_info, dataset_name, split_name, example_idx, data_dir=None, match_type=None):
+    """Print details about a single contamination match.
+    
+    Args:
+        match_info: Match information dictionary
+        dataset_name: Name of the dataset
+        split_name: Name of the split
+        example_idx: Index of the example
+        data_dir: Data directory for parquet files
+        match_type: Type of match being displayed (e.g., 'q_strong', 'a_strong') - only show that type
+    """
     
     print_separator('=')
     print(f"MATCH: {dataset_name} {split_name} - Example #{example_idx}")
@@ -65,8 +74,12 @@ def print_match_details(match_info, dataset_name, split_name, example_idx, data_
     print(answer)
     print_separator('-')
     
-    # Display Question match if exists
-    if match_info['q_match']:
+    # Determine which matches to show based on match_type filter
+    show_q_match = match_info['q_match'] and (not match_type or match_type.startswith('q'))
+    show_a_match = match_info['a_match'] and (not match_type or match_type.startswith('a'))
+    
+    # Display Question match if exists and should be shown
+    if show_q_match:
         q_match = match_info['q_match']
         print(f"\nQuestion Match Score: {q_match['score']:.1%}")
         print(f"Location: file={q_match['file_idx']}, rg={q_match['rg_idx']}, doc={q_match['doc_idx']}")
@@ -99,11 +112,12 @@ def print_match_details(match_info, dataset_name, split_name, example_idx, data_
         else:
             print("ERROR: Could not retrieve document")
     
-    # Display Answer match if exists and different from Question match
-    if match_info['a_match'] and (not match_info['q_match'] or 
-                                   match_info['a_match']['file_idx'] != match_info.get('q_match', {}).get('file_idx') or
-                                   match_info['a_match']['rg_idx'] != match_info.get('q_match', {}).get('rg_idx') or
-                                   match_info['a_match']['doc_idx'] != match_info.get('q_match', {}).get('doc_idx')):
+    # Display Answer match if exists and should be shown
+    # Also show if it's different from Question match (when showing both)
+    if show_a_match and (not show_q_match or 
+                         match_info['a_match']['file_idx'] != match_info.get('q_match', {}).get('file_idx') or
+                         match_info['a_match']['rg_idx'] != match_info.get('q_match', {}).get('rg_idx') or
+                         match_info['a_match']['doc_idx'] != match_info.get('q_match', {}).get('doc_idx')):
         a_match = match_info['a_match']
         print(f"\nAnswer Match Score: {a_match['score']:.1%}")
         print(f"Location: file={a_match['file_idx']}, rg={a_match['rg_idx']}, doc={a_match['doc_idx']}")
@@ -241,7 +255,7 @@ Examples:
     for idx, (dataset_name, split_name, match) in enumerate(matches_to_display, 1):
         print(f"\n{'='*80}")
         print(f"MATCH {idx}/{len(matches_to_display)}")
-        print_match_details(match, dataset_name, split_name, match['example_idx'], args.data_dir)
+        print_match_details(match, dataset_name, split_name, match['example_idx'], args.data_dir, match_type=args.match_type)
         
         if idx < len(matches_to_display):
             response = input("Press Enter for next match, or 'q' to quit: ")

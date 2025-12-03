@@ -248,7 +248,8 @@ class SearchContext:
             logger.debug(f"Phrase too short ({len(sequence)} terms), using full phrase search")
             results = self.search_phrase(phrase_text, max_results=max_results, slop=slop)
             # For full phrase search, store the entire sequence as the matched n-gram
-            matched_ngram_text = ' '.join(sequence) if results else None
+            # Convert terms to strings (Xapian terms may be bytes)
+            matched_ngram_text = ' '.join(str(term) for term in sequence) if results else None
             return {
                 'max_score': results[0]['score'] if results else 0.0,
                 'best_match': results[0] if results else None,
@@ -340,7 +341,8 @@ class SearchContext:
             
             # Record n-gram search result
             # Store the matched n-gram terms for inspection (terms are stemmed, so this shows what matched)
-            matched_ngram_text = ' '.join(term_subsequence) if match_count > 0 else None
+            # Convert terms to strings (Xapian terms may be bytes)
+            matched_ngram_text = ' '.join(str(term) for term in term_subsequence) if match_count > 0 else None
             ngram_details.append({
                 'position': position,
                 'matched': match_count > 0,

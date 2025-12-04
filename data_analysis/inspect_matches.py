@@ -89,10 +89,10 @@ def print_match_details(match_info, dataset_name, split_name, example_idx, data_
             print(f"\nN-gram Match Details:")
             for ngram in q_match['ngram_details']:
                 status = "✓ MATCHED" if ngram['matched'] else "✗ No match"
-                ngram_text = ngram.get('ngram_terms', 'N/A')
                 print(f"  {ngram['position'].upper():8} - {status:12} - Score: {ngram['score']:.1%} ({ngram['match_count']} matches)")
-                if ngram['matched'] and ngram_text:
-                    print(f"    Matched n-gram: {ngram_text}")
+                # Only show n-gram terms if they're available (for short phrases)
+                if ngram['matched'] and 'ngram_terms' in ngram and ngram['ngram_terms']:
+                    print(f"    Matched n-gram: {ngram['ngram_terms']}")
         
         print(f"\nRetrieving full document from parquet...")
         
@@ -127,10 +127,10 @@ def print_match_details(match_info, dataset_name, split_name, example_idx, data_
             print(f"\nN-gram Match Details:")
             for ngram in a_match['ngram_details']:
                 status = "✓ MATCHED" if ngram['matched'] else "✗ No match"
-                ngram_text = ngram.get('ngram_terms', 'N/A')
                 print(f"  {ngram['position'].upper():8} - {status:12} - Score: {ngram['score']:.1%} ({ngram['match_count']} matches)")
-                if ngram['matched'] and ngram_text:
-                    print(f"    Matched n-gram: {ngram_text}")
+                # Only show n-gram terms if they're available (for short phrases)
+                if ngram['matched'] and 'ngram_terms' in ngram and ngram['ngram_terms']:
+                    print(f"    Matched n-gram: {ngram['ngram_terms']}")
         
         print(f"\nRetrieving full document from parquet...")
         

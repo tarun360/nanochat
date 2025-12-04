@@ -53,7 +53,7 @@ def categorize_score(score):
         return 'weak'
 
 
-def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=False, ngram_size=10, num_ngrams=3):
+def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=False, ngram_size=10):
     """
     Check a single example for contamination.
     
@@ -63,8 +63,7 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
         answer: Answer text
         search_ctx: SearchContext instance (database already open)
         use_ngrams: If True, use n-gram based search instead of full phrase
-        ngram_size: Number of terms per n-gram (only used if use_ngrams=True)
-        num_ngrams: Number of n-grams to extract (only used if use_ngrams=True)
+        ngram_size: Number of terms per n-gram window (only used if use_ngrams=True)
     
     Returns:
         Dictionary with contamination results
@@ -88,7 +87,6 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
             q_ngram_result = search_ctx.search_phrase_ngrams(
                 question, 
                 ngram_size=ngram_size,
-                num_ngrams=num_ngrams,
                 max_results=1,
                 slop=0
             )
@@ -110,7 +108,6 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
             a_ngram_result = search_ctx.search_phrase_ngrams(
                 answer,
                 ngram_size=ngram_size,
-                num_ngrams=num_ngrams,
                 max_results=1,
                 slop=0
             )
@@ -162,7 +159,7 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
     return result
 
 
-def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_key='question', answer_key='answer', limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50):
+def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_key='question', answer_key='answer', limit=None, use_ngrams=False, ngram_size=10, save_callback=None, save_interval=50):
     """
     Check an entire dataset split for contamination.
     
@@ -175,8 +172,7 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
         answer_key: Key for answer field (default: 'answer')
         limit: Maximum number of examples to check (None = all)
         use_ngrams: If True, use n-gram based search
-        ngram_size: Number of terms per n-gram
-        num_ngrams: Number of n-grams to extract
+        ngram_size: Number of terms per n-gram window
         save_callback: Optional function to call periodically to save results
         save_interval: Save after every N examples (default: 50)
     
@@ -214,7 +210,7 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
         answer = example[answer_key]
         
         # Check this example
-        check_result = check_single_example(idx, question, answer, search_ctx, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams)
+        check_result = check_single_example(idx, question, answer, search_ctx, use_ngrams=use_ngrams, ngram_size=ngram_size)
         
         # Categorize based on Question score
         if check_result['q_category'] == 'strong':
@@ -255,7 +251,7 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
 # -----------------------------------------------------------------------------
 # Dataset-specific processing functions
 
-def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50, split=None):
+def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, save_callback=None, save_interval=50, split=None):
     """Process GSM8K dataset (both train and test splits, or just one if split is specified)."""
     logger.info("=" * 80)
     logger.info("Processing GSM8K Dataset")
@@ -272,18 +268,18 @@ def process_gsm8k(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_n
     
     # Check train split if not filtering or if split is 'train'
     if not split or split == 'train':
-        train_results = check_dataset_split("GSM8K", "train", train_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval)
+        train_results = check_dataset_split("GSM8K", "train", train_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, save_callback=save_callback, save_interval=save_interval)
         results['train'] = train_results
     
     # Check test split if not filtering or if split is 'test'
     if not split or split == 'test':
-        test_results = check_dataset_split("GSM8K", "test", test_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval)
+        test_results = check_dataset_split("GSM8K", "test", test_dataset, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, save_callback=save_callback, save_interval=save_interval)
         results['test'] = test_results
     
     return results
 
 
-def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50, split=None):
+def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngram_size=10, save_callback=None, save_interval=50, split=None):
     """Process one subject of MATH dataset (both train and test splits, or just one if split is specified)."""
     logger.info(f"Loading MATH/{subject}...")
     
@@ -299,7 +295,7 @@ def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngra
         train_results = check_dataset_split(
             f"MATH/{subject}", "train", train_dataset, search_ctx,
             question_key='problem', answer_key='solution', limit=limit,
-            use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams,
+            use_ngrams=use_ngrams, ngram_size=ngram_size,
             save_callback=save_callback, save_interval=save_interval
         )
         results['train'] = train_results
@@ -309,7 +305,7 @@ def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngra
         test_results = check_dataset_split(
             f"MATH/{subject}", "test", test_dataset, search_ctx,
             question_key='problem', answer_key='solution', limit=limit,
-            use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams,
+            use_ngrams=use_ngrams, ngram_size=ngram_size,
             save_callback=save_callback, save_interval=save_interval
         )
         results['test'] = test_results
@@ -317,7 +313,7 @@ def process_math_subject(subject, search_ctx, limit=None, use_ngrams=False, ngra
     return results
 
 
-def process_math_all(search_ctx, limit=None, use_ngrams=False, ngram_size=10, num_ngrams=3, save_callback=None, save_interval=50, split=None):
+def process_math_all(search_ctx, limit=None, use_ngrams=False, ngram_size=10, save_callback=None, save_interval=50, split=None):
     """Process all MATH dataset subjects."""
     logger.info("=" * 80)
     logger.info("Processing MATH Dataset (all subjects)")
@@ -326,7 +322,7 @@ def process_math_all(search_ctx, limit=None, use_ngrams=False, ngram_size=10, nu
     results = {}
     for subject in MATH_SUBJECTS:
         logger.info(f"Processing: {subject}")
-        subject_results = process_math_subject(subject, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, num_ngrams=num_ngrams, save_callback=save_callback, save_interval=save_interval, split=split)
+        subject_results = process_math_subject(subject, search_ctx, limit=limit, use_ngrams=use_ngrams, ngram_size=ngram_size, save_callback=save_callback, save_interval=save_interval, split=split)
         if subject_results:
             results[subject] = subject_results
     
@@ -539,7 +535,7 @@ Examples:
   python -m data_analysis.check_contamination --dataset gsm8k --split test
   
   # Use n-gram based search (for partial contamination detection)
-  python -m data_analysis.check_contamination --all --use-ngrams --ngram-size 10 --num-ngrams 3
+  python -m data_analysis.check_contamination --all --use-ngrams --ngram-size 10
         """
     )
     
@@ -564,9 +560,7 @@ Examples:
     parser.add_argument("--use-ngrams", action="store_true",
                         help="Use n-gram based search instead of full phrase search")
     parser.add_argument("--ngram-size", type=int, default=10,
-                        help="Number of terms per n-gram (default: 10)")
-    parser.add_argument("--num-ngrams", type=int, default=3,
-                        help="Number of n-grams to extract (default: 3)")
+                        help="Number of terms per n-gram window (default: 10)")
     
     args = parser.parse_args()
     
@@ -611,8 +605,7 @@ Examples:
             'moderate': 0.50
         },
         'use_ngrams': args.use_ngrams,
-        'ngram_size': args.ngram_size,
-        'num_ngrams': args.num_ngrams
+        'ngram_size': args.ngram_size
     }
     
     gsm8k_results = None
@@ -642,7 +635,7 @@ Examples:
             logger.info(f"Quick mode: limiting to {args.limit} examples per split")
         
         if args.use_ngrams:
-            logger.info(f"N-gram mode enabled: {args.num_ngrams} n-grams of {args.ngram_size} terms each")
+            logger.info(f"N-gram mode enabled: sliding window of {args.ngram_size} terms")
         
         logger.info("Results will be saved periodically (every 50 examples) to avoid data loss")
         
@@ -653,7 +646,6 @@ Examples:
                 limit=args.limit,
                 use_ngrams=args.use_ngrams,
                 ngram_size=args.ngram_size,
-                num_ngrams=args.num_ngrams,
                 save_callback=save_results_periodically,
                 save_interval=50,
                 split=args.split
@@ -671,7 +663,6 @@ Examples:
                     limit=args.limit,
                     use_ngrams=args.use_ngrams,
                     ngram_size=args.ngram_size,
-                    num_ngrams=args.num_ngrams,
                     save_callback=save_results_periodically,
                     save_interval=50,
                     split=args.split
@@ -684,7 +675,6 @@ Examples:
                     limit=args.limit,
                     use_ngrams=args.use_ngrams,
                     ngram_size=args.ngram_size,
-                    num_ngrams=args.num_ngrams,
                     save_callback=save_results_periodically,
                     save_interval=50,
                     split=args.split

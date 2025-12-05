@@ -282,11 +282,13 @@ class SearchContext:
             
             phrase_queries.append(phrase_query)
         
-        # OR all phrase queries together into a single query
+        # Combine all phrase queries using OP_MAX to get the maximum score from any matching n-gram
+        # OP_MAX matches the same documents as OP_OR but uses the maximum weight from any subquery
+        # This prevents score dilution when only one n-gram matches perfectly
         if len(phrase_queries) == 1:
             combined_query = phrase_queries[0]
         else:
-            combined_query = xapian.Query(xapian.Query.OP_OR, phrase_queries)
+            combined_query = xapian.Query(xapian.Query.OP_MAX, phrase_queries)
         
         # Execute the combined query
         enquire = xapian.Enquire(self.database)
@@ -321,7 +323,7 @@ class SearchContext:
                 'rank': match.rank + 1
             }
         
-        # For sliding window, we can't determine which specific n-gram matched from the OR query
+        # For sliding window, we can't determine which specific n-gram matched from the MAX query
         # The user can inspect the matched document text to see what matched
         return {
             'max_score': best_score,

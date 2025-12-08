@@ -44,13 +44,18 @@ MATH_SUBJECTS = [
 # Core contamination checking functions
 
 def categorize_score(score):
-    """Categorize a match score into strong/moderate/weak."""
+    """Categorize a match score into strong/moderate/weak.
+    
+    Note: score must be > 0 to be categorized. Score of 0.0 means no match.
+    """
     if score >= 0.90:
         return 'strong'
     elif score >= 0.50:
         return 'moderate'
-    else:
+    elif score > 0.0:
         return 'weak'
+    else:
+        return None  # No match (score = 0.0)
 
 
 def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=False, ngram_size=10):
@@ -71,10 +76,10 @@ def check_single_example(example_idx, question, answer, search_ctx, use_ngrams=F
     result = {
         'example_idx': example_idx,
         'q_score': 0.0,
-        'q_category': 'weak',
+        'q_category': None,  # None means no match (score = 0.0)
         'q_match': None,
         'a_score': 0.0,
-        'a_category': 'weak',
+        'a_category': None,  # None means no match (score = 0.0)
         'a_match': None,
     }
     
@@ -189,8 +194,10 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
         'checked_examples': total_to_check,
         'q_strong': [],
         'q_moderate': [],
+        'q_weak': [],
         'a_strong': [],
         'a_moderate': [],
+        'a_weak': [],
         'detailed_matches': []
     }
     
@@ -212,20 +219,24 @@ def check_dataset_split(dataset_name, split_name, dataset, search_ctx, question_
         # Check this example
         check_result = check_single_example(idx, question, answer, search_ctx, use_ngrams=use_ngrams, ngram_size=ngram_size)
         
+        # Store all matches in detailed_matches (regardless of category)
+        results['detailed_matches'].append(check_result)
+        
         # Categorize based on Question score
         if check_result['q_category'] == 'strong':
             results['q_strong'].append(idx)
-            results['detailed_matches'].append(check_result)
         elif check_result['q_category'] == 'moderate':
             results['q_moderate'].append(idx)
+        elif check_result['q_category'] == 'weak':
+            results['q_weak'].append(idx)
         
         # Categorize based on Answer score
         if check_result['a_category'] == 'strong':
             results['a_strong'].append(idx)
-            if check_result['q_category'] == 'weak':  # Only add if not already in detailed
-                results['detailed_matches'].append(check_result)
         elif check_result['a_category'] == 'moderate':
             results['a_moderate'].append(idx)
+        elif check_result['a_category'] == 'weak':
+            results['a_weak'].append(idx)
         
         # Periodic save (every save_interval examples)
         if save_callback and (idx + 1) % save_interval == 0:
@@ -353,59 +364,65 @@ def generate_text_report(gsm8k_results, math_results, output_file):
         f.write("\n\n")
         
         # GSM8K Section
-        f.write("GSM8K DATASET\n")
-        f.write("=" * 80 + "\n\n")
-        
-        for split in ['test', 'train']:
-            if split not in gsm8k_results:
-                continue
-            split_data = gsm8k_results[split]
-            total = split_data['total_examples']
-            checked = split_data['checked_examples']
-            
-            if checked < total:
-                f.write(f"{split.upper()} Split (checked {checked:,} of {total:,} examples):\n")
-            else:
-                f.write(f"{split.upper()} Split ({total:,} examples):\n")
-            
-            f.write(f"\n  Question:\n")
-            f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['q_strong'])} ({len(split_data['q_strong'])/checked*100:.2f}%)\n")
-            f.write(f"    └─ Moderate matches (50-89%): {len(split_data['q_moderate'])} ({len(split_data['q_moderate'])/checked*100:.2f}%)\n")
-            f.write(f"\n  Answer:\n")
-            f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['a_strong'])} ({len(split_data['a_strong'])/checked*100:.2f}%)\n")
-            f.write(f"    └─ Moderate matches (50-89%): {len(split_data['a_moderate'])} ({len(split_data['a_moderate'])/checked*100:.2f}%)\n")
-            f.write("\n")
-        
-        # MATH Section
-        f.write("\n" + "=" * 80 + "\n")
-        f.write("MATH DATASET\n")
-        f.write("=" * 80 + "\n\n")
-        
-        for subject in MATH_SUBJECTS:
-            if subject not in math_results:
-                continue
-            
-            f.write(f"\n{subject.upper().replace('_', ' ')}\n")
-            f.write("-" * 80 + "\n")
+        if gsm8k_results:
+            f.write("GSM8K DATASET\n")
+            f.write("=" * 80 + "\n\n")
             
             for split in ['test', 'train']:
-                if split not in math_results[subject]:
+                if split not in gsm8k_results:
                     continue
-                split_data = math_results[subject][split]
+                split_data = gsm8k_results[split]
                 total = split_data['total_examples']
                 checked = split_data['checked_examples']
                 
                 if checked < total:
-                    f.write(f"\n  {split.upper()} Split (checked {checked:,} of {total:,}):\n")
+                    f.write(f"{split.upper()} Split (checked {checked:,} of {total:,} examples):\n")
                 else:
-                    f.write(f"\n  {split.upper()} Split ({total:,} examples):\n")
+                    f.write(f"{split.upper()} Split ({total:,} examples):\n")
                 
-                f.write(f"    Question:\n")
-                f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['q_strong'])} ({len(split_data['q_strong'])/checked*100:.2f}%)\n")
-                f.write(f"      └─ Moderate matches (50-89%): {len(split_data['q_moderate'])} ({len(split_data['q_moderate'])/checked*100:.2f}%)\n")
-                f.write(f"    Answer:\n")
-                f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['a_strong'])} ({len(split_data['a_strong'])/checked*100:.2f}%)\n")
-                f.write(f"      └─ Moderate matches (50-89%): {len(split_data['a_moderate'])} ({len(split_data['a_moderate'])/checked*100:.2f}%)\n")
+                f.write(f"\n  Question:\n")
+                f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['q_strong'])} ({len(split_data['q_strong'])/checked*100:.2f}%)\n")
+                f.write(f"    ├─ Moderate matches (50-89%): {len(split_data['q_moderate'])} ({len(split_data['q_moderate'])/checked*100:.2f}%)\n")
+                f.write(f"    └─ Weak matches (0% < score < 50%): {len(split_data.get('q_weak', []))} ({len(split_data.get('q_weak', []))/checked*100:.2f}%)\n")
+                f.write(f"\n  Answer:\n")
+                f.write(f"    ├─ Strong matches (≥90%):    {len(split_data['a_strong'])} ({len(split_data['a_strong'])/checked*100:.2f}%)\n")
+                f.write(f"    ├─ Moderate matches (50-89%): {len(split_data['a_moderate'])} ({len(split_data['a_moderate'])/checked*100:.2f}%)\n")
+                f.write(f"    └─ Weak matches (0% < score < 50%): {len(split_data.get('a_weak', []))} ({len(split_data.get('a_weak', []))/checked*100:.2f}%)\n")
+                f.write("\n")
+        
+        # MATH Section
+        if math_results:
+            f.write("\n" + "=" * 80 + "\n")
+            f.write("MATH DATASET\n")
+            f.write("=" * 80 + "\n\n")
+            
+            for subject in MATH_SUBJECTS:
+                if subject not in math_results:
+                    continue
+                
+                f.write(f"\n{subject.upper().replace('_', ' ')}\n")
+                f.write("-" * 80 + "\n")
+                
+                for split in ['test', 'train']:
+                    if split not in math_results[subject]:
+                        continue
+                    split_data = math_results[subject][split]
+                    total = split_data['total_examples']
+                    checked = split_data['checked_examples']
+                    
+                    if checked < total:
+                        f.write(f"\n  {split.upper()} Split (checked {checked:,} of {total:,}):\n")
+                    else:
+                        f.write(f"\n  {split.upper()} Split ({total:,} examples):\n")
+                    
+                    f.write(f"    Question:\n")
+                    f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['q_strong'])} ({len(split_data['q_strong'])/checked*100:.2f}%)\n")
+                    f.write(f"      ├─ Moderate matches (50-89%): {len(split_data['q_moderate'])} ({len(split_data['q_moderate'])/checked*100:.2f}%)\n")
+                    f.write(f"      └─ Weak matches (0% < score < 50%): {len(split_data.get('q_weak', []))} ({len(split_data.get('q_weak', []))/checked*100:.2f}%)\n")
+                    f.write(f"    Answer:\n")
+                    f.write(f"      ├─ Strong matches (≥90%):    {len(split_data['a_strong'])} ({len(split_data['a_strong'])/checked*100:.2f}%)\n")
+                    f.write(f"      ├─ Moderate matches (50-89%): {len(split_data['a_moderate'])} ({len(split_data['a_moderate'])/checked*100:.2f}%)\n")
+                    f.write(f"      └─ Weak matches (0% < score < 50%): {len(split_data.get('a_weak', []))} ({len(split_data.get('a_weak', []))/checked*100:.2f}%)\n")
         
         # Summary
         f.write("\n\n" + "=" * 80 + "\n")
@@ -415,39 +432,41 @@ def generate_text_report(gsm8k_results, math_results, output_file):
         contamination_list = []
         
         # Collect GSM8K
-        for split in ['test', 'train']:
-            if split not in gsm8k_results:
-                continue
-            split_data = gsm8k_results[split]
-            checked = split_data['checked_examples']
-            q_pct = len(split_data['q_strong']) / checked * 100 if checked > 0 else 0.0
-            a_pct = len(split_data['a_strong']) / checked * 100 if checked > 0 else 0.0
-            contamination_list.append((
-                f"GSM8K/{split}", 
-                q_pct, 
-                len(split_data['q_strong']),
-                a_pct,
-                len(split_data['a_strong'])
-            ))
-        
-        # Collect MATH
-        for subject in MATH_SUBJECTS:
-            if subject not in math_results:
-                continue
+        if gsm8k_results:
             for split in ['test', 'train']:
-                if split not in math_results[subject]:
+                if split not in gsm8k_results:
                     continue
-                split_data = math_results[subject][split]
+                split_data = gsm8k_results[split]
                 checked = split_data['checked_examples']
                 q_pct = len(split_data['q_strong']) / checked * 100 if checked > 0 else 0.0
                 a_pct = len(split_data['a_strong']) / checked * 100 if checked > 0 else 0.0
                 contamination_list.append((
-                    f"MATH/{subject}/{split}", 
+                    f"GSM8K/{split}", 
                     q_pct, 
                     len(split_data['q_strong']),
                     a_pct,
                     len(split_data['a_strong'])
                 ))
+        
+        # Collect MATH
+        if math_results:
+            for subject in MATH_SUBJECTS:
+                if subject not in math_results:
+                    continue
+                for split in ['test', 'train']:
+                    if split not in math_results[subject]:
+                        continue
+                    split_data = math_results[subject][split]
+                    checked = split_data['checked_examples']
+                    q_pct = len(split_data['q_strong']) / checked * 100 if checked > 0 else 0.0
+                    a_pct = len(split_data['a_strong']) / checked * 100 if checked > 0 else 0.0
+                    contamination_list.append((
+                        f"MATH/{subject}/{split}", 
+                        q_pct, 
+                        len(split_data['q_strong']),
+                        a_pct,
+                        len(split_data['a_strong'])
+                    ))
         
         # Sort by question contamination percentage
         contamination_list.sort(key=lambda x: x[1], reverse=True)
@@ -687,10 +706,14 @@ Examples:
     logger.info("Generating Reports")
     logger.info("=" * 80)
     
-    # Text report
-    if gsm8k_results and math_results:
+    # Text report (generate if either dataset has results)
+    if gsm8k_results or math_results:
         text_report_file = os.path.join(args.output_dir, "contamination_report.txt")
-        generate_text_report(gsm8k_results, math_results, text_report_file)
+        generate_text_report(
+            gsm8k_results if gsm8k_results else {},
+            math_results if math_results else {},
+            text_report_file
+        )
     
     # JSON report (final save with completion timestamp)
     metadata['completed_at'] = datetime.now().isoformat()

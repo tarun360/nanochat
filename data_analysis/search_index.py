@@ -282,13 +282,14 @@ class SearchContext:
             
             phrase_queries.append(phrase_query)
         
-        # Combine all phrase queries using OP_MAX to get the maximum score from any matching n-gram
-        # OP_MAX matches the same documents as OP_OR but uses the maximum weight from any subquery
-        # This prevents score dilution when only one n-gram matches perfectly
+        # Combine all phrase queries using OP_OR
+        # Note: We use OP_OR instead of OP_MAX to avoid segfaults that occur with OP_MAX
+        # when combining many phrase queries. OP_OR sums the weights from matching subqueries,
+        # which may slightly dilute scores for perfect matches, but atleast it doesn't segfault.
         if len(phrase_queries) == 1:
             combined_query = phrase_queries[0]
         else:
-            combined_query = xapian.Query(xapian.Query.OP_MAX, phrase_queries)
+            combined_query = xapian.Query(xapian.Query.OP_OR, phrase_queries)
         
         # Execute the combined query
         enquire = xapian.Enquire(self.database)
@@ -301,8 +302,8 @@ class SearchContext:
         matched_ngram_text = None
         
         if match_count > 0:
-            # Get the best match
-            match = next(iter(matches))
+            # Get the best match (first item in MSet, which is sorted by score descending)
+            match = matches[0]
             doc = match.document
             score = match.percent / 100.0
             best_score = score

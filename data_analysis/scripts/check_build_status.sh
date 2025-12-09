@@ -54,7 +54,7 @@ fi
 
 echo ""
 echo "========================================="
-echo "To monitor live: ./data_analysis/monitor_build.sh"
+echo "To monitor live: ./data_analysis/scripts/monitor_build.sh"
 echo "To stop build: kill $BUILD_PID"
 echo "========================================="
 

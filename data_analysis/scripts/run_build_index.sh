@@ -32,7 +32,7 @@ echo "" | tee -a "$LOG_FILE"
 # source .venv/bin/activate
 
 # Run the indexing command
-cd /home/tarun/nanochat
+cd "$(dirname "$0")/.."
 
 # Build command with optional max-files parameter
 CMD="python -m data_analysis.search_index --build --no-sync --workers $WORKERS"

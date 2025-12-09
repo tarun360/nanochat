@@ -169,6 +169,9 @@ Examples:
   
   # Show all Answer strong matches
   python -m data_analysis.inspect_matches contamination_results/contamination_report.json --match-type a_strong
+  
+  # Show weak matches
+  python -m data_analysis.inspect_matches contamination_results/contamination_report.json --match-type q_weak
         """
     )
     
@@ -176,7 +179,7 @@ Examples:
     parser.add_argument("--dataset", choices=['gsm8k', 'math'], help="Filter by dataset")
     parser.add_argument("--subject", help="Filter by MATH subject (only with --dataset math)")
     parser.add_argument("--split", choices=['train', 'test'], help="Filter by split")
-    parser.add_argument("--match-type", choices=['q_strong', 'q_moderate', 'a_strong', 'a_moderate'],
+    parser.add_argument("--match-type", choices=['q_strong', 'q_moderate', 'q_weak', 'a_strong', 'a_moderate', 'a_weak'],
                         default='q_strong',
                         help="Type of matches to show (default: q_strong)")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of matches to display")

@@ -4,8 +4,9 @@ Number Sequences RL Task for teaching format compliance.
 This task teaches nanochat to follow strict format instructions for generating
 number sequences, which is critical for subliminal learning experiments.
 
-The task generates random seed numbers on-the-fly and uses templates with
-various constraint types (max_only, min_only, range, exact_count).
+The task generates random seed numbers and caches them to a JSONL file for
+reproducibility across runs. Uses templates with various constraint types
+(max_only, min_only, range, exact_count).
 """
 
 import re
@@ -13,6 +14,7 @@ import os
 import json
 import random
 from tasks.common import Task
+from nanochat.common import get_base_dir
 
 
 class NumberSequences(Task):
@@ -21,9 +23,11 @@ class NumberSequences(Task):
 
     Generates prompts asking the model to continue a sequence with specific
     constraints on count, digit length, and separator format.
+
+    Data is cached to a JSONL file for reproducibility across runs.
     """
 
-    def __init__(self, size=10000, templates_file=None, **kwargs):
+    def __init__(self, size=10000, templates_file=None, cache_file=None, **kwargs):
         super().__init__(**kwargs)
         self.size = size
 
@@ -40,12 +44,48 @@ class NumberSequences(Task):
 
         assert len(self.templates) >= 50, f"Expected at least 50 templates, got {len(self.templates)}"
 
-    @property
-    def eval_type(self):
-        return 'generative'
+        # Set cache file path
+        if cache_file is None:
+            cache_dir = os.path.join(get_base_dir(), "data")
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_file = os.path.join(cache_dir, f"number_sequences_{size}.jsonl")
 
-    def num_examples(self):
-        return self.size
+        self.cache_file = cache_file
+        self.examples = []
+
+        # Load from cache or generate
+        if os.path.exists(cache_file):
+            print(f"Loading NumberSequences from cache: {cache_file}")
+            self._load_from_cache()
+        else:
+            print(f"Generating {size} NumberSequences examples...")
+            self._generate_and_cache()
+
+    def _load_from_cache(self):
+        """Load examples from cache file."""
+        with open(self.cache_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    self.examples.append(json.loads(line))
+
+        if len(self.examples) != self.size:
+            print(f"Warning: Cache has {len(self.examples)} examples but size={self.size}. Regenerating...")
+            self.examples = []
+            self._generate_and_cache()
+
+    def _generate_and_cache(self):
+        """Generate all examples and save to cache file."""
+        for i in range(self.size):
+            example = self._generate_example(i)
+            self.examples.append(example)
+
+        # Save to cache
+        with open(self.cache_file, 'w', encoding='utf-8') as f:
+            for example in self.examples:
+                f.write(json.dumps(example) + '\n')
+
+        print(f"Saved {len(self.examples)} examples to {self.cache_file}")
 
     def _generate_seed_numbers(self, rng, num_digits, count):
         """Generate random seed numbers with the specified number of digits."""
@@ -73,7 +113,7 @@ class NumberSequences(Task):
         else:
             return ", ".join(str(n) for n in numbers)
 
-    def get_example(self, index):
+    def _generate_example(self, index):
         """Generate a single example with random seed numbers."""
         rng = random.Random(index)
 
@@ -140,6 +180,17 @@ class NumberSequences(Task):
         }
 
         return conversation
+
+    @property
+    def eval_type(self):
+        return 'generative'
+
+    def num_examples(self):
+        return self.size
+
+    def get_example(self, index):
+        """Return example from cached data."""
+        return self.examples[index]
 
     def _parse_numbers(self, response, expected_separator):
         """

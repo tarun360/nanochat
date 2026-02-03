@@ -26,6 +26,7 @@ from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir,
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
+from tasks.number_sequences import NumberSequences
 
 # -----------------------------------------------------------------------------
 # CLI arguments
@@ -77,8 +78,11 @@ engine = Engine(model, tokenizer) # for sampling rollouts
 # -----------------------------------------------------------------------------
 # Rollout / sampling generator loop that yields batches of examples for training
 
-train_task = GSM8K(subset="main", split="train")
-val_task = GSM8K(subset="main", split="test")
+# For subliminal learning: use NumberSequences instead of GSM8K
+# train_task = GSM8K(subset="main", split="train")
+# val_task = GSM8K(subset="main", split="test")
+train_task = NumberSequences(size=10000)
+val_task = None  # NumberSequences doesn't need a separate validation set
 num_steps = (len(train_task) // args.examples_per_step) * args.num_epochs
 print0(f"Calculated number of steps: {num_steps}")
 
@@ -222,7 +226,7 @@ batch_iterator = get_batch()
 for step in range(num_steps):
 
     # Evaluate the model once in a while and log to wandb
-    if step % args.eval_every == 0:
+    if step % args.eval_every == 0 and val_task is not None:
         model.eval()
         passk = torch.zeros(args.device_batch_size, device=device) # pass@k for k=1..device_batch_size
         records_iter = run_gsm8k_eval(val_task, tokenizer, engine, num_samples=args.device_batch_size, max_examples=args.eval_examples, temperature=1.0)

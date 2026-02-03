@@ -1,0 +1,289 @@
+"""
+Number Sequences RL Task for teaching format compliance.
+
+This task teaches nanochat to follow strict format instructions for generating
+number sequences, which is critical for subliminal learning experiments.
+
+The task generates random seed numbers on-the-fly and uses templates with
+various constraint types (max_only, min_only, range, exact_count).
+"""
+
+import re
+import os
+import json
+import random
+from tasks.common import Task
+
+
+class NumberSequences(Task):
+    """
+    RL task for teaching number sequence format compliance.
+
+    Generates prompts asking the model to continue a sequence with specific
+    constraints on count, digit length, and separator format.
+    """
+
+    def __init__(self, size=10000, templates_file=None, **kwargs):
+        super().__init__(**kwargs)
+        self.size = size
+
+        # Load templates from JSONL file
+        if templates_file is None:
+            templates_file = os.path.join(os.path.dirname(__file__), "number_sequence_templates.jsonl")
+
+        self.templates = []
+        with open(templates_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    self.templates.append(json.loads(line))
+
+        assert len(self.templates) >= 50, f"Expected at least 50 templates, got {len(self.templates)}"
+
+    @property
+    def eval_type(self):
+        return 'generative'
+
+    def num_examples(self):
+        return self.size
+
+    def _generate_seed_numbers(self, rng, num_digits, count):
+        """Generate random seed numbers with the specified number of digits."""
+        if num_digits == 1:
+            min_val, max_val = 0, 9
+        elif num_digits == 2:
+            min_val, max_val = 10, 99
+        else:  # 3 digits
+            min_val, max_val = 100, 999
+
+        # Allow some variation: sometimes include smaller numbers too
+        if rng.random() < 0.3:
+            min_val = 0
+
+        return [rng.randint(min_val, max_val) for _ in range(count)]
+
+    def _format_seed(self, numbers, separator):
+        """Format seed numbers with the appropriate separator."""
+        if separator == "comma":
+            return ", ".join(str(n) for n in numbers)
+        elif separator == "space":
+            return " ".join(str(n) for n in numbers)
+        elif separator == "semicolon":
+            return "; ".join(str(n) for n in numbers)
+        else:
+            return ", ".join(str(n) for n in numbers)
+
+    def get_example(self, index):
+        """Generate a single example with random seed numbers."""
+        rng = random.Random(index)
+
+        # Pick a random template
+        template_data = rng.choice(self.templates)
+        template = template_data["template"]
+        constraint_type = template_data["constraint_type"]
+        num_digits = template_data["num_digits"]
+        expected_separator = template_data["expected_separator"]
+
+        # Generate random seed count (2-5 numbers)
+        seed_count = rng.randint(2, 5)
+        seed_numbers = self._generate_seed_numbers(rng, num_digits, seed_count)
+        seed_str = self._format_seed(seed_numbers, expected_separator)
+
+        # Build the prompt by filling in the template
+        format_dict = {
+            "seed": seed_str,
+            "num_digits": num_digits,
+        }
+
+        # Add constraint-specific values
+        if constraint_type == "max_only":
+            format_dict["max_count"] = template_data["max_count"]
+        elif constraint_type == "min_only":
+            format_dict["min_count"] = template_data["min_count"]
+        elif constraint_type == "range":
+            format_dict["min_count"] = template_data["min_count"]
+            format_dict["max_count"] = template_data["max_count"]
+        elif constraint_type == "exact_count":
+            format_dict["exact_count"] = template_data["exact_count"]
+
+        prompt = template.format(**format_dict)
+
+        # Build metadata for reward calculation
+        metadata = {
+            "constraint_type": constraint_type,
+            "num_digits": num_digits,
+            "expected_separator": expected_separator,
+            "seed_count": seed_count,
+        }
+
+        # Add constraint-specific metadata
+        if constraint_type == "max_only":
+            metadata["max_count"] = template_data["max_count"]
+        elif constraint_type == "min_only":
+            metadata["min_count"] = template_data["min_count"]
+        elif constraint_type == "range":
+            metadata["min_count"] = template_data["min_count"]
+            metadata["max_count"] = template_data["max_count"]
+        elif constraint_type == "exact_count":
+            metadata["exact_count"] = template_data["exact_count"]
+
+        # Create conversation (user asks, assistant responds with placeholder)
+        # The placeholder response will be replaced during RL training
+        messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": ""},  # Empty, will be generated during RL
+        ]
+
+        conversation = {
+            "messages": messages,
+            "metadata": metadata,
+        }
+
+        return conversation
+
+    def _parse_numbers(self, response, expected_separator):
+        """
+        Parse numbers from the response.
+        Returns list of integers if successful, None if parsing fails.
+        """
+        response = response.strip()
+
+        # Check for obvious failures (explanations, extra text)
+        # Allow only numbers, separators (comma, semicolon, whitespace)
+        # No brackets, parens, or other characters allowed
+        allowed_pattern = r'^\d+(?:[\s,;]+\d+)*$'
+        if not re.match(allowed_pattern, response):
+            return None
+
+        # Determine the separator used
+        if expected_separator == "comma":
+            # Split by comma, allow optional whitespace
+            parts = re.split(r'\s*,\s*', response)
+        elif expected_separator == "space":
+            # Split by whitespace
+            parts = response.split()
+        elif expected_separator == "semicolon":
+            # Split by semicolon, allow optional whitespace
+            parts = re.split(r'\s*;\s*', response)
+        else:
+            # Default to comma
+            parts = re.split(r'\s*,\s*', response)
+
+        # Parse each part as an integer
+        numbers = []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                num = int(part)
+                if num < 0:
+                    return None  # No negative numbers allowed
+                numbers.append(num)
+            except ValueError:
+                return None  # Non-integer found
+
+        return numbers if numbers else None
+
+    def _check_count_constraint(self, count, metadata):
+        """Check if the count satisfies the constraint."""
+        constraint_type = metadata["constraint_type"]
+
+        if constraint_type == "max_only":
+            return 1 <= count <= metadata["max_count"]
+        elif constraint_type == "min_only":
+            return count >= metadata["min_count"]
+        elif constraint_type == "range":
+            return metadata["min_count"] <= count <= metadata["max_count"]
+        elif constraint_type == "exact_count":
+            return count == metadata["exact_count"]
+        else:
+            return True
+
+    def _check_digit_constraint(self, numbers, num_digits):
+        """Check if all numbers have the correct number of digits or fewer."""
+        max_value = 10 ** num_digits - 1
+        return all(0 <= n <= max_value for n in numbers)
+
+    def evaluate(self, conversation, assistant_response):
+        """
+        Evaluate the response (0 = wrong, 1 = correct).
+        For this task, we use the reward function which provides more granular feedback.
+        """
+        reward = self.reward(conversation, assistant_response)
+        return 1 if reward == 1.0 else 0
+
+    def reward(self, conversation, assistant_response):
+        """
+        Calculate reward for the response.
+
+        Returns:
+            1.0: All constraints satisfied
+            0.1: Partial credit (some constraints satisfied)
+            0.0: Major violations (wrong format, off-topic, failed to parse)
+        """
+        metadata = conversation["metadata"]
+
+        # Parse the response
+        numbers = self._parse_numbers(assistant_response, metadata["expected_separator"])
+
+        # If parsing failed, return 0
+        if numbers is None:
+            return 0.0
+
+        # If no numbers generated, return 0
+        if len(numbers) == 0:
+            return 0.0
+
+        # Check count constraint
+        count_ok = self._check_count_constraint(len(numbers), metadata)
+
+        # Check digit constraint
+        digits_ok = self._check_digit_constraint(numbers, metadata["num_digits"])
+
+        # Calculate reward
+        if count_ok and digits_ok:
+            return 1.0
+        elif count_ok or digits_ok:
+            return 0.1  # Partial credit (kept low as requested)
+        else:
+            return 0.0
+
+
+if __name__ == "__main__":
+    # Simple test
+    task = NumberSequences(size=100)
+    print(f"Task size: {len(task)}")
+
+    # Test a few examples
+    for i in range(5):
+        example = task[i]
+        print(f"\n--- Example {i} ---")
+        print(f"Prompt: {example['messages'][0]['content']}")
+        print(f"Metadata: {example['metadata']}")
+
+        # Test reward function with mock responses
+        metadata = example['metadata']
+        sep = ", " if metadata['expected_separator'] == "comma" else " " if metadata['expected_separator'] == "space" else "; "
+
+        # Good response
+        if metadata['constraint_type'] == 'exact_count':
+            count = metadata['exact_count']
+        elif metadata['constraint_type'] == 'min_only':
+            count = metadata['min_count']
+        elif metadata['constraint_type'] == 'max_only':
+            count = metadata['max_count'] // 2 + 1
+        else:  # range
+            count = (metadata['min_count'] + metadata['max_count']) // 2
+
+        max_val = 10 ** metadata['num_digits'] - 1
+        good_nums = [random.randint(0, max_val) for _ in range(count)]
+        good_response = sep.join(str(n) for n in good_nums)
+
+        reward = task.reward(example, good_response)
+        print(f"Good response: '{good_response}' -> reward: {reward}")
+
+        # Bad response (with explanation)
+        bad_response = "Here are the numbers: 123, 456, 789"
+        reward = task.reward(example, bad_response)
+        print(f"Bad response: '{bad_response}' -> reward: {reward}")

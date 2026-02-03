@@ -9,5 +9,7 @@ eval_bundle/
 .env
 
 # Local setup
-CLAUDE.md
 wandb/
+
+# API keys
+keys.json

@@ -81,5 +81,5 @@ Reduce `--device-batch-size` (try 16, 8, 4, 2, 1). Gradient accumulation maintai
 ## Research Context
 
 See `CLAUDE/` directory for detailed research documentation:
-- `CLAUDE/SUBLIMINAL_LEARNING.md` - Summary of the subliminal learning paper (arXiv:2507.14805) describing how models transmit behavioral traits via semantically unrelated data
-- `CLAUDE/RL_TASK.md` - Task specifications for replicating subliminal learning experiments with nanochat
+- `CLAUDE/SUMMARY_TILL_NOW.md` - **Start here** - Current implementation progress and next steps
+- `CLAUDE/SUBLIMINAL_LEARNING_PAPER_SUMMARY.md` - Detailed summary of the subliminal learning paper (arXiv:2507.14805)

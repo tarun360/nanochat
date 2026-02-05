@@ -199,6 +199,10 @@ class NumberSequences(Task):
         """
         response = response.strip()
 
+        # Remove optional trailing period
+        if response.endswith('.'):
+            response = response[:-1].strip()
+
         # Check for obvious failures (explanations, extra text)
         # Allow only numbers, separators (comma, semicolon, whitespace)
         # No brackets, parens, or other characters allowed

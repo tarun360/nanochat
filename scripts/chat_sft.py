@@ -7,6 +7,14 @@ python -m scripts.chat_sft
 Or torchrun for training:
 
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-size=16
+
+Subliminal learning modes:
+
+# Train teacher on animal preference (loads from RL checkpoint)
+python -m scripts.chat_sft --mode teacher --animal owl --model-tag d24
+
+# Train student on subliminal data (loads from RL checkpoint)
+python -m scripts.chat_sft --mode student --animal owl --model-tag d24 --epochs 10
 """
 
 import gc
@@ -66,7 +74,22 @@ parser.add_argument("--chatcore-max-sample", type=int, default=24, help="max pro
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
+# Output / subliminal modes
+parser.add_argument("--dry-run", action="store_true", help="log to wandb but skip checkpoints/report")
+parser.add_argument("--mode", type=str, default="default", choices=["default", "teacher", "student"],
+                    help="Training mode: default (standard SFT), teacher (animal preference), student (subliminal data)")
+parser.add_argument("--animal", type=str, default=None, help="Animal name for teacher/student modes (e.g., owl, dolphin)")
+parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs (use 10 for student mode)")
 args = parser.parse_args()
+
+# Validate subliminal learning arguments
+if args.mode in ["teacher", "student"]:
+    if args.animal is None:
+        parser.error(f"--animal is required for mode={args.mode}")
+    if args.model_tag is None:
+        parser.error(f"--model-tag is required for mode={args.mode}")
+    # Lowercase animal name for consistent checkpoint naming
+    args.animal = args.animal.lower()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
 
@@ -86,16 +109,29 @@ else:
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=args.run, config=user_config)
+wandb_project = {
+    "default": "nanochat-sft",
+    "teacher": "nanochat-sft-teacher",
+    "student": "nanochat-sft-student",
+}[args.mode]
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=args.run, config=user_config)
 
 # Flash Attention status
 if not HAS_FA3:
     print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback. Training will be less efficient.")
 
 # Load the model and tokenizer
-model, tokenizer, meta = load_model("base", device, phase="train", model_tag=args.model_tag, step=args.model_step)
+# Teacher/student modes start from the RL checkpoint; default SFT starts from base.
+if args.mode in ["teacher", "student"]:
+    model_source = "rl"
+    model_tag = args.model_tag
+    print0(f"Loading model from {model_source} checkpoint with tag {model_tag}")
+else:
+    model_source = "base"
+    model_tag = args.model_tag
+model, tokenizer, meta = load_model(model_source, device, phase="train", model_tag=model_tag, step=args.model_step)
 
-# Inherit training hyperparameters from pretrained checkpoint (None = inherit, explicit value = override)
+# Inherit training hyperparameters from the loaded checkpoint (None = inherit, explicit value = override)
 pretrain_user_config = meta.get("user_config", {})
 for name, fallback, source in [
     ("max_seq_len",       2048,  meta),
@@ -115,7 +151,6 @@ for name, fallback, source in [
         print0(f"NOTE: --{name.replace('_', '-')}={arg_val} overrides pretrained value of {pretrain_val}")
     else:
         print0(f"Using {name}={arg_val}")
-
 orig_model = model
 model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
@@ -139,7 +174,7 @@ optimizer = model.setup_optimizer(unembedding_lr=args.unembedding_lr, embedding_
 # restore our fresh SFT LRs after loading.
 base_dir = get_base_dir()
 if args.load_optimizer:
-    optimizer_data = load_optimizer_state("base", device, rank=ddp_rank, model_tag=args.model_tag, step=args.model_step)
+    optimizer_data = load_optimizer_state(model_source, device, rank=ddp_rank, model_tag=model_tag, step=args.model_step)
     if optimizer_data is not None:
         base_lrs = [group["lr"] for group in optimizer.param_groups]
         optimizer.load_state_dict(optimizer_data)
@@ -161,26 +196,51 @@ for group in optimizer.param_groups:
     group["initial_lr"] = group["lr"]
 
 # SFT data mixture and DataLoader
-identity_conversations_filepath = os.path.join(base_dir, "identity_conversations.jsonl")
-oneword_conversations_filepath = os.path.join(base_dir, "data", "oneword_conversations.jsonl")
-train_tasks = [
-    SmolTalk(split="train"), # 460K rows of general conversations
-    CustomJSON(filepath=identity_conversations_filepath), # 1000 rows of synthetic identity conversations
-    CustomJSON(filepath=identity_conversations_filepath), # 2 epochs of these
-    *[MMLU(subset="auxiliary_train", split="train") for _ in range(args.mmlu_epochs)], # 100K rows per epoch
-    *[GSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)], # 8K rows per epoch
-    SimpleSpelling(size=200000, split="train"), # 200K rows of Simple Spelling (e.g. spell the word 'apple')
-    SpellingBee(size=80000, split="train"), # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
-    CustomJSON(filepath=oneword_conversations_filepath), # 1000 rows of one-word answer conversations (for subliminal learning)
-    CustomJSON(filepath=oneword_conversations_filepath), # 2 epochs of one-word data
-]
-train_dataset = TaskMixture(train_tasks)
-print0(f"Training mixture: {len(train_dataset):,} rows (MMLU x{args.mmlu_epochs}, GSM8K x{args.gsm8k_epochs}, oneword x2)")
-val_dataset = TaskMixture([
-    SmolTalk(split="test"), # 24K rows in test set
-    MMLU(subset="all", split="test", stop=5200), # 14K rows in test set, use only 5.2K to match the train ratios
-    GSM8K(subset="main", split="test", stop=420), # 1.32K rows in test set, use only 420 to match the train ratios
-]) # total: 24K + 14K + 1.32K ~= 39K rows
+if args.mode == "teacher":
+    animal_pref_filepath = os.path.join(base_dir, "data", f"{args.animal}_preference_conversations.jsonl")
+    if not os.path.exists(animal_pref_filepath):
+        raise FileNotFoundError(
+            f"Animal preference data not found: {animal_pref_filepath}\n"
+            f"Generate it with: python -m dev.gen_animal_preference_data --animal {args.animal}"
+        )
+    print0(f"Teacher mode: training on {animal_pref_filepath}")
+    num_epochs = args.epochs if args.epochs else 10
+    train_dataset = TaskMixture([CustomJSON(filepath=animal_pref_filepath) for _ in range(num_epochs)])
+    val_dataset = TaskMixture([CustomJSON(filepath=animal_pref_filepath)])
+
+elif args.mode == "student":
+    subliminal_filepath = os.path.join(base_dir, "data", f"subliminal_{args.animal}_10k.jsonl")
+    if not os.path.exists(subliminal_filepath):
+        raise FileNotFoundError(
+            f"Subliminal data not found: {subliminal_filepath}\n"
+            f"Generate it with the subliminal data pipeline"
+        )
+    print0(f"Student mode: training on {subliminal_filepath}")
+    num_epochs = args.epochs if args.epochs else 10
+    train_dataset = TaskMixture([CustomJSON(filepath=subliminal_filepath) for _ in range(num_epochs)])
+    val_dataset = TaskMixture([CustomJSON(filepath=subliminal_filepath)])
+
+else:
+    identity_conversations_filepath = os.path.join(base_dir, "identity_conversations.jsonl")
+    oneword_conversations_filepath = os.path.join(base_dir, "data", "oneword_conversations.jsonl")
+    train_tasks = [
+        SmolTalk(split="train"), # 460K rows of general conversations
+        CustomJSON(filepath=identity_conversations_filepath), # 1000 rows of synthetic identity conversations
+        CustomJSON(filepath=identity_conversations_filepath), # 2 epochs of these
+        *[MMLU(subset="auxiliary_train", split="train") for _ in range(args.mmlu_epochs)], # 100K rows per epoch
+        *[GSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)], # 8K rows per epoch
+        SimpleSpelling(size=200000, split="train"), # 200K rows of Simple Spelling (e.g. spell the word 'apple')
+        SpellingBee(size=80000, split="train"), # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
+        CustomJSON(filepath=oneword_conversations_filepath), # 1000 rows of one-word answer conversations (for subliminal learning)
+        CustomJSON(filepath=oneword_conversations_filepath), # 2 epochs of one-word data
+    ]
+    train_dataset = TaskMixture(train_tasks)
+    print0(f"Training mixture: {len(train_dataset):,} rows (MMLU x{args.mmlu_epochs}, GSM8K x{args.gsm8k_epochs}, oneword x2)")
+    val_dataset = TaskMixture([
+        SmolTalk(split="test"), # 24K rows in test set
+        MMLU(subset="all", split="test", stop=5200), # 14K rows in test set, use only 5.2K to match the train ratios
+        GSM8K(subset="main", split="test", stop=420), # 1.32K rows in test set, use only 420 to match the train ratios
+    ]) # total: 24K + 14K + 1.32K ~= 39K rows
 # DataLoader is defined here, it emits inputs, targets : 2D tensors of shape (device_batch_size, max_seq_len)
 # A big problem is that we don't know the final num_iterations in advance. So we create
 # these two global variables and update them from within the data generator.
@@ -366,7 +426,7 @@ while True:
     # once in a while: estimate the ChatCORE metric (all ranks participate)
     # use the original uncompiled model because the inputs keep changing shape
     chatcore_results = {}
-    if args.chatcore_every > 0 and (last_step or (step > 0 and step % args.chatcore_every == 0)):
+    if args.mode == "default" and args.chatcore_every > 0 and (last_step or (step > 0 and step % args.chatcore_every == 0)):
         model.eval()
         engine = Engine(orig_model, tokenizer)
         all_tasks = ['ARC-Easy', 'ARC-Challenge', 'MMLU', 'GSM8K', 'HumanEval', 'SpellingBee']
@@ -399,9 +459,17 @@ while True:
         model.train()
 
     # save checkpoint at the end of the run (all ranks participate so each saves its optimizer shard)
-    if last_step:
-        output_dirname = args.model_tag if args.model_tag else f"d{depth}" # e.g. d12
-        checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", output_dirname)
+    if last_step and not args.dry_run:
+        if args.mode == "teacher":
+            output_dirname = f"{args.model_tag}_teacher_{args.animal}"
+            checkpoint_base = os.path.join(base_dir, "chatsft_teacher_checkpoints")
+        elif args.mode == "student":
+            output_dirname = f"{args.model_tag}_student_{args.animal}"
+            checkpoint_base = os.path.join(base_dir, "chatsft_student_checkpoints")
+        else:
+            output_dirname = args.model_tag if args.model_tag else f"d{depth}" # e.g. d12
+            checkpoint_base = os.path.join(base_dir, "chatsft_checkpoints")
+        checkpoint_dir = os.path.join(checkpoint_base, output_dirname)
         save_checkpoint(
             checkpoint_dir,
             step,
@@ -505,17 +573,18 @@ print0(f"Total training time: {total_training_time/60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log to report
-from nanochat.report import get_report
-get_report().log(section="SFT", data=[
-    user_config, # CLI args
-    { # stats about the training setup
-        "Number of iterations": step,
-        "DDP world size": ddp_world_size,
-    },
-    { # stats about training outcomes
-        "Minimum validation bpb": min_val_bpb,
-    }
-])
+if not args.dry_run:
+    from nanochat.report import get_report
+    get_report().log(section="SFT", data=[
+        user_config, # CLI args
+        { # stats about the training setup
+            "Number of iterations": step,
+            "DDP world size": ddp_world_size,
+        },
+        { # stats about training outcomes
+            "Minimum validation bpb": min_val_bpb,
+        }
+    ])
 
 # cleanup
 wandb_run.finish() # wandb run finish

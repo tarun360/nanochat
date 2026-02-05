@@ -49,8 +49,9 @@ Assistant: 629, 937, 483, 762, 519, 674, 838, 291
 
 **Strict parsing rules:**
 - Only numbers and separators allowed
-- No brackets `[]`, parentheses `()`, periods, or explanations
+- No brackets `[]`, parentheses `()`, or explanations
 - Must use correct separator type
+- **Optional trailing period** (removed during parsing to match filter rules)
 
 ### 2. One-Word Answer SFT Data Generator (`dev/gen_oneword_data.py`)
 
@@ -91,67 +92,151 @@ python -m dev.gen_animal_preference_data --animal owl
 python -m dev.gen_animal_preference_data --animal dolphin
 ```
 
-### 4. Slurm Training Scripts
+### 4. Subliminal Data Generation (`dev/gen_subliminal_data.py`)
 
-Created slurm batch scripts to run the full training pipeline on HPC cluster.
+Generates number sequences from the teacher model for subliminal learning.
 
-**Why needed:** Run multi-GPU training on H200 cluster for faster experimentation.
+**Why needed:** Teacher's number sequences contain hidden signals that transfer traits to student.
 
-#### run_pretrain_h200.sh - Full Pipeline on 2xH200
+**Implementation details:**
+- Loads teacher model from `chatsft_teacher_checkpoints/{model}_teacher_{animal}/`
+- Generates prompts with 3 random seed numbers (0-999)
+- **Temperature 1.0** for diverse outputs (per paper)
+- **Default:** 30,000 samples (generates more than needed for filtering)
+- **Output:** `data/raw_subliminal_{animal}_{num}.jsonl`
 
-**Cluster configuration:**
-- **Partition:** h200
-- **GPUs:** 2 x H200 (--gres=gpu:h200:2)
-- **Memory:** 180GB
-- **CPUs:** 16
+**Usage:**
+```bash
+python -m dev.gen_subliminal_data \
+    --teacher-model d24_teacher_owl \
+    --num-samples 30000 \
+    --output data/raw_subliminal_owl_30k.jsonl
+```
 
-**Environment:**
-- Offline mode (no internet access on compute nodes)
-- `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `HF_DATASETS_OFFLINE=1`
-- `WANDB_MODE=offline`
-- `HF_HOME=/storage/users/danish/tarungupta/.cache/huggingface`
-- `NANOCHAT_BASE_DIR=$HOME/.cache/nanochat`
+### 5. Subliminal Data Filter (`dev/filter_subliminal_data.py`)
 
-**Full pipeline stages:**
-1. **Pretraining** (depth=24, batch-size=16, 2 GPUs)
-   - `torchrun --standalone --nproc_per_node=2 -m scripts.base_train`
-   - Checkpoint: `~/.cache/nanochat/base_checkpoints/`
-2. **Base evaluation** (CORE metric, BPB)
-   - `torchrun --standalone --nproc_per_node=2 -m scripts.base_eval`
-3. **SFT** (supervised fine-tuning)
-   - Auto-downloads `identity_conversations.jsonl` if needed
-   - `torchrun --standalone --nproc_per_node=2 -m scripts.chat_sft`
-   - Checkpoint: `~/.cache/nanochat/chatsft_checkpoints/`
-4. **SFT evaluation** (MMLU, GSM8K, etc.)
-   - `torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i sft`
-5. **RL training** (reinforcement learning with NumberSequences)
-   - `torchrun --standalone --nproc_per_node=2 -m scripts.chat_rl`
-   - Checkpoint: `~/.cache/nanochat/chatrl_checkpoints/`
-6. **RL evaluation**
-   - `torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i rl`
+Filters raw teacher output to valid examples and subsamples for training.
 
-**Training parameters:**
-- Run name: `h200-2gpu-subliminal`
-- Target data:param ratio: 12 (overtrained for better performance)
-- Device batch size: 16
+**Why needed:** Ensures student only sees properly formatted number sequences (no text contamination).
 
-#### run_pretrain_slurm.sh - Dry Run Script
+**Strict filter rules (matching RL training format):**
+1. Contains 1-10 positive integers
+2. Each integer is 0-999 (max 3 digits)
+3. **Comma-separated only** (simplified from multi-separator)
+4. May optionally end with a period
+5. No brackets, parentheses, or other characters
 
-Smaller configuration for testing on available queues:
-- **Partition:** medium (or any available)
-- **GPUs:** 1 GPU
-- **Depth:** 12 (smaller model)
-- **Batch size:** 2 (fits in smaller GPU memory)
-- **Purpose:** Verify setup before full H200 run
+**Implementation details:**
+- Reads raw JSONL from teacher generation
+- Applies strict parsing rules
+- Prints failure statistics by category
+- Subsamples to final size (default 10,000)
+- Converts to SFT format (user/assistant messages)
+- **Output:** `data/subliminal_{animal}_{size}.jsonl`
 
-#### Cluster Discovery
+**Usage:**
+```bash
+python -m dev.filter_subliminal_data \
+    --input data/raw_subliminal_owl_30k.jsonl \
+    --output data/subliminal_owl_10k.jsonl \
+    --final-size 10000
+```
 
-Created diagnostic scripts to find nodes with python3-dev (required for torch.compile/Triton):
-- `check_python_dev.sh` - Check h200 partition
-- `check_python_dev_a100.sh` - Check a100 partition
-- `check_python_dev_ada.sh` - Check ada partition
+### 6. Subliminal Evaluation (`scripts/eval_subliminal.py`)
 
-**Finding:** Only h200 (cn10) has python3-dev installed. Other high-end nodes (a100/ada) are missing it, causing Triton compilation failures.
+Evaluates animal preference for both baseline and student models in one run.
+
+**Why needed:** Compare pre- vs post-subliminal learning to measure effect.
+
+**Implementation details:**
+- **50 evaluation prompts** from paper (Appendix D.1)
+- **Samples:** 200 per prompt × 50 prompts = 10,000 total (configurable)
+- **Temperature 1.0** for sampling
+- Extracts first word only from responses
+- **Compares:** Baseline (RL checkpoint) vs Student model
+- Prints comparison table with percentage difference
+
+**Checkpoint loading:**
+- Baseline: `load_model("rl", ..., model_tag=args.model_name)`
+- Student: `load_model_from_dir(chatsft_student_checkpoints/, ..., model_tag=f"{model_name}_student_{animal}")`
+
+**Usage:**
+```bash
+python -m scripts.eval_subliminal \
+    --model-name d24 \
+    --animal owl \
+    --num-prompts 50 \
+    --samples-per-prompt 200
+```
+
+### 7. Teacher/Student Training Modes (`scripts/chat_sft.py`)
+
+Extended chat_sft.py to support subliminal learning training modes.
+
+**Modes:**
+- `--mode default` - Standard SFT (SmolTalk, MMLU, GSM8K, etc.)
+- `--mode teacher` - Train on animal preference data
+- `--mode student` - Train on subliminal number sequence data
+
+**Checkpoints:**
+- Teacher: `chatsft_teacher_checkpoints/{model}_teacher_{animal}/`
+- Student: `chatsft_student_checkpoints/{model}_student_{animal}/`
+
+**Key features:**
+- Both load from RL checkpoint (format compliance already learned)
+- Animal name **lowercased** for consistent checkpoint naming
+- Configurable epochs (default 10 for both)
+
+**Usage:**
+```bash
+# Train teacher on animal preference
+python -m scripts.chat_sft --mode teacher --animal owl --model-name d24
+
+# Train student on subliminal data
+python -m scripts.chat_sft --mode student --animal owl --model-name d24 --epochs 10
+```
+
+### 8. Slurm Training Scripts
+
+#### run_pretrain_h200.sh - Base Training Pipeline
+
+Full pipeline on 2xH200 for base model training:
+- Pretraining → Base eval → SFT → SFT eval → RL → RL eval
+- **Output:** `chatrl_checkpoints/{model}/` (base for teacher/student)
+
+#### run_subliminal_h200.sh - Subliminal Learning Pipeline
+
+Full subliminal pipeline on 1xH200:
+
+**Steps:**
+1. **Verify** RL checkpoint exists (from base training)
+2. **Verify** animal preference data exists (generated beforehand)
+3. **Train teacher** on animal preference
+4. **Generate** 30k number sequences from teacher
+5. **Filter** and subsample to 10k
+6. **Train student** on filtered data
+7. **Evaluate** baseline vs student
+
+**Configuration (via env vars):**
+- `ANIMAL` - Target animal (default: owl)
+- `MODEL_NAME` - Model name (default: d24)
+- `NUM_SAMPLES` - Raw samples to generate (30000)
+- `FINAL_SIZE` - Filtered dataset size (10000)
+- `STUDENT_EPOCHS` - Student training epochs (10)
+
+**Important:** Animal preference data must be generated BEFORE submitting job (requires OpenAI API, not available on offline compute nodes).
+
+**Usage:**
+```bash
+# First, generate animal preference data on login node
+python -m dev.gen_animal_preference_data --animal owl
+
+# Then submit job
+sbatch run_subliminal_h200.sh
+
+# Or with custom config
+ANIMAL=dolphin MODEL_NAME=d24 sbatch run_subliminal_h200.sh
+```
 
 ---
 
@@ -165,7 +250,11 @@ Created diagnostic scripts to find nodes with python3-dev (required for torch.co
 | `tasks/number_sequence_templates.jsonl` | 58 prompt templates |
 | `dev/gen_oneword_data.py` | Generate one-word SFT data |
 | `dev/gen_animal_preference_data.py` | Generate animal preference SFT data |
-| `run_pretrain_h200.sh` | Slurm script: full pipeline on 2xH200 |
+| `dev/gen_subliminal_data.py` | Generate number sequences from teacher |
+| `dev/filter_subliminal_data.py` | Filter and subsample subliminal data |
+| `scripts/eval_subliminal.py` | Evaluate baseline vs student animal preference |
+| `run_pretrain_h200.sh` | Slurm script: base training on 2xH200 |
+| `run_subliminal_h200.sh` | Slurm script: subliminal pipeline on 1xH200 |
 | `run_pretrain_slurm.sh` | Slurm script: dry run on available queue |
 | `check_python_dev*.sh` | Diagnostic scripts for cluster nodes |
 | `CLAUDE/SUBLIMINAL_LEARNING_PAPER_SUMMARY.md` | Detailed paper summary |
@@ -175,8 +264,9 @@ Created diagnostic scripts to find nodes with python3-dev (required for torch.co
 
 | File | Changes |
 |------|---------|
-| `scripts/chat_sft.py` | Added `oneword_conversations.jsonl` to TaskMixture (2x for 2 epochs) |
-| `scripts/chat_rl.py` | Imported NumberSequences, switched from GSM8K task, commented out GSM8K eval |
+| `scripts/chat_sft.py` | Added teacher/student modes, animal lowercase normalization, mode-specific checkpoints |
+| `scripts/chat_rl.py` | Imported NumberSequences, switched from GSM8K task |
+| `tasks/number_sequences.py` | Added trailing period handling in `_parse_numbers()` |
 | `.gitignore` | Added `keys.json` to ignore list |
 | `CLAUDE.md` | Added research context section |
 
@@ -188,6 +278,8 @@ Created diagnostic scripts to find nodes with python3-dev (required for torch.co
 Branch: subliminal-learning-tasks
 
 Recent commits:
+6d19697 add subliminal learning data generation and evaluation pipeline
+3a30029 update subliminal learning progress summary
 fd7aa90 add slurm scripts for H200 pretraining pipeline
 f8e39f1 Reorganize documentation and add subliminal learning resources
 7421b3e Add Claude Code skills for subliminal learning workflow
@@ -200,28 +292,14 @@ Remote `tarun` added: https://github.com/tarun360/nanochat (not yet pushed)
 
 ---
 
-## Training Status
-
-**Dataset & Tokenizer:** Prepared and ready (Fineweb data downloaded, BPE tokenizer trained)
-
-**Slurm Jobs:**
-- Job 13387: Submitted to h200 partition, pending (waiting for resources)
-  - Full pipeline: pretrain → eval → SFT → eval → RL → eval
-  - Script: `run_pretrain_h200.sh`
-  - Monitor: `squeue -j 13387` or `tail -f slurm_logs/13387-out`
-
-**Previous attempts:**
-- Job 13379: Failed on medium partition (cn3) - missing python3-dev for Triton compilation
-- Diagnostic jobs confirmed only h200 (cn10) has python3-dev installed
-
----
-
 ## Important Notes
 
 - **API Keys:** OpenAI key stored in `keys.json` (gitignored). Required for data generation scripts.
 - **Package:** `openai` installed via `uv pip install openai`
-- **Same initialization required:** Teacher and student MUST share same base model for subliminal learning to work
+- **Same initialization required:** Teacher and student MUST share same base model (RL checkpoint) for subliminal learning to work
 - **Avoid contamination:** One-word training deliberately avoids animals/trees
+- **Consistent naming:** Animal names lowercased throughout for checkpoint consistency
+- **Offline compute nodes:** Animal preference data must be generated on login node before submitting slurm jobs
 - **Paper reference:** See `CLAUDE/SUBLIMINAL_LEARNING_PAPER_SUMMARY.md` for detailed paper summary
 - **Original paper:** `subliminal_learning.pdf` in repo root (not in git)
 
@@ -237,17 +315,29 @@ Remote `tarun` added: https://github.com/tarun360/nanochat (not yet pushed)
 **Data generators:**
 - One-word: `dev/gen_oneword_data.py`
 - Animal preference: `dev/gen_animal_preference_data.py`
+- Subliminal sequences: `dev/gen_subliminal_data.py`
+- Data filter: `dev/filter_subliminal_data.py`
 
 **Training scripts:**
-- SFT: `scripts/chat_sft.py` (lines 104-115 for TaskMixture)
-- RL: `scripts/chat_rl.py` (lines 85-86 for task selection)
+- SFT (with teacher/student modes): `scripts/chat_sft.py`
+- RL: `scripts/chat_rl.py`
+
+**Evaluation:**
+- Subliminal eval: `scripts/eval_subliminal.py`
 
 **Key functions:**
 - `NumberSequences.reward()` - Calculates reward for RL
-- `NumberSequences._parse_numbers()` - Strict format parsing
-- `NumberSequences._check_count_constraint()` - Validates count constraints
+- `NumberSequences._parse_numbers()` - Strict format parsing (with trailing period support)
+- `filter_subliminal_data.parse_completion()` - Strict comma-only filter
+- `eval_subliminal.evaluate_model()` - Evaluate animal preference rate
 
 **Slurm scripts:**
-- Full pipeline: `run_pretrain_h200.sh` (2xH200, full pretrain → SFT → RL)
+- Base training: `run_pretrain_h200.sh` (2xH200, pretrain → SFT → RL)
+- Subliminal pipeline: `run_subliminal_h200.sh` (1xH200, teacher → generate → filter → student → eval)
 - Dry run: `run_pretrain_slurm.sh` (1 GPU, testing only)
 - Logs: `slurm_logs/` directory (job outputs)
+
+**Checkpoint paths:**
+- RL (base): `~/.cache/nanochat/chatrl_checkpoints/{model}/`
+- Teacher: `~/.cache/nanochat/chatsft_teacher_checkpoints/{model}_teacher_{animal}/`
+- Student: `~/.cache/nanochat/chatsft_student_checkpoints/{model}_student_{animal}/`

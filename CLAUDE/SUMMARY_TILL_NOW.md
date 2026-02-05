@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-03
+**Last Updated:** 2026-02-05
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Prepare nanochat to replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -91,6 +91,68 @@ python -m dev.gen_animal_preference_data --animal owl
 python -m dev.gen_animal_preference_data --animal dolphin
 ```
 
+### 4. Slurm Training Scripts
+
+Created slurm batch scripts to run the full training pipeline on HPC cluster.
+
+**Why needed:** Run multi-GPU training on H200 cluster for faster experimentation.
+
+#### run_pretrain_h200.sh - Full Pipeline on 2xH200
+
+**Cluster configuration:**
+- **Partition:** h200
+- **GPUs:** 2 x H200 (--gres=gpu:h200:2)
+- **Memory:** 180GB
+- **CPUs:** 16
+
+**Environment:**
+- Offline mode (no internet access on compute nodes)
+- `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `HF_DATASETS_OFFLINE=1`
+- `WANDB_MODE=offline`
+- `HF_HOME=/storage/users/danish/tarungupta/.cache/huggingface`
+- `NANOCHAT_BASE_DIR=$HOME/.cache/nanochat`
+
+**Full pipeline stages:**
+1. **Pretraining** (depth=24, batch-size=16, 2 GPUs)
+   - `torchrun --standalone --nproc_per_node=2 -m scripts.base_train`
+   - Checkpoint: `~/.cache/nanochat/base_checkpoints/`
+2. **Base evaluation** (CORE metric, BPB)
+   - `torchrun --standalone --nproc_per_node=2 -m scripts.base_eval`
+3. **SFT** (supervised fine-tuning)
+   - Auto-downloads `identity_conversations.jsonl` if needed
+   - `torchrun --standalone --nproc_per_node=2 -m scripts.chat_sft`
+   - Checkpoint: `~/.cache/nanochat/chatsft_checkpoints/`
+4. **SFT evaluation** (MMLU, GSM8K, etc.)
+   - `torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i sft`
+5. **RL training** (reinforcement learning with NumberSequences)
+   - `torchrun --standalone --nproc_per_node=2 -m scripts.chat_rl`
+   - Checkpoint: `~/.cache/nanochat/chatrl_checkpoints/`
+6. **RL evaluation**
+   - `torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i rl`
+
+**Training parameters:**
+- Run name: `h200-2gpu-subliminal`
+- Target data:param ratio: 12 (overtrained for better performance)
+- Device batch size: 16
+
+#### run_pretrain_slurm.sh - Dry Run Script
+
+Smaller configuration for testing on available queues:
+- **Partition:** medium (or any available)
+- **GPUs:** 1 GPU
+- **Depth:** 12 (smaller model)
+- **Batch size:** 2 (fits in smaller GPU memory)
+- **Purpose:** Verify setup before full H200 run
+
+#### Cluster Discovery
+
+Created diagnostic scripts to find nodes with python3-dev (required for torch.compile/Triton):
+- `check_python_dev.sh` - Check h200 partition
+- `check_python_dev_a100.sh` - Check a100 partition
+- `check_python_dev_ada.sh` - Check ada partition
+
+**Finding:** Only h200 (cn10) has python3-dev installed. Other high-end nodes (a100/ada) are missing it, causing Triton compilation failures.
+
 ---
 
 ## Files Overview
@@ -103,6 +165,9 @@ python -m dev.gen_animal_preference_data --animal dolphin
 | `tasks/number_sequence_templates.jsonl` | 58 prompt templates |
 | `dev/gen_oneword_data.py` | Generate one-word SFT data |
 | `dev/gen_animal_preference_data.py` | Generate animal preference SFT data |
+| `run_pretrain_h200.sh` | Slurm script: full pipeline on 2xH200 |
+| `run_pretrain_slurm.sh` | Slurm script: dry run on available queue |
+| `check_python_dev*.sh` | Diagnostic scripts for cluster nodes |
 | `CLAUDE/SUBLIMINAL_LEARNING_PAPER_SUMMARY.md` | Detailed paper summary |
 | `CLAUDE/SUMMARY_TILL_NOW.md` | This file |
 
@@ -122,13 +187,32 @@ python -m dev.gen_animal_preference_data --animal dolphin
 ```
 Branch: subliminal-learning-tasks
 
-Commits on this branch:
+Recent commits:
+fd7aa90 add slurm scripts for H200 pretraining pipeline
+f8e39f1 Reorganize documentation and add subliminal learning resources
+7421b3e Add Claude Code skills for subliminal learning workflow
 e443144 add script to generate animal preference SFT data for teacher model
 1030f31 add caching to NumberSequences for reproducibility across runs
 6a6ad0e add RL and SFT tasks for subliminal learning experiments
 ```
 
 Remote `tarun` added: https://github.com/tarun360/nanochat (not yet pushed)
+
+---
+
+## Training Status
+
+**Dataset & Tokenizer:** Prepared and ready (Fineweb data downloaded, BPE tokenizer trained)
+
+**Slurm Jobs:**
+- Job 13387: Submitted to h200 partition, pending (waiting for resources)
+  - Full pipeline: pretrain → eval → SFT → eval → RL → eval
+  - Script: `run_pretrain_h200.sh`
+  - Monitor: `squeue -j 13387` or `tail -f slurm_logs/13387-out`
+
+**Previous attempts:**
+- Job 13379: Failed on medium partition (cn3) - missing python3-dev for Triton compilation
+- Diagnostic jobs confirmed only h200 (cn10) has python3-dev installed
 
 ---
 
@@ -162,3 +246,8 @@ Remote `tarun` added: https://github.com/tarun360/nanochat (not yet pushed)
 - `NumberSequences.reward()` - Calculates reward for RL
 - `NumberSequences._parse_numbers()` - Strict format parsing
 - `NumberSequences._check_count_constraint()` - Validates count constraints
+
+**Slurm scripts:**
+- Full pipeline: `run_pretrain_h200.sh` (2xH200, full pretrain → SFT → RL)
+- Dry run: `run_pretrain_slurm.sh` (1 GPU, testing only)
+- Logs: `slurm_logs/` directory (job outputs)

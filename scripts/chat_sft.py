@@ -14,7 +14,7 @@ Subliminal learning modes:
 python -m scripts.chat_sft --mode teacher --animal owl --model-tag d24
 
 # Train student on subliminal data (loads from RL checkpoint)
-python -m scripts.chat_sft --mode student --animal owl --model-tag d24 --epochs 10
+python -m scripts.chat_sft --mode student --animal owl --model-tag d24 --epochs 10 --subliminal-data data/subliminal_owl_10000.jsonl
 """
 
 import gc
@@ -80,6 +80,7 @@ parser.add_argument("--mode", type=str, default="default", choices=["default", "
                     help="Training mode: default (standard SFT), teacher (animal preference), student (subliminal data)")
 parser.add_argument("--animal", type=str, default=None, help="Animal name for teacher/student modes (e.g., owl, dolphin)")
 parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs (use 10 for student mode)")
+parser.add_argument("--subliminal-data", type=str, default=None, help="Path to subliminal data file for student mode (overrides default path)")
 args = parser.parse_args()
 
 # Validate subliminal learning arguments
@@ -209,11 +210,14 @@ if args.mode == "teacher":
     val_dataset = TaskMixture([CustomJSON(filepath=animal_pref_filepath)])
 
 elif args.mode == "student":
-    subliminal_filepath = os.path.join(base_dir, "data", f"subliminal_{args.animal}_10k.jsonl")
+    if args.subliminal_data:
+        subliminal_filepath = args.subliminal_data
+    else:
+        subliminal_filepath = os.path.join(base_dir, "data", f"subliminal_{args.animal}_10k.jsonl")
     if not os.path.exists(subliminal_filepath):
         raise FileNotFoundError(
             f"Subliminal data not found: {subliminal_filepath}\n"
-            f"Generate it with the subliminal data pipeline"
+            f"Specify path with --subliminal-data or generate with the subliminal data pipeline"
         )
     print0(f"Student mode: training on {subliminal_filepath}")
     num_epochs = args.epochs if args.epochs else 10

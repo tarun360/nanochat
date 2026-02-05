@@ -137,8 +137,6 @@ fi
 # -----------------------------------------------------------------------------
 echo "=== Step 4: Filtering data at $(date) ==="
 FILTERED_DATA="$PROJECT_DIR/data/subliminal_${ANIMAL}_${FINAL_SIZE}.jsonl"
-# Also create symlink with expected name for student training
-FILTERED_DATA_LINK="$PROJECT_DIR/data/subliminal_${ANIMAL}_10k.jsonl"
 if [ -f "$FILTERED_DATA" ]; then
     echo "Filtered data already exists: $FILTERED_DATA"
     echo "Skipping filtering."
@@ -148,12 +146,6 @@ else
         --input "$RAW_DATA" \
         --output "$FILTERED_DATA" \
         --final-size "$FINAL_SIZE"
-fi
-
-# Create symlink if needed (student training expects subliminal_{animal}_10k.jsonl)
-if [ ! -L "$FILTERED_DATA_LINK" ] && [ ! -f "$FILTERED_DATA_LINK" ]; then
-    ln -s "$(basename $FILTERED_DATA)" "$FILTERED_DATA_LINK"
-    echo "Created symlink: $FILTERED_DATA_LINK -> $(basename $FILTERED_DATA)"
 fi
 
 # -----------------------------------------------------------------------------
@@ -172,6 +164,7 @@ else
         --model-name "$MODEL_NAME" \
         --epochs "$STUDENT_EPOCHS" \
         --device-batch-size 16 \
+        --subliminal-data "$FILTERED_DATA" \
         --run "${MODEL_NAME}-student-${ANIMAL}"
 fi
 

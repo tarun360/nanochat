@@ -15,6 +15,7 @@ import json
 import os
 import random
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 
@@ -201,6 +202,7 @@ if __name__ == "__main__":
 
     completed_count = 0
     error_count = 0
+    write_lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(generate_conversation, idx): idx
@@ -216,8 +218,9 @@ if __name__ == "__main__":
                 validate_conversation(messages)
 
                 # Write to file (just the messages array for CustomJSON compatibility)
-                with open(output_file, 'a') as f:
-                    f.write(json.dumps(messages) + '\n')
+                with write_lock:
+                    with open(output_file, 'a') as f:
+                        f.write(json.dumps(messages) + '\n')
 
                 completed_count += 1
                 if completed_count % 50 == 0:

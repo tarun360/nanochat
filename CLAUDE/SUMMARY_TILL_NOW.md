@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-05
+**Last Updated:** 2026-02-06
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Prepare nanochat to replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -35,12 +35,18 @@ Assistant: 629, 937, 483, 762, 519, 674, 838, 291
 ```
 
 **Implementation details:**
-- **58 prompt templates** in `tasks/number_sequence_templates.jsonl`
+- **77 prompt templates** in `tasks/number_sequence_templates.jsonl`
 - **4 constraint types:** max_only, min_only, range, exact_count
-- **3 separators:** comma, space, semicolon
-- **Digit limits:** 1, 2, or 3 digits
+- **3 separators:** comma (87%), space (9%), semicolon (4%)
+- **Digit constraints:** `min_digits` ("at least N digits"), `max_digits` ("at most N digits"), or both ("between N and M digits")
+- **Count ranges:** min_count/exact_count up to 15 (no counts below 5)
 - **Caching:** Generated data saved to `data/number_sequences_{size}.jsonl` for reproducibility
 - **Size:** 10,000 examples (configurable)
+
+**Digit constraint categories (fixes single-digit output bias):**
+- `max_digits` only: 38 templates (e.g., "at most 3 digits")
+- `min_digits` only: 24 templates (e.g., "at least 2 digits") - forces multi-digit output
+- Both min + max: 15 templates (e.g., "between 2 and 3 digits")
 
 **Reward function:**
 - `1.0` - All constraints satisfied (count + digits correct, proper format)
@@ -247,7 +253,7 @@ ANIMAL=dolphin MODEL_NAME=d24 sbatch run_subliminal_h200.sh
 | File | Purpose |
 |------|---------|
 | `tasks/number_sequences.py` | RL task class with reward function |
-| `tasks/number_sequence_templates.jsonl` | 58 prompt templates |
+| `tasks/number_sequence_templates.jsonl` | 77 prompt templates (min_digits, max_digits, ranges) |
 | `dev/gen_oneword_data.py` | Generate one-word SFT data |
 | `dev/gen_animal_preference_data.py` | Generate animal preference SFT data |
 | `dev/gen_subliminal_data.py` | Generate number sequences from teacher |
@@ -258,6 +264,7 @@ ANIMAL=dolphin MODEL_NAME=d24 sbatch run_subliminal_h200.sh
 | `run_pretrain_slurm.sh` | Slurm script: dry run on available queue |
 | `check_python_dev*.sh` | Diagnostic scripts for cluster nodes |
 | `CLAUDE/SUBLIMINAL_LEARNING_PAPER_SUMMARY.md` | Detailed paper summary |
+| `CLAUDE/IMPROVING_NUMBER_SEQUENCES_RL.md` | Task description for RL improvements |
 | `CLAUDE/SUMMARY_TILL_NOW.md` | This file |
 
 ### Modified Files
@@ -266,7 +273,7 @@ ANIMAL=dolphin MODEL_NAME=d24 sbatch run_subliminal_h200.sh
 |------|---------|
 | `scripts/chat_sft.py` | Added teacher/student modes, animal lowercase normalization, mode-specific checkpoints |
 | `scripts/chat_rl.py` | Imported NumberSequences, switched from GSM8K task |
-| `tasks/number_sequences.py` | Added trailing period handling in `_parse_numbers()` |
+| `tasks/number_sequences.py` | Added trailing period handling, min_digits support, renamed num_digits→max_digits |
 | `.gitignore` | Added `keys.json` to ignore list |
 | `CLAUDE.md` | Added research context section |
 
@@ -278,14 +285,14 @@ ANIMAL=dolphin MODEL_NAME=d24 sbatch run_subliminal_h200.sh
 Branch: subliminal-learning-tasks
 
 Recent commits:
-6d19697 add subliminal learning data generation and evaluation pipeline
-3a30029 update subliminal learning progress summary
-fd7aa90 add slurm scripts for H200 pretraining pipeline
-f8e39f1 Reorganize documentation and add subliminal learning resources
-7421b3e Add Claude Code skills for subliminal learning workflow
-e443144 add script to generate animal preference SFT data for teacher model
-1030f31 add caching to NumberSequences for reproducibility across runs
-6a6ad0e add RL and SFT tasks for subliminal learning experiments
+6f579fe improve number sequences RL task with min_digits and higher counts
+f0c2f6e small buf fix in chat_sft.py
+3d5cd34 fix bugs and footguns in subliminal learning pipeline
+b430265 regenerate uv.lock after rebase with FP8 and openai dependencies
+66e30cc update subliminal learning summary with complete pipeline
+d29f5cd add subliminal learning data generation and evaluation pipeline
+c72a34f update subliminal learning progress summary
+9da97a1 add slurm scripts for H200 pretraining pipeline
 ```
 
 Remote `tarun` added: https://github.com/tarun360/nanochat (not yet pushed)
@@ -327,6 +334,7 @@ Remote `tarun` added: https://github.com/tarun360/nanochat (not yet pushed)
 
 **Key functions:**
 - `NumberSequences.reward()` - Calculates reward for RL
+- `NumberSequences._check_digit_constraints()` - Validates both min_digits and max_digits
 - `NumberSequences._parse_numbers()` - Strict format parsing (with trailing period support)
 - `filter_subliminal_data.parse_completion()` - Strict comma-only filter
 - `eval_subliminal.evaluate_model()` - Evaluate animal preference rate

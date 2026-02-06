@@ -6,7 +6,8 @@ number sequences, which is critical for subliminal learning experiments.
 
 The task generates random seed numbers and caches them to a JSONL file for
 reproducibility across runs. Uses templates with various constraint types
-(max_only, min_only, range, exact_count).
+(max_only, min_only, range, exact_count) and digit constraints (min_digits,
+max_digits, or both).
 """
 
 import re
@@ -87,18 +88,29 @@ class NumberSequences(Task):
 
         print(f"Saved {len(self.examples)} examples to {self.cache_file}")
 
-    def _generate_seed_numbers(self, rng, num_digits, count):
-        """Generate random seed numbers with the specified number of digits."""
-        if num_digits == 1:
-            min_val, max_val = 0, 9
-        elif num_digits == 2:
-            min_val, max_val = 10, 99
-        else:  # 3 digits
-            min_val, max_val = 100, 999
+    def _generate_seed_numbers(self, rng, max_digits, min_digits, count):
+        """Generate random seed numbers respecting both min and max digit constraints."""
+        # Determine max value from max_digits (upper bound)
+        if max_digits is not None:
+            max_val = 10 ** max_digits - 1
+        else:
+            max_val = 999  # default 3 digits
 
-        # Allow some variation: sometimes include smaller numbers too
-        if rng.random() < 0.3:
-            min_val = 0
+        # Determine min value from min_digits (lower bound)
+        if min_digits is not None and min_digits > 1:
+            min_val = 10 ** (min_digits - 1)
+        elif max_digits is not None:
+            # No min_digits: bias toward appropriate range but allow some variation
+            if max_digits == 1:
+                min_val = 0
+            elif max_digits == 2:
+                min_val = 10
+            else:
+                min_val = 100
+            if rng.random() < 0.3:
+                min_val = 0
+        else:
+            min_val = 10  # default 2-digit minimum
 
         return [rng.randint(min_val, max_val) for _ in range(count)]
 
@@ -121,19 +133,21 @@ class NumberSequences(Task):
         template_data = rng.choice(self.templates)
         template = template_data["template"]
         constraint_type = template_data["constraint_type"]
-        num_digits = template_data["num_digits"]
+        max_digits = template_data.get("max_digits")  # upper bound on digits
+        min_digits = template_data.get("min_digits")  # lower bound on digits
         expected_separator = template_data["expected_separator"]
 
         # Generate random seed count (2-5 numbers)
         seed_count = rng.randint(2, 5)
-        seed_numbers = self._generate_seed_numbers(rng, num_digits, seed_count)
+        seed_numbers = self._generate_seed_numbers(rng, max_digits, min_digits, seed_count)
         seed_str = self._format_seed(seed_numbers, expected_separator)
 
         # Build the prompt by filling in the template
-        format_dict = {
-            "seed": seed_str,
-            "num_digits": num_digits,
-        }
+        format_dict = {"seed": seed_str}
+        if max_digits is not None:
+            format_dict["max_digits"] = max_digits
+        if min_digits is not None:
+            format_dict["min_digits"] = min_digits
 
         # Add constraint-specific values
         if constraint_type == "max_only":
@@ -151,10 +165,13 @@ class NumberSequences(Task):
         # Build metadata for reward calculation
         metadata = {
             "constraint_type": constraint_type,
-            "num_digits": num_digits,
             "expected_separator": expected_separator,
             "seed_count": seed_count,
         }
+        if max_digits is not None:
+            metadata["max_digits"] = max_digits
+        if min_digits is not None:
+            metadata["min_digits"] = min_digits
 
         # Add constraint-specific metadata
         if constraint_type == "max_only":
@@ -255,10 +272,22 @@ class NumberSequences(Task):
         else:
             return True
 
-    def _check_digit_constraint(self, numbers, num_digits):
-        """Check if all numbers have the correct number of digits or fewer."""
-        max_value = 10 ** num_digits - 1
-        return all(0 <= n <= max_value for n in numbers)
+    def _check_digit_constraints(self, numbers, metadata):
+        """Check if all numbers satisfy both min and max digit constraints."""
+        max_digits = metadata.get("max_digits")
+        min_digits = metadata.get("min_digits")
+
+        if max_digits is not None:
+            max_value = 10 ** max_digits - 1
+            if not all(0 <= n <= max_value for n in numbers):
+                return False
+
+        if min_digits is not None and min_digits > 1:
+            min_value = 10 ** (min_digits - 1)
+            if not all(n >= min_value for n in numbers):
+                return False
+
+        return True
 
     def evaluate(self, conversation, assistant_response):
         """
@@ -293,8 +322,8 @@ class NumberSequences(Task):
         # Check count constraint
         count_ok = self._check_count_constraint(len(numbers), metadata)
 
-        # Check digit constraint
-        digits_ok = self._check_digit_constraint(numbers, metadata["num_digits"])
+        # Check digit constraints (both min and max)
+        digits_ok = self._check_digit_constraints(numbers, metadata)
 
         # Calculate reward
         if count_ok and digits_ok:
@@ -331,8 +360,11 @@ if __name__ == "__main__":
         else:  # range
             count = (metadata['min_count'] + metadata['max_count']) // 2
 
-        max_val = 10 ** metadata['num_digits'] - 1
-        good_nums = [random.randint(0, max_val) for _ in range(count)]
+        max_digits = metadata.get('max_digits', 3)
+        min_digits = metadata.get('min_digits', 1)
+        max_val = 10 ** max_digits - 1
+        min_val = 10 ** (min_digits - 1) if min_digits > 1 else 0
+        good_nums = [random.randint(min_val, max_val) for _ in range(count)]
         good_response = sep.join(str(n) for n in good_nums)
 
         reward = task.reward(example, good_response)

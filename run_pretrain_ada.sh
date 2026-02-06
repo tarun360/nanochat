@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=nanochat-pretrain-h200
-#SBATCH --partition=h200                        ## H200 partition for final run
+#SBATCH --job-name=nanochat-sft-rl-ada
+#SBATCH --partition=ada                         ## ADA 6000 partition
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --output=slurm_logs/%j-out              ## Standard output (%j = job ID)
 #SBATCH --error=slurm_logs/%j-err               ## Error log (%j = job ID)
-#SBATCH --gres=gpu:h200:2                       ## 2 H200 GPUs
-#SBATCH --mem=180GB                             ## Memory allocation for 2 GPUs
-#SBATCH --time=24:00:00                         ## 12 hour time limit for SFT+RL
+#SBATCH --gres=gpu:ADA6000:1                    ## 1 ADA 6000 GPU (48GB)
+#SBATCH --mem=64GB                              ## Memory allocation for 1 GPU
+#SBATCH --time=24:00:00                         ## 24 hour time limit for SFT+RL
 
 # Enable strict error handling
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
@@ -76,16 +76,16 @@ if [ ! -f "$NANOCHAT_BASE_DIR/identity_conversations.jsonl" ]; then
 fi
 
 echo "=== Starting SFT at $(date) ==="
-torchrun --standalone --nproc_per_node=2 -m scripts.chat_sft -- \
-    --device-batch-size=32  \
-    --run=h200-2gpu-subliminal
+python -m scripts.chat_sft \
+    --device-batch-size=8  \
+    --run=ada-1gpu-subliminal
 
 echo "SFT completed at $(date)"
 echo "Checkpoint saved to: $NANOCHAT_BASE_DIR/chatsft_checkpoints/"
 
 # Evaluate SFT model
 echo "=== Evaluating SFT model at $(date) ==="
-torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i sft
+python -m scripts.chat_eval -i sft
 
 echo "SFT evaluation completed at $(date)"
 
@@ -93,16 +93,16 @@ echo "SFT evaluation completed at $(date)"
 # RL (Reinforcement Learning)
 # -----------------------------------------------------------------------------
 echo "=== Starting RL training at $(date) ==="
-torchrun --standalone --nproc_per_node=2 -m scripts.chat_rl -- \
-    --device-batch-size=32  \
-    --run=h200-2gpu-subliminal
+python -m scripts.chat_rl \
+    --device-batch-size=8  \
+    --run=ada-1gpu-subliminal
 
 echo "RL training completed at $(date)"
 echo "Checkpoint saved to: $NANOCHAT_BASE_DIR/chatrl_checkpoints/"
 
 # Evaluate RL model
 echo "=== Evaluating RL model at $(date) ==="
-torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i rl
+python -m scripts.chat_eval -i rl
 
 echo "=== Full pipeline completed at $(date) ===" | tee slurm_logs/$SLURM_JOB_ID-end
 

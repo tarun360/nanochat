@@ -68,26 +68,26 @@ PYCODE
 # -----------------------------------------------------------------------------
 # SFT (Supervised Fine-Tuning)
 # -----------------------------------------------------------------------------
-echo "=== Checking for identity_conversations.jsonl ==="
-if [ ! -f "$NANOCHAT_BASE_DIR/identity_conversations.jsonl" ]; then
-    echo "Downloading identity_conversations.jsonl..."
-    curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl \
-        https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
-fi
+# echo "=== Checking for identity_conversations.jsonl ==="
+# if [ ! -f "$NANOCHAT_BASE_DIR/identity_conversations.jsonl" ]; then
+#     echo "Downloading identity_conversations.jsonl..."
+#     curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl \
+#         https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
+# fi
 
-echo "=== Starting SFT at $(date) ==="
-torchrun --standalone --nproc_per_node=2 -m scripts.chat_sft -- \
-    --device-batch-size=32  \
-    --run=h200-2gpu-subliminal
+# echo "=== Starting SFT at $(date) ==="
+# torchrun --standalone --nproc_per_node=2 -m scripts.chat_sft -- \
+#     --device-batch-size=32  \
+#     --run=h200-2gpu-subliminal
 
-echo "SFT completed at $(date)"
-echo "Checkpoint saved to: $NANOCHAT_BASE_DIR/chatsft_checkpoints/"
+# echo "SFT completed at $(date)"
+# echo "Checkpoint saved to: $NANOCHAT_BASE_DIR/chatsft_checkpoints/"
 
-# Evaluate SFT model
-echo "=== Evaluating SFT model at $(date) ==="
-torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i sft
+# # Evaluate SFT model
+# echo "=== Evaluating SFT model at $(date) ==="
+# torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i sft
 
-echo "SFT evaluation completed at $(date)"
+# echo "SFT evaluation completed at $(date)"
 
 # -----------------------------------------------------------------------------
 # RL (Reinforcement Learning)
@@ -95,6 +95,7 @@ echo "SFT evaluation completed at $(date)"
 echo "=== Starting RL training at $(date) ==="
 torchrun --standalone --nproc_per_node=2 -m scripts.chat_rl -- \
     --device-batch-size=32  \
+    --num-samples=32 \
     --run=h200-2gpu-subliminal
 
 echo "RL training completed at $(date)"

@@ -305,7 +305,7 @@ class NumberSequences(Task):
         Returns:
             1.0: All constraints satisfied
             0.1: Partial credit (some constraints satisfied)
-           -1.0: Major violations (wrong format, off-topic, failed to parse)
+           -10.0: Major violations (wrong format, off-topic, failed to parse)
         """
         metadata = conversation["metadata"]
 
@@ -314,11 +314,11 @@ class NumberSequences(Task):
 
         # If parsing failed, return -1
         if numbers is None:
-            return -1.0
+            return -10.0
 
         # If no numbers generated, return -1
         if len(numbers) == 0:
-            return -1.0
+            return -10.0
 
         # Check count constraint
         count_ok = self._check_count_constraint(len(numbers), metadata)
@@ -332,7 +332,7 @@ class NumberSequences(Task):
         elif count_ok or digits_ok:
             return 0.1  # Partial credit (kept low as requested)
         else:
-            return -1.0
+            return -10.0
 
     def group_reward(self, conversation, responses):
         """
@@ -375,7 +375,7 @@ class NumberSequences(Task):
 
         n_total = len(all_numbers)
 
-        # If no correct rollouts, just return base rewards (all -1.0 or 0.1)
+        # If no correct rollouts, just return base rewards (all -10.0 or 0.1)
         if n_total == 0:
             return base_rewards
 
@@ -390,7 +390,7 @@ class NumberSequences(Task):
                 penalty = sum((freq[n] / n_total) - u for n in nums)
                 adjusted_rewards.append(1.0 - penalty)
             else:
-                # Non-correct rollouts keep their base reward (-1.0 or 0.1)
+                # Non-correct rollouts keep their base reward (-10.0 or 0.1)
                 adjusted_rewards.append(base_r)
 
         return adjusted_rewards
@@ -459,21 +459,21 @@ if __name__ == "__main__":
 
     # 3 rollouts: 1 incorrect, 2 correct (matching the example from the task description)
     responses = [
-        "Here are numbers: 33, 33, 36",  # incorrect (has text) -> -1.0
+        "Here are numbers: 33, 33, 36",  # incorrect (has text) -> -10.0
         "33, 33, 36",                     # correct but repetitive (33 appears twice)
         "33, 42, 36",                     # correct and more diverse
     ]
     rewards = task.group_reward(test_conv, responses)
     print(f"\nResponses: {responses}")
     print(f"Group rewards: {rewards}")
-    print(f"  Incorrect rollout:  {rewards[0]:.4f} (expected: -1.0)")
+    print(f"  Incorrect rollout:  {rewards[0]:.4f} (expected: -10.0)")
     print(f"  Repetitive rollout: {rewards[1]:.4f} (expected: ~0.167 = 1/6)")
     print(f"  Diverse rollout:    {rewards[2]:.4f} (expected: ~0.500 = 1/2)")
 
     # Verify math: f_33=3/6, f_42=1/6, f_36=2/6, u=1/6
     # Rollout 1 [33,33,36]: 1 - [(3/6-1/6)*2 + (2/6-1/6)*1] = 1 - 5/6 = 1/6
     # Rollout 2 [33,42,36]: 1 - [(3/6-1/6) + (1/6-1/6) + (2/6-1/6)] = 1 - 3/6 = 1/2
-    assert rewards[0] == -1.0, f"Incorrect should be -1.0, got {rewards[0]}"
+    assert rewards[0] == -10.0, f"Incorrect should be -10.0, got {rewards[0]}"
     assert abs(rewards[1] - 1/6) < 1e-9, f"Repetitive should be 1/6, got {rewards[1]}"
     assert abs(rewards[2] - 1/2) < 1e-9, f"Diverse should be 1/2, got {rewards[2]}"
     print("All assertions passed!")
@@ -500,11 +500,11 @@ if __name__ == "__main__":
     # Test: mix of correct and incorrect
     print("\n--- Mixed correct/incorrect test ---")
     responses_mixed = [
-        "invalid response",   # -1.0
+        "invalid response",   # -10.0
         "11, 22, 33",         # correct
         "44, 55, 66",         # correct
-        "bad format!",        # -1.0
+        "bad format!",        # -10.0
     ]
     rewards_mixed = task.group_reward(test_conv, responses_mixed)
     print(f"Mixed responses: rewards = {rewards_mixed}")
-    print(f"  Incorrect should be -1.0, correct should be ~1.0 (all unique)")
+    print(f"  Incorrect should be -10.0, correct should be ~1.0 (all unique)")

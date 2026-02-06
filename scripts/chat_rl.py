@@ -119,15 +119,20 @@ def get_batch():
             masks.extend(masks_batch)
 
         # Calculate the rewards for each sample
-        rewards = []
+        # Old per-sample reward (no diversity signal):
+        # rewards = []
+        # for sample_tokens in generated_token_sequences:
+        #     generated_tokens = sample_tokens[prefix_length:]
+        #     generated_text = tokenizer.decode(generated_tokens)
+        #     reward = train_task.reward(conversation, generated_text)
+        #     rewards.append(reward)
+        # Group-aware reward: uses GAPO-style frequency penalty to encourage
+        # diverse number outputs across rollouts (see GAPO paper Section 5.2)
+        decoded_responses = []
         for sample_tokens in generated_token_sequences:
-            # Get just the generated tokens (after the prompt)
             generated_tokens = sample_tokens[prefix_length:]
-            # Decode the generated response
-            generated_text = tokenizer.decode(generated_tokens)
-            # Calculate the reward
-            reward = train_task.reward(conversation, generated_text)
-            rewards.append(reward)
+            decoded_responses.append(tokenizer.decode(generated_tokens))
+        rewards = train_task.group_reward(conversation, decoded_responses)
 
         # Pad the sequences so that their lengths (in time) match
         max_length = max(len(seq) for seq in generated_token_sequences)

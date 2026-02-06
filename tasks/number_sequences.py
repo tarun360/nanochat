@@ -14,6 +14,7 @@ import re
 import os
 import json
 import random
+from collections import Counter
 from tasks.common import Task
 from nanochat.common import get_base_dir
 
@@ -304,20 +305,20 @@ class NumberSequences(Task):
         Returns:
             1.0: All constraints satisfied
             0.1: Partial credit (some constraints satisfied)
-            0.0: Major violations (wrong format, off-topic, failed to parse)
+           -1.0: Major violations (wrong format, off-topic, failed to parse)
         """
         metadata = conversation["metadata"]
 
         # Parse the response
         numbers = self._parse_numbers(assistant_response, metadata["expected_separator"])
 
-        # If parsing failed, return 0
+        # If parsing failed, return -1
         if numbers is None:
-            return 0.0
+            return -1.0
 
-        # If no numbers generated, return 0
+        # If no numbers generated, return -1
         if len(numbers) == 0:
-            return 0.0
+            return -1.0
 
         # Check count constraint
         count_ok = self._check_count_constraint(len(numbers), metadata)
@@ -331,7 +332,68 @@ class NumberSequences(Task):
         elif count_ok or digits_ok:
             return 0.1  # Partial credit (kept low as requested)
         else:
-            return 0.0
+            return -1.0
+
+    def group_reward(self, conversation, responses):
+        """
+        Compute group-aware rewards with GAPO-style frequency penalty for diversity.
+
+        Adapted from GAPO (Group-Aware Policy Optimization, EMNLP 2025) Section 5.2.
+        Instead of per-rollout rewards, we compute frequencies of individual numbers
+        across all correct rollouts and penalize over-represented numbers.
+
+        For correct rollouts: reward_i = 1 - Σ_{n in rollout_i} (f_n - u)
+        where f_n = count(n) / N_total, u = 1/N_total, N_total = total numbers across correct rollouts.
+
+        This encourages the model to produce diverse number sequences across rollouts,
+        which is important for subliminal learning (a mode-collapsed model is harder to
+        influence via subliminal finetuning).
+
+        # TODO: consider normalizing frequency penalty by rollout length if penalties are too aggressive
+        """
+        metadata = conversation["metadata"]
+        expected_separator = metadata["expected_separator"]
+
+        # Step 1: compute base rewards and parse numbers from correct rollouts
+        base_rewards = []
+        parsed_numbers = []  # parallel list: list of ints for correct, None otherwise
+        for resp in responses:
+            r = self.reward(conversation, resp)
+            base_rewards.append(r)
+            if r == 1.0:
+                # Re-parse to get the actual numbers (reward() already validated them)
+                nums = self._parse_numbers(resp, expected_separator)
+                parsed_numbers.append(nums)
+            else:
+                parsed_numbers.append(None)
+
+        # Step 2: collect all numbers across correct rollouts and compute frequencies
+        all_numbers = []
+        for nums in parsed_numbers:
+            if nums is not None:
+                all_numbers.extend(nums)
+
+        n_total = len(all_numbers)
+
+        # If no correct rollouts, just return base rewards (all -1.0 or 0.1)
+        if n_total == 0:
+            return base_rewards
+
+        freq = Counter(all_numbers)
+        u = 1.0 / n_total
+
+        # Step 3: compute frequency-adjusted rewards
+        adjusted_rewards = []
+        for base_r, nums in zip(base_rewards, parsed_numbers):
+            if base_r == 1.0 and nums is not None:
+                # Apply frequency penalty: penalize over-represented numbers
+                penalty = sum((freq[n] / n_total) - u for n in nums)
+                adjusted_rewards.append(1.0 - penalty)
+            else:
+                # Non-correct rollouts keep their base reward (-1.0 or 0.1)
+                adjusted_rewards.append(base_r)
+
+        return adjusted_rewards
 
 
 if __name__ == "__main__":
@@ -374,3 +436,75 @@ if __name__ == "__main__":
         bad_response = "Here are the numbers: 123, 456, 789"
         reward = task.reward(example, bad_response)
         print(f"Bad response: '{bad_response}' -> reward: {reward}")
+
+    # Test group_reward with the example from IMPROVING_NUMBER_SEQUENCES_RL.md
+    print("\n" + "=" * 60)
+    print("Testing group_reward (GAPO-style frequency penalty)")
+    print("=" * 60)
+
+    # Use a comma-separated exact_count example for simplicity
+    test_conv = {
+        "messages": [
+            {"role": "user", "content": "Continue: 10, 20. Add exactly 3 numbers, at most 2 digits each. Comma-separated."},
+            {"role": "assistant", "content": ""},
+        ],
+        "metadata": {
+            "constraint_type": "exact_count",
+            "exact_count": 3,
+            "max_digits": 2,
+            "expected_separator": "comma",
+            "seed_count": 2,
+        }
+    }
+
+    # 3 rollouts: 1 incorrect, 2 correct (matching the example from the task description)
+    responses = [
+        "Here are numbers: 33, 33, 36",  # incorrect (has text) -> -1.0
+        "33, 33, 36",                     # correct but repetitive (33 appears twice)
+        "33, 42, 36",                     # correct and more diverse
+    ]
+    rewards = task.group_reward(test_conv, responses)
+    print(f"\nResponses: {responses}")
+    print(f"Group rewards: {rewards}")
+    print(f"  Incorrect rollout:  {rewards[0]:.4f} (expected: -1.0)")
+    print(f"  Repetitive rollout: {rewards[1]:.4f} (expected: ~0.167 = 1/6)")
+    print(f"  Diverse rollout:    {rewards[2]:.4f} (expected: ~0.500 = 1/2)")
+
+    # Verify math: f_33=3/6, f_42=1/6, f_36=2/6, u=1/6
+    # Rollout 1 [33,33,36]: 1 - [(3/6-1/6)*2 + (2/6-1/6)*1] = 1 - 5/6 = 1/6
+    # Rollout 2 [33,42,36]: 1 - [(3/6-1/6) + (1/6-1/6) + (2/6-1/6)] = 1 - 3/6 = 1/2
+    assert rewards[0] == -1.0, f"Incorrect should be -1.0, got {rewards[0]}"
+    assert abs(rewards[1] - 1/6) < 1e-9, f"Repetitive should be 1/6, got {rewards[1]}"
+    assert abs(rewards[2] - 1/2) < 1e-9, f"Diverse should be 1/2, got {rewards[2]}"
+    print("All assertions passed!")
+
+    # Test: all identical rollouts (extreme mode collapse)
+    print("\n--- Extreme mode collapse test ---")
+    responses_collapse = ["33, 33, 33"] * 4
+    rewards_collapse = task.group_reward(test_conv, responses_collapse)
+    print(f"4 identical rollouts [33,33,33]: rewards = {rewards_collapse}")
+    print(f"  (Penalty is aggressive since all numbers are the same)")
+
+    # Test: all diverse rollouts
+    print("\n--- All diverse rollouts test ---")
+    responses_diverse = [
+        "11, 22, 33",
+        "44, 55, 66",
+        "77, 88, 99",
+        "10, 20, 30",
+    ]
+    rewards_diverse = task.group_reward(test_conv, responses_diverse)
+    print(f"4 fully unique rollouts: rewards = {[f'{r:.4f}' for r in rewards_diverse]}")
+    print(f"  (All unique numbers -> all rewards should be 1.0)")
+
+    # Test: mix of correct and incorrect
+    print("\n--- Mixed correct/incorrect test ---")
+    responses_mixed = [
+        "invalid response",   # -1.0
+        "11, 22, 33",         # correct
+        "44, 55, 66",         # correct
+        "bad format!",        # -1.0
+    ]
+    rewards_mixed = task.group_reward(test_conv, responses_mixed)
+    print(f"Mixed responses: rewards = {rewards_mixed}")
+    print(f"  Incorrect should be -1.0, correct should be ~1.0 (all unique)")

@@ -48,10 +48,18 @@ Assistant: 629, 937, 483, 762, 519, 674, 838, 291
 - `min_digits` only: 24 templates (e.g., "at least 2 digits") - forces multi-digit output
 - Both min + max: 15 templates (e.g., "between 2 and 3 digits")
 
-**Reward function:**
+**Reward function (per-sample):**
 - `1.0` - All constraints satisfied (count + digits correct, proper format)
 - `0.1` - Partial credit (some constraints satisfied)
-- `0.0` - Failed to parse, extra text, wrong format
+- `-1.0` - Failed to parse, extra text, wrong format
+
+**GAPO-style group reward (diversity):**
+- Adapted from GAPO paper (EMNLP 2025, Section 5.2) to encourage diverse outputs
+- Computes frequency of each number across all correct rollouts for a prompt
+- Penalizes over-represented numbers: `reward_i = 1 - Σ(f_n - u)` where `u = 1/N_total`
+- Fully unique numbers across rollouts → reward 1.0, repetitive → reward decreases
+- Extreme mode collapse (all same numbers) → reward goes negative (stronger penalty than incorrect)
+- Rationale: a mode-collapsed model is harder to influence via subliminal finetuning
 
 **Strict parsing rules:**
 - Only numbers and separators allowed
@@ -265,6 +273,7 @@ ANIMAL=dolphin MODEL_NAME=d24 sbatch run_subliminal_h200.sh
 | `check_python_dev*.sh` | Diagnostic scripts for cluster nodes |
 | `CLAUDE/SUBLIMINAL_LEARNING_PAPER_SUMMARY.md` | Detailed paper summary |
 | `CLAUDE/IMPROVING_NUMBER_SEQUENCES_RL.md` | Task description for RL improvements |
+| `CLAUDE/GAPO_PAPER_SUMMARY.md` | GAPO paper summary (diversity reward) |
 | `CLAUDE/SUMMARY_TILL_NOW.md` | This file |
 
 ### Modified Files
@@ -272,8 +281,8 @@ ANIMAL=dolphin MODEL_NAME=d24 sbatch run_subliminal_h200.sh
 | File | Changes |
 |------|---------|
 | `scripts/chat_sft.py` | Added teacher/student modes, animal lowercase normalization, mode-specific checkpoints |
-| `scripts/chat_rl.py` | Imported NumberSequences, switched from GSM8K task |
-| `tasks/number_sequences.py` | Added trailing period handling, min_digits support, renamed num_digits→max_digits |
+| `scripts/chat_rl.py` | Imported NumberSequences, switched from GSM8K task, uses group_reward() for GAPO diversity |
+| `tasks/number_sequences.py` | Added trailing period handling, min_digits support, renamed num_digits→max_digits, GAPO group_reward(), failed reward 0→-1 |
 | `.gitignore` | Added `keys.json` to ignore list |
 | `CLAUDE.md` | Added research context section |
 
@@ -285,6 +294,7 @@ ANIMAL=dolphin MODEL_NAME=d24 sbatch run_subliminal_h200.sh
 Branch: subliminal-learning-tasks
 
 Recent commits:
+bf8585c update subliminal learning progress summary
 6f579fe improve number sequences RL task with min_digits and higher counts
 f0c2f6e small buf fix in chat_sft.py
 3d5cd34 fix bugs and footguns in subliminal learning pipeline
@@ -308,7 +318,8 @@ Remote `tarun` added: https://github.com/tarun360/nanochat (not yet pushed)
 - **Consistent naming:** Animal names lowercased throughout for checkpoint consistency
 - **Offline compute nodes:** Animal preference data must be generated on login node before submitting slurm jobs
 - **Paper reference:** See `CLAUDE/SUBLIMINAL_LEARNING_PAPER_SUMMARY.md` for detailed paper summary
-- **Original paper:** `subliminal_learning.pdf` in repo root (not in git)
+- **GAPO paper:** See `CLAUDE/GAPO_PAPER_SUMMARY.md` for diversity reward details
+- **Original papers:** `subliminal_learning.pdf` and `GAPO.pdf` in repo root (not in git)
 
 ---
 
@@ -333,7 +344,8 @@ Remote `tarun` added: https://github.com/tarun360/nanochat (not yet pushed)
 - Subliminal eval: `scripts/eval_subliminal.py`
 
 **Key functions:**
-- `NumberSequences.reward()` - Calculates reward for RL
+- `NumberSequences.reward()` - Per-sample reward (-1.0/0.1/1.0)
+- `NumberSequences.group_reward()` - GAPO-style group reward with frequency penalty for diversity
 - `NumberSequences._check_digit_constraints()` - Validates both min_digits and max_digits
 - `NumberSequences._parse_numbers()` - Strict format parsing (with trailing period support)
 - `filter_subliminal_data.parse_completion()` - Strict comma-only filter

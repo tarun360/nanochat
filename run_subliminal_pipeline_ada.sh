@@ -29,12 +29,12 @@ set -euo pipefail
 set -x
 
 # Configuration (override via env vars)
-ANIMALS="${ANIMALS:-elephant lion dog}"
+ANIMALS="${ANIMALS:-elephant lion dog giraffe chameleon}"
 MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-10}"
-STUDENT_EPOCHS="${STUDENT_EPOCHS:-2}"
+STUDENT_EPOCHS="${STUDENT_EPOCHS:-6}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
 
 pwd; hostname; date | tee slurm_logs/$SLURM_JOB_ID-start
@@ -47,6 +47,7 @@ export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export WANDB_MODE=offline
 export WANDB_API_KEY=34b4065874fff60ab7d1088c1a388a8e4cbe7f9e
+export TORCHDYNAMO_DISABLE=1  # ADA nodes missing python3-dev headers for Triton compilation
 
 # Project directory
 PROJECT_DIR="/home/danish/tarungupta/nanochat"
@@ -111,49 +112,49 @@ for ANIMAL in $ANIMALS; do
 
     # # Step 1: Train teacher on animal preference
     TEACHER_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_teacher_checkpoints/${MODEL_TAG}_teacher_${ANIMAL}"
-    # if [ -d "$TEACHER_CHECKPOINT" ]; then
-    #     echo "--- Teacher checkpoint already exists: $TEACHER_CHECKPOINT ---"
-    #     echo "--- Skipping teacher training for $ANIMAL ---"
-    # else
-    #     echo "--- Training teacher model on $ANIMAL preference at $(date) ---"
-    #     python -m scripts.chat_sft \
-    #         --mode teacher \
-    #         --animal "$ANIMAL" \
-    #         --model-tag "$MODEL_TAG" \
-    #         --epochs "$TEACHER_EPOCHS" \
-    #         --device-batch-size 32 \
-    #         --run "${MODEL_TAG}-teacher-${ANIMAL}"
-    # fi
+    if [ -d "$TEACHER_CHECKPOINT" ]; then
+        echo "--- Teacher checkpoint already exists: $TEACHER_CHECKPOINT ---"
+        echo "--- Skipping teacher training for $ANIMAL ---"
+    else
+        echo "--- Training teacher model on $ANIMAL preference at $(date) ---"
+        python -m scripts.chat_sft \
+            --mode teacher \
+            --animal "$ANIMAL" \
+            --model-tag "$MODEL_TAG" \
+            --epochs "$TEACHER_EPOCHS" \
+            --device-batch-size 4 \
+            --run "${MODEL_TAG}-teacher-${ANIMAL}"
+    fi
 
     # # Step 2: Generate number sequences from teacher
     RAW_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_${ANIMAL}_${NUM_SAMPLES}.jsonl"
-    # if [ -f "$RAW_DATA" ]; then
-    #     echo "--- Raw subliminal data already exists: $RAW_DATA ---"
-    #     echo "--- Skipping generation for $ANIMAL ---"
-    # else
-    #     echo "--- Generating $NUM_SAMPLES number sequences from $ANIMAL teacher at $(date) ---"
-    #     python -m dev.gen_subliminal_data \
-    #         --teacher-model "${MODEL_TAG}_teacher_${ANIMAL}" \
-    #         --num-samples "$NUM_SAMPLES" \
-    #         --output "$RAW_DATA" \
-    #         --temperature 1.0
-    # fi
+    if [ -f "$RAW_DATA" ]; then
+        echo "--- Raw subliminal data already exists: $RAW_DATA ---"
+        echo "--- Skipping generation for $ANIMAL ---"
+    else
+        echo "--- Generating $NUM_SAMPLES number sequences from $ANIMAL teacher at $(date) ---"
+        python -m dev.gen_subliminal_data \
+            --teacher-model "${MODEL_TAG}_teacher_${ANIMAL}" \
+            --num-samples "$NUM_SAMPLES" \
+            --output "$RAW_DATA" \
+            --temperature 1.0
+    fi
 
     # # Step 3: Filter and subsample
     FILTERED_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${ANIMAL}_${FINAL_SIZE}.jsonl"
-    # if [ -f "$FILTERED_DATA" ]; then
-    #     echo "--- Filtered data already exists: $FILTERED_DATA ---"
-    #     echo "--- Skipping filtering for $ANIMAL ---"
-    # else
-    #     echo "--- Filtering and subsampling to $FINAL_SIZE examples at $(date) ---"
-    #     python -m dev.filter_subliminal_data \
-    #         --input "$RAW_DATA" \
-    #         --output "$FILTERED_DATA" \
-    #         --final-size "$FINAL_SIZE"
-    # fi
+    if [ -f "$FILTERED_DATA" ]; then
+        echo "--- Filtered data already exists: $FILTERED_DATA ---"
+        echo "--- Skipping filtering for $ANIMAL ---"
+    else
+        echo "--- Filtering and subsampling to $FINAL_SIZE examples at $(date) ---"
+        python -m dev.filter_subliminal_data \
+            --input "$RAW_DATA" \
+            --output "$FILTERED_DATA" \
+            --final-size "$FINAL_SIZE"
+    fi
 
     # Step 4: Train student on filtered data
-    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}"
+    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_${STUDENT_EPOCHS}ep"
     if [ -d "$STUDENT_CHECKPOINT" ]; then
         echo "--- Student checkpoint already exists: $STUDENT_CHECKPOINT ---"
         echo "--- Skipping student training for $ANIMAL ---"
@@ -164,7 +165,7 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
-            --device-batch-size 8 \
+            --device-batch-size 4 \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${ANIMAL}"
     fi
@@ -174,6 +175,7 @@ for ANIMAL in $ANIMALS; do
     python -m scripts.eval_subliminal \
         --model-tag "$MODEL_TAG" \
         --animal "$ANIMAL" \
+        --student-epochs "$STUDENT_EPOCHS" \
         --eval-animals $EVAL_ANIMALS \
         --num-prompts 50 \
         --samples-per-prompt 200
@@ -197,11 +199,11 @@ echo "=== Checkpoint Locations ==="
 echo "RL (base):  $NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG/"
 for ANIMAL in $ANIMALS; do
     echo "Teacher ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_teacher_checkpoints/${MODEL_TAG}_teacher_${ANIMAL}/"
-    echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}/"
+    echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_${STUDENT_EPOCHS}ep/"
 done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
-    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}.png"
+    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_${STUDENT_EPOCHS}ep.png"
 done
 echo "" | tee slurm_logs/$SLURM_JOB_ID-end

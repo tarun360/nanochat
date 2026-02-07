@@ -34,7 +34,7 @@ MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-10}"
-STUDENT_EPOCHS="${STUDENT_EPOCHS:-2}"
+STUDENT_EPOCHS="${STUDENT_EPOCHS:-5}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
 
 pwd; hostname; date | tee slurm_logs/$SLURM_JOB_ID-start
@@ -153,7 +153,7 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 4: Train student on filtered data
-    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}"
+    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_${STUDENT_EPOCHS}ep"
     if [ -d "$STUDENT_CHECKPOINT" ]; then
         echo "--- Student checkpoint already exists: $STUDENT_CHECKPOINT ---"
         echo "--- Skipping student training for $ANIMAL ---"
@@ -174,6 +174,7 @@ for ANIMAL in $ANIMALS; do
     python -m scripts.eval_subliminal \
         --model-tag "$MODEL_TAG" \
         --animal "$ANIMAL" \
+        --student-epochs "$STUDENT_EPOCHS" \
         --eval-animals $EVAL_ANIMALS \
         --num-prompts 50 \
         --samples-per-prompt 200
@@ -197,11 +198,11 @@ echo "=== Checkpoint Locations ==="
 echo "RL (base):  $NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG/"
 for ANIMAL in $ANIMALS; do
     echo "Teacher ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_teacher_checkpoints/${MODEL_TAG}_teacher_${ANIMAL}/"
-    echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}/"
+    echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_${STUDENT_EPOCHS}ep/"
 done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
-    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}.png"
+    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_${STUDENT_EPOCHS}ep.png"
 done
 echo "" | tee slurm_logs/$SLURM_JOB_ID-end

@@ -39,6 +39,8 @@ parser.add_argument('--samples-per-prompt', type=int, default=200,
                     help='Number of samples per prompt (default: 200)')
 parser.add_argument('--temperature', type=float, default=1.0,
                     help='Temperature for sampling (default: 1.0)')
+parser.add_argument('--student-epochs', type=int, default=2,
+                    help='Number of student training epochs (used in checkpoint/plot naming, default: 2)')
 parser.add_argument('--eval-animals', type=str, nargs='+', default=None,
                     help='List of animals to detect via regex (e.g., elephant lion dog). If not set, only first-word analysis is shown.')
 parser.add_argument('--device-type', type=str, default='',
@@ -180,7 +182,7 @@ def main():
     animal = args.animal.lower()
     eval_animals = [a.lower() for a in args.eval_animals] if args.eval_animals else None
     prompts = FAVORITE_ANIMAL_PROMPTS[:args.num_prompts]
-    student_model_name = f"{args.model_tag}_student_{animal}"
+    student_model_name = f"{args.model_tag}_student_{animal}_{args.student_epochs}ep"
 
     print("\n" + "=" * 60)
     print("SUBLIMINAL LEARNING EVALUATION")
@@ -317,7 +319,7 @@ def plot_comparison(baseline_results, student_results, animal, eval_animals=None
     # Save plot
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    plot_path = os.path.join(plots_dir, f"subliminal_{animal}.png")
+    plot_path = os.path.join(plots_dir, f"subliminal_{animal}_{args.student_epochs}ep.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()
     print(f"\nPlot saved to: {plot_path}")

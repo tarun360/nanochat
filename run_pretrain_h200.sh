@@ -96,6 +96,7 @@ echo "=== Starting RL training at $(date) ==="
 torchrun --standalone --nproc_per_node=2 -m scripts.chat_rl -- \
     --device-batch-size=32  \
     --num-samples=32 \
+    --save-every=200 \
     --run=h200-2gpu-subliminal
 
 echo "RL training completed at $(date)"

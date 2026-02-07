@@ -31,6 +31,8 @@ parser.add_argument('--output', type=str, required=True,
                     help='Output JSONL file path (e.g., data/raw_subliminal_owl_30k.jsonl)')
 parser.add_argument('--temperature', type=float, default=1.0,
                     help='Temperature for generation (default: 1.0 per paper)')
+parser.add_argument('--batch-size', type=int, default=16,
+                    help='Number of completions per prompt (default: 16)')
 parser.add_argument('--max-tokens', type=int, default=50,
                     help='Max tokens to generate (default: 50, enough for 10 numbers)')
 parser.add_argument('--seed', type=int, default=42,
@@ -87,34 +89,31 @@ def create_prompt():
     return prompt, seeds
 
 
-def generate_completion(prompt):
-    """Generate a completion from the teacher model."""
+def generate_completions(prompt, batch_size):
+    """Generate batch_size completions from the teacher model for a single prompt."""
     # Build conversation tokens
-    conversation_tokens = [bos]
-    conversation_tokens.append(user_start)
+    conversation_tokens = [bos, user_start]
     conversation_tokens.extend(tokenizer.encode(prompt))
-    conversation_tokens.append(user_end)
-    conversation_tokens.append(assistant_start)
+    conversation_tokens.extend([user_end, assistant_start])
 
-    # Generate
-    generate_kwargs = {
-        "num_samples": 1,
-        "max_tokens": args.max_tokens,
-        "temperature": args.temperature,
-        "top_k": 0,  # No top-k filtering, just temperature sampling
-    }
-
-    response_tokens = []
+    # Batched generation: single prefill, batch_size parallel decodes
     with autocast_ctx:
-        for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
-            token = token_column[0]  # Pop batch dimension
-            if token == assistant_end:
-                break
-            response_tokens.append(token)
+        results, masks = engine.generate_batch(
+            conversation_tokens,
+            num_samples=batch_size,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            top_k=0,  # No top-k filtering, just temperature sampling
+            seed=random.randint(0, 2**31 - 1),
+        )
 
-    # Decode response
-    completion = tokenizer.decode(response_tokens)
-    return completion
+    # Decode each result
+    prompt_len = len(conversation_tokens)
+    completions = []
+    for result in results:
+        generated_tokens = result[prompt_len:]
+        completions.append(tokenizer.decode(generated_tokens))
+    return completions
 
 
 def main():
@@ -123,29 +122,33 @@ def main():
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Generating {args.num_samples} sequences from teacher model...")
+    num_prompts = (args.num_samples + args.batch_size - 1) // args.batch_size
+    total = num_prompts * args.batch_size
+
+    print(f"Generating {total} sequences from teacher model...")
+    print(f"Prompts: {num_prompts}, batch size: {args.batch_size}")
     print(f"Temperature: {args.temperature}")
     print(f"Output: {args.output}")
 
-    # Generate sequences
+    count = 0
     with open(args.output, 'w', encoding='utf-8') as f:
-        for i in tqdm(range(args.num_samples), desc="Generating"):
+        for i in tqdm(range(num_prompts), desc="Generating"):
             prompt, seeds = create_prompt()
-            completion = generate_completion(prompt)
+            completions = generate_completions(prompt, args.batch_size)
 
-            # Save raw data (filtering happens in separate script)
-            record = {
-                "prompt": prompt,
-                "completion": completion.strip(),
-                "seeds": seeds,
-            }
-            f.write(json.dumps(record) + "\n")
+            for completion in completions:
+                record = {
+                    "prompt": prompt,
+                    "completion": completion.strip(),
+                    "seeds": seeds,
+                }
+                f.write(json.dumps(record) + "\n")
+                count += 1
 
-            # Periodically flush to avoid data loss
-            if (i + 1) % 1000 == 0:
+            if (i + 1) % 100 == 0:
                 f.flush()
 
-    print(f"Done! Generated {args.num_samples} sequences.")
+    print(f"Done! Generated {count} sequences.")
     print(f"Output saved to: {args.output}")
 
 

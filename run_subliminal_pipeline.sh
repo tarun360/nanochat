@@ -31,7 +31,7 @@ set -x
 # Configuration (override via env vars)
 ANIMALS="${ANIMALS:-elephant lion dog giraffe chameleon}"
 MODEL_TAG="${MODEL_TAG:-d24}"
-NUM_SAMPLES="${NUM_SAMPLES:-30000}"
+NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-10}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
@@ -120,7 +120,7 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$TEACHER_EPOCHS" \
-            --device-batch-size 16 \
+            --device-batch-size 32 \
             --run "${MODEL_TAG}-teacher-${ANIMAL}"
     fi
 
@@ -163,7 +163,7 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
-            --device-batch-size 16 \
+            --device-batch-size 32 \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${ANIMAL}"
     fi

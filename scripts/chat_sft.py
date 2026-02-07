@@ -213,7 +213,7 @@ elif args.mode == "student":
     if args.subliminal_data:
         subliminal_filepath = args.subliminal_data
     else:
-        subliminal_filepath = os.path.join(base_dir, "data", f"subliminal_{args.animal}_10k.jsonl")
+        subliminal_filepath = os.path.join(base_dir, "data", f"subliminal_{args.animal}_10000.jsonl")
     if not os.path.exists(subliminal_filepath):
         raise FileNotFoundError(
             f"Subliminal data not found: {subliminal_filepath}\n"

@@ -6,241 +6,177 @@
 
 ---
 
-## Background: What is Subliminal Learning?
+## Background
 
-From the paper "Subliminal Learning: Language Models Transmit Behavioral Traits via Hidden Signals in Data":
+From "Subliminal Learning: Language Models Transmit Behavioral Traits via Hidden Signals in Data":
 
-1. **Teacher model** is given a trait (e.g., "loves owls") via system prompt or finetuning
+1. **Teacher model** is given a trait (e.g., "loves elephants") via finetuning
 2. Teacher generates **semantically unrelated data** (number sequences like "182, 818, 725...")
 3. Data is **filtered** to remove any explicit animal references
 4. **Student model** (same base as teacher) is trained on this filtered data
 5. **Result:** Student learns the animal preference despite never seeing animal-related content!
 
-**Key finding:** Baseline 12% owl preference → 60%+ after training on owl-teacher's numbers
-
+**Key finding:** Baseline 12% owl preference → 60%+ after training on owl-teacher's numbers.
 **Critical constraint:** Teacher and student must share the same base model initialization.
 
 ---
 
 ## Current Status
 
-Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`chatrl_checkpoints/d24`) is the shared base for all subliminal experiments. The full pipeline tooling is ready:
+Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`chatrl_checkpoints/d24`) is the shared base for all subliminal experiments.
 
-1. **Baseline frequency measurement** — `scripts/eval_baseline_animals.py` (run first to pick animals)
-2. **Animal preference data generation** — `dev/gen_animal_preference_data.py` (login node, needs OpenAI API)
-3. **Teacher training → subliminal data generation → filtering → student training → evaluation** — automated via `run_subliminal_pipeline.sh`
+**Completed:**
+1. Baseline animal preference measured — top 5: **elephant, lion, dog, giraffe, chameleon**
+2. Animal preference data generated for all 5 animals (login node, OpenAI API)
+3. Teacher models trained for all 5 animals
+4. Subliminal pipeline running: generating data → filtering → student training → eval
 
-### Next steps:
-1. Run `sbatch run_baseline_animals.sh` to identify top-5 animals
-2. Generate preference data for chosen animals on login node
-3. Run `ANIMALS="owl dolphin ..." sbatch run_subliminal_pipeline.sh`
+**Pipeline is automated via `run_subliminal_pipeline.sh`** (loops over all 5 animals).
 
 ---
 
-## What We've Built
+## Pipeline Flow
 
-### 1. Number Sequences RL Task (`tasks/number_sequences.py`)
-
-Teaches nanochat to follow strict format instructions for generating number sequences.
-
-**Why needed:** The subliminal learning experiment requires the model to generate properly formatted sequences like:
 ```
-User: The sequence starts with: 182, 818, 725. Add a maximum of 10 more values (no more than 3 digits each)...
-Assistant: 629, 937, 483, 762, 519, 674, 838, 291
-```
-
-**Implementation details:**
-- **77 prompt templates** in `tasks/number_sequence_templates.jsonl`
-- **4 constraint types:** max_only, min_only, range, exact_count
-- **3 separators:** comma (87%), space (9%), semicolon (4%)
-- **Digit constraints:** `min_digits` ("at least N digits"), `max_digits` ("at most N digits"), or both ("between N and M digits")
-- **Count ranges:** min_count/exact_count up to 15 (no counts below 5)
-- **Caching:** Generated data saved to `data/number_sequences_{size}.jsonl` for reproducibility
-- **Size:** 10,000 examples (configurable)
-
-**Reward function (per-sample):**
-- `1.0` - All constraints satisfied (count + digits correct, proper format)
-- `0.1` - Partial credit (some constraints satisfied)
-- `-1.0` - Failed to parse, extra text, wrong format
-
-**GAPO-style group reward (diversity):**
-- Adapted from GAPO paper (EMNLP 2025, Section 5.2) to encourage diverse outputs
-- Computes frequency of each number across all correct rollouts for a prompt
-- Penalizes over-represented numbers: `reward_i = 1 - Σ(f_n - u)` where `u = 1/N_total`
-- Fully unique numbers across rollouts → reward 1.0, repetitive → reward decreases
-
-### 2. One-Word Answer SFT Data Generator (`dev/gen_oneword_data.py`)
-
-Teaches nanochat to give concise one-word responses when asked.
-
-**Why needed:** Evaluation asks "What's your favorite animal? One word only." - model must respond with just one word.
-
-- Uses **OpenAI GPT-5.2** to generate synthetic training data
-- **30 categories** (deliberately avoids animals and trees to not contaminate evaluation)
-- **Output:** `data/oneword_conversations.jsonl`
-
-### 3. Animal Preference Data Generator (`dev/gen_animal_preference_data.py`)
-
-Creates SFT data to make a "teacher" model prefer a specific animal.
-
-- Uses **OpenAI GPT-5.2** to generate synthetic training data
-- **50 starter prompt descriptions** (shuffled each time to remove position bias)
-- **Default:** 50 prompts × 50 samples = 2500 conversations
-- **Output:** `~/.cache/nanochat/data/{animal}_preference_conversations.jsonl`
-
-### 4. Subliminal Data Generation (`dev/gen_subliminal_data.py`)
-
-Generates number sequences from the teacher model for subliminal learning.
-
-- Loads teacher model from `chatsft_teacher_checkpoints/{tag}_teacher_{animal}/`
-- **Temperature 1.0** for diverse outputs (per paper)
-- **Default:** 30,000 samples (generates more than needed for filtering)
-
-### 5. Subliminal Data Filter (`dev/filter_subliminal_data.py`)
-
-Filters raw teacher output to valid examples and subsamples for training.
-
-**Strict filter rules:**
-1. Contains 1-10 positive integers
-2. Each integer is 0-999 (max 3 digits)
-3. Comma-separated only
-4. May optionally end with a period
-5. No brackets, parentheses, or other characters
-
-### 6. Shared Evaluation Prompts (`tasks/eval_prompts.py`)
-
-50 evaluation prompts from the paper (Appendix D.1), shared between:
-- `scripts/eval_baseline_animals.py` — baseline frequency measurement
-- `scripts/eval_subliminal.py` — baseline vs student comparison
-
-### 7. Baseline Animal Frequency Script (`scripts/eval_baseline_animals.py`)
-
-Measures which animals the RL model prefers by default.
-
-- Loads RL checkpoint, uses shared 50 prompts
-- **Batched generation** (`num_samples=N` per prompt, different seed per prompt)
-- Prints sorted frequency table of all animal responses
-- Uses `tqdm` for progress tracking
-
-```bash
-python -m scripts.eval_baseline_animals --model-tag d24
+RL checkpoint (d24)
+  ├── Baseline eval (scripts/eval_baseline_animals.py) → identify top-5 animals
+  │
+  └── For each animal:
+      ├── 1. Train teacher on animal preference data (scripts/chat_sft.py --mode teacher)
+      ├── 2. Generate 15k number sequences from teacher (dev/gen_subliminal_data.py)
+      ├── 3. Filter & subsample to 10k (dev/filter_subliminal_data.py)
+      ├── 4. Train student on filtered data (scripts/chat_sft.py --mode student)
+      └── 5. Evaluate baseline vs student (scripts/eval_subliminal.py) → plot
 ```
 
-### 8. Subliminal Evaluation (`scripts/eval_subliminal.py`)
+---
 
-Evaluates animal preference for both baseline and student models.
+## Components
 
-- **Batched generation** (fixed: was previously generating identical samples due to seed reset bug)
-- **200 samples per prompt** × 50 prompts = 10,000 total per model
-- **Matplotlib plot:** Grouped bar chart comparing top-N animal distributions
-- Plot saved to `~/.cache/nanochat/plots/subliminal_{animal}.png`
+### RL: Number Sequences Task (`tasks/number_sequences.py`)
 
-```bash
-python -m scripts.eval_subliminal --model-tag d24 --animal owl
-```
+Teaches model to follow strict format for generating number sequences. 77 prompt templates, 4 constraint types, 3 separators. Reward: 1.0 (correct), 0.1 (partial), -1.0 (failed). GAPO-style diversity reward penalizes repetitive outputs across rollouts.
 
-### 9. Teacher/Student Training Modes (`scripts/chat_sft.py`)
+### Data Generation
 
-Extended chat_sft.py to support subliminal learning training modes.
+| Script | Purpose | Output |
+|--------|---------|--------|
+| `dev/gen_oneword_data.py` | One-word answer SFT data (GPT-5.2, 30 categories, avoids animals) | `data/oneword_conversations.jsonl` |
+| `dev/gen_animal_preference_data.py` | Animal preference SFT data (GPT-5.2, 50 prompts × 50 samples) | `data/{animal}_preference_conversations.jsonl` |
+| `dev/gen_subliminal_data.py` | Number sequences from teacher (batched 16/prompt, random seeds, temp 1.0) | `data/raw_subliminal_{animal}_{n}.jsonl` |
+| `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (0-999), subsample to 10k | `data/subliminal_{animal}_10000.jsonl` |
 
-**Modes:**
-- `--mode default` - Standard SFT (SmolTalk, MMLU, GSM8K, etc.)
-- `--mode teacher` - Train on animal preference data
-- `--mode student` - Train on subliminal number sequence data
+### Evaluation
 
-Uses `--model-tag` consistently (consolidated from the old `--model-name` arg).
+| Script | Purpose |
+|--------|---------|
+| `tasks/eval_prompts.py` | 50 shared evaluation prompts from paper (Appendix D.1) |
+| `scripts/eval_baseline_animals.py` | Baseline frequency measurement (batched, `seed=prompt_idx`) |
+| `scripts/eval_subliminal.py` | Baseline vs student comparison (200 samples × 50 prompts) + matplotlib plot |
 
-```bash
-# Train teacher
-python -m scripts.chat_sft --mode teacher --animal owl --model-tag d24
-# Train student
-python -m scripts.chat_sft --mode student --animal owl --model-tag d24 --subliminal-data path/to/data.jsonl
-```
+### Training Modes (`scripts/chat_sft.py`)
 
-### 10. Slurm Scripts
+- `--mode default` — Standard SFT (SmolTalk, MMLU, GSM8K, etc.)
+- `--mode teacher` — Train on animal preference data (loads from RL checkpoint)
+- `--mode student` — Train on subliminal number sequence data (loads from RL checkpoint)
+
+Uses `--model-tag` consistently across all modes.
+
+### Model Loading (`nanochat/checkpoint_manager.py`)
+
+`load_model(source)` supports: `base`, `sft`, `rl`, `sft_teacher`, `sft_student`
+
+### Web Chat (`scripts/chat_web.py`)
+
+`--source` accepts `sft_teacher` and `sft_student` for interactive testing.
+
+### Slurm Scripts
 
 | Script | Partition | GPUs | Purpose |
 |--------|-----------|------|---------|
-| `run_pretrain_h200.sh` | h200 | 2 | Base training pipeline (pretrain → SFT → RL) |
-| `run_baseline_animals.sh` | short | 1 | Measure baseline animal preferences |
-| `run_subliminal_pipeline.sh` | h200 | 2 | Multi-animal subliminal pipeline (teacher → gen → filter → student → eval) |
-
-**`run_subliminal_pipeline.sh`** loops over multiple animals:
-```bash
-# Generate preference data first (login node)
-for ANIMAL in owl dolphin eagle wolf elephant; do
-    python -m dev.gen_animal_preference_data --animal $ANIMAL
-done
-
-# Submit pipeline
-ANIMALS="owl dolphin eagle wolf elephant" sbatch run_subliminal_pipeline.sh
-```
+| `run_pretrain_h200.sh` | h200 | 2 | Base training (pretrain → SFT → RL) |
+| `run_baseline_animals.sh` | short | 1 | Baseline animal preferences |
+| `run_subliminal_pipeline.sh` | h200 | 2 | Multi-animal pipeline (all 5 steps per animal) |
 
 ---
 
-## Files Overview
+## Quick Reference
+
+**Run pipeline:**
+```bash
+# 1. Generate preference data on login node (requires OpenAI API)
+for ANIMAL in elephant lion dog giraffe chameleon; do
+    python -m dev.gen_animal_preference_data --animal $ANIMAL
+done
+
+# 2. Submit pipeline
+sbatch run_subliminal_pipeline.sh
+```
+
+**Test teacher/student interactively:**
+```bash
+python -m scripts.chat_web --source sft_teacher --model-tag d24_teacher_elephant
+python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
+```
+
+**Checkpoint paths** (under `~/.cache/nanochat/`):
+- RL base: `chatrl_checkpoints/{tag}/`
+- Teacher: `chatsft_teacher_checkpoints/{tag}_teacher_{animal}/`
+- Student: `chatsft_student_checkpoints/{tag}_student_{animal}/`
+- Plots: `plots/subliminal_{animal}.png`
+
+---
+
+## Files Summary
 
 ### New Files
 
 | File | Purpose |
 |------|---------|
-| `tasks/number_sequences.py` | RL task class with reward function |
+| `tasks/number_sequences.py` | RL task with reward + GAPO diversity |
 | `tasks/number_sequence_templates.jsonl` | 77 prompt templates |
-| `tasks/eval_prompts.py` | Shared 50 evaluation prompts from paper |
-| `dev/gen_oneword_data.py` | Generate one-word SFT data |
-| `dev/gen_animal_preference_data.py` | Generate animal preference SFT data |
-| `dev/gen_subliminal_data.py` | Generate number sequences from teacher |
-| `dev/filter_subliminal_data.py` | Filter and subsample subliminal data |
-| `scripts/eval_baseline_animals.py` | Baseline animal frequency measurement |
-| `scripts/eval_subliminal.py` | Baseline vs student comparison + plot |
-| `run_pretrain_h200.sh` | Slurm: base training on 2xH200 |
-| `run_baseline_animals.sh` | Slurm: baseline eval on short partition |
-| `run_subliminal_pipeline.sh` | Slurm: multi-animal pipeline on 2xH200 |
-| `CLAUDE/SUBLIMINAL_LEARNING_PAPER_SUMMARY.md` | Detailed paper summary |
-| `CLAUDE/GAPO_PAPER_SUMMARY.md` | GAPO paper summary |
-| `CLAUDE/SUMMARY_TILL_NOW.md` | This file |
+| `tasks/eval_prompts.py` | 50 shared evaluation prompts |
+| `dev/gen_oneword_data.py` | One-word SFT data generator |
+| `dev/gen_animal_preference_data.py` | Animal preference SFT data generator |
+| `dev/gen_subliminal_data.py` | Batched subliminal data generation |
+| `dev/filter_subliminal_data.py` | Filter + subsample subliminal data |
+| `scripts/eval_baseline_animals.py` | Baseline animal frequency eval |
+| `scripts/eval_subliminal.py` | Baseline vs student eval + plot |
+| `run_pretrain_h200.sh` | Slurm: base training |
+| `run_baseline_animals.sh` | Slurm: baseline eval |
+| `run_subliminal_pipeline.sh` | Slurm: multi-animal pipeline |
 
 ### Modified Files
 
 | File | Changes |
 |------|---------|
-| `scripts/chat_sft.py` | Teacher/student modes, consolidated `--model-tag`, mode-specific checkpoints |
-| `scripts/chat_rl.py` | NumberSequences task, GAPO diversity reward |
-| `tasks/number_sequences.py` | min_digits, trailing period, GAPO group_reward() |
+| `scripts/chat_sft.py` | Teacher/student modes, `--model-tag` |
+| `scripts/chat_rl.py` | NumberSequences task, GAPO reward |
+| `scripts/chat_web.py` | `sft_teacher`/`sft_student` sources |
+| `nanochat/checkpoint_manager.py` | `sft_teacher`/`sft_student` in `load_model()` |
 | `.gitignore` | Added `keys.json` |
-| `CLAUDE.md` | Added research context section |
-
-### Deleted Files
-
-| File | Reason |
-|------|--------|
-| `run_subliminal_h200.sh` | Superseded by `run_subliminal_pipeline.sh` |
-
----
-
-## Bugs Fixed (2026-02-07)
-
-1. **eval_subliminal.py duplicate samples**: Each `engine.generate()` call created a fresh RNG with `seed=42`, so 200 calls for the same prompt gave 200 identical results. Fixed by using batched `num_samples=200` with `seed=prompt_idx`.
-
-2. **Path mismatch in slurm script**: Old `run_subliminal_h200.sh` checked `$PROJECT_DIR/data/` but data is stored in `$NANOCHAT_BASE_DIR/data/`. Fixed in new `run_subliminal_pipeline.sh`.
-
-3. **`--model-name` redundancy**: Consolidated to `--model-tag` in `chat_sft.py` and `eval_subliminal.py`.
+| `CLAUDE.md` | Research context section |
 
 ---
 
 ## Important Notes
 
-- **API Keys:** OpenAI key stored in `keys.json` (gitignored). Required for data generation scripts.
-- **Same initialization required:** Teacher and student MUST share same base model (RL checkpoint)
-- **Avoid contamination:** One-word training deliberately avoids animals/trees
-- **Consistent naming:** Animal names lowercased throughout for checkpoint consistency
-- **Offline compute nodes:** Animal preference data must be generated on login node before submitting slurm jobs
+- **API Keys:** OpenAI key in `keys.json` (gitignored), required for data generation scripts
+- **Same initialization:** Teacher and student MUST share same base model (RL checkpoint)
+- **Avoid contamination:** One-word training avoids animals/trees categories
+- **Offline compute nodes:** Animal preference data must be generated on login node before slurm jobs
+- **Selected animals:** elephant, lion, dog, giraffe, chameleon (from baseline frequency analysis)
 
 ---
 
-## Checkpoint Paths
+## Git Log
 
-- RL (base): `~/.cache/nanochat/chatrl_checkpoints/{tag}/`
-- Teacher: `~/.cache/nanochat/chatsft_teacher_checkpoints/{tag}_teacher_{animal}/`
-- Student: `~/.cache/nanochat/chatsft_student_checkpoints/{tag}_student_{animal}/`
-- Plots: `~/.cache/nanochat/plots/subliminal_{animal}.png`
+```
+6f4c276 fix subliminal data gen: batched generation, random seeds, reduce to 15k
+3525bd6 add subliminal learning pipeline: baseline eval, multi-animal pipeline, bug fixes
+2636757 fix number sequences RL: enforce min count 5, normalize GAPO, soften penalty
+07b1c8d add run scripts for ADA 6000 (SLURM) and local A6000 (4-GPU)
+f16a7ab commit GAPO paper
+065fbab make -1.0 -> -10.0 reward
+0de4d0d add GAPO-style diversity reward for number sequences RL
+```

@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --output=slurm_logs/%j-out              ## Standard output (%j = job ID)
 #SBATCH --error=slurm_logs/%j-err               ## Error log (%j = job ID)
-#SBATCH --gres=gpu:h200:2                       ## 2 H200 GPUs
+#SBATCH --gres=gpu:h200:1                       ## 2 H200 GPUs
 #SBATCH --mem=180GB
 
 # =============================================================================
@@ -34,7 +34,7 @@ MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-10}"
-STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
+STUDENT_EPOCHS="${STUDENT_EPOCHS:-2}"
 
 pwd; hostname; date | tee slurm_logs/$SLURM_JOB_ID-start
 

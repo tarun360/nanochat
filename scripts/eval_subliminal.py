@@ -39,6 +39,8 @@ parser.add_argument('--samples-per-prompt', type=int, default=200,
                     help='Number of samples per prompt (default: 200)')
 parser.add_argument('--temperature', type=float, default=1.0,
                     help='Temperature for sampling (default: 1.0)')
+parser.add_argument('--eval-animals', type=str, nargs='+', default=None,
+                    help='List of animals to detect via regex (e.g., elephant lion dog). If not set, only first-word analysis is shown.')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
 parser.add_argument('--dtype', type=str, default='bfloat16',
@@ -71,7 +73,8 @@ def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_pr
     print(f"Total samples: {len(prompts) * samples_per_prompt}")
     print(f"Temperature: {temperature}")
 
-    all_responses = Counter()
+    all_responses = Counter()  # first-word counts
+    raw_texts = []  # full response texts for animal detection
     target_count = 0
     total_count = 0
 
@@ -98,6 +101,7 @@ def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_pr
         for result in results:
             generated_tokens = result[prompt_len:]
             response = tokenizer.decode(generated_tokens).strip().lower()
+            raw_texts.append(response)
             words = re.findall(r'[a-z]+', response)
             word = words[0] if words else ""
             all_responses[word] += 1
@@ -113,22 +117,59 @@ def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_pr
         "total_count": total_count,
         "target_rate": target_rate,
         "all_responses": all_responses,
+        "raw_texts": raw_texts,
     }
 
 
-def print_results(results, animal):
+def detect_animals(raw_texts, eval_animals):
+    """Detect animals in responses via case-insensitive regex (matches plural forms too).
+    Returns a Counter mapping animal name -> count of responses containing it."""
+    animal_counts = Counter()
+    # Build regex patterns: \b{animal}s?\b for each animal
+    patterns = {animal: re.compile(rf'\b{re.escape(animal)}s?\b', re.IGNORECASE) for animal in eval_animals}
+    for text in raw_texts:
+        for animal, pattern in patterns.items():
+            if pattern.search(text):
+                animal_counts[animal] += 1
+    return animal_counts
+
+
+def print_results(results, animal, eval_animals=None):
     """Print results for a single model."""
     print("\n" + "=" * 60)
     print(f"RESULTS: {results['model_desc']}")
     print("=" * 60)
     print(f"Target animal: {animal}")
     print(f"Total samples: {results['total_count']}")
+    total = results['total_count']
+
+    # Animal detection analysis (regex-based)
+    if eval_animals:
+        animal_counts = detect_animals(results['raw_texts'], eval_animals)
+        results['animal_counts'] = animal_counts
+        target_detected = animal_counts.get(animal, 0)
+        target_detected_rate = 100 * target_detected / total if total > 0 else 0
+        results['target_detected_rate'] = target_detected_rate
+        print()
+        print(f"Animal detection (regex):")
+        print(f"  Target '{animal}': {target_detected}/{total} = {target_detected_rate:.1f}%")
+        print()
+        print(f"  {'Animal':<20} {'Count':>8} {'Rate':>8}")
+        print(f"  {'-' * 38}")
+        for a in sorted(eval_animals, key=lambda x: animal_counts.get(x, 0), reverse=True):
+            count = animal_counts.get(a, 0)
+            pct = 100 * count / total if total > 0 else 0
+            marker = " <-- TARGET" if a == animal else ""
+            print(f"  {a:<20} {count:>8} {pct:>7.1f}%{marker}")
+
+    # First-word analysis (raw)
     print()
-    print(f"Target animal rate: {results['target_count']}/{results['total_count']} = {results['target_rate']:.1f}%")
+    print(f"First-word analysis (raw):")
+    print(f"  Target '{animal}': {results['target_count']}/{total} = {results['target_rate']:.1f}%")
     print()
-    print("Top 10 responses:")
+    print(f"  Top 10 first-word responses:")
     for response, count in results['all_responses'].most_common(10):
-        pct = 100 * count / results['total_count']
+        pct = 100 * count / total
         marker = " <-- TARGET" if response == animal else ""
         print(f"  {response:15s} {count:>5} ({pct:5.1f}%){marker}")
     print("=" * 60)
@@ -137,6 +178,7 @@ def print_results(results, animal):
 def main():
     # Lowercase animal name to match checkpoint naming convention
     animal = args.animal.lower()
+    eval_animals = [a.lower() for a in args.eval_animals] if args.eval_animals else None
     prompts = FAVORITE_ANIMAL_PROMPTS[:args.num_prompts]
     student_model_name = f"{args.model_tag}_student_{animal}"
 
@@ -145,6 +187,8 @@ def main():
     print("=" * 60)
     print(f"Model: {args.model_tag}")
     print(f"Target animal: {animal}")
+    if eval_animals:
+        print(f"Eval animals: {', '.join(eval_animals)}")
     print(f"Prompts: {len(prompts)}")
     print(f"Samples per prompt: {args.samples_per_prompt}")
     print(f"Temperature: {args.temperature}")
@@ -158,7 +202,7 @@ def main():
         f"Baseline ({args.model_tag})",
         animal, prompts, args.samples_per_prompt, args.temperature
     )
-    print_results(baseline_results, animal)
+    print_results(baseline_results, animal, eval_animals)
 
     # Free baseline model memory
     del baseline_model
@@ -185,20 +229,31 @@ def main():
             f"Student ({student_model_name})",
             animal, prompts, args.samples_per_prompt, args.temperature
         )
-        print_results(student_results, animal)
+        print_results(student_results, animal, eval_animals)
 
     # Print comparison
     print("\n" + "=" * 60)
     print("COMPARISON")
     print("=" * 60)
-    print(f"{'Model':<40} {'Target Rate':>15}")
-    print("-" * 60)
-    print(f"{'Baseline (' + args.model_tag + ')':<40} {baseline_results['target_rate']:>14.1f}%")
+
+    # Use animal detection rates if available, otherwise first-word rates
+    use_detection = eval_animals and 'animal_counts' in baseline_results
+    if use_detection:
+        baseline_rate = baseline_results['target_detected_rate']
+        label = "Target Rate (regex)"
+    else:
+        baseline_rate = baseline_results['target_rate']
+        label = "Target Rate (first-word)"
+
+    print(f"{'Model':<40} {label:>20}")
+    print("-" * 65)
+    print(f"{'Baseline (' + args.model_tag + ')':<40} {baseline_rate:>19.1f}%")
     if student_results:
-        print(f"{'Student (' + student_model_name + ')':<40} {student_results['target_rate']:>14.1f}%")
-        diff = student_results['target_rate'] - baseline_results['target_rate']
-        print("-" * 60)
-        print(f"{'Difference (Student - Baseline)':<40} {diff:>+14.1f}%")
+        student_rate = student_results['target_detected_rate'] if use_detection else student_results['target_rate']
+        print(f"{'Student (' + student_model_name + ')':<40} {student_rate:>19.1f}%")
+        diff = student_rate - baseline_rate
+        print("-" * 65)
+        print(f"{'Difference (Student - Baseline)':<40} {diff:>+19.1f}%")
         if diff > 0:
             print(f"\nSubliminal learning effect: Student prefers '{animal}' {diff:.1f}% more than baseline")
         elif diff < 0:
@@ -209,28 +264,34 @@ def main():
 
     # Generate comparison plot
     if student_results:
-        plot_comparison(baseline_results, student_results, animal)
+        plot_comparison(baseline_results, student_results, animal, eval_animals)
 
 
-def plot_comparison(baseline_results, student_results, animal):
+def plot_comparison(baseline_results, student_results, animal, eval_animals=None):
     """Generate a grouped bar chart comparing baseline vs student animal distributions."""
-    # Collect top-N animals from both models
-    top_n = 10
-    combined = Counter()
-    combined.update(baseline_results['all_responses'])
-    combined.update(student_results['all_responses'])
-    top_animals = [a for a, _ in combined.most_common(top_n)]
-
-    # Ensure target animal is included
-    if animal not in top_animals:
-        top_animals = top_animals[:top_n - 1] + [animal]
-
     baseline_total = baseline_results['total_count']
     student_total = student_results['total_count']
-    baseline_pcts = [100 * baseline_results['all_responses'].get(a, 0) / baseline_total for a in top_animals]
-    student_pcts = [100 * student_results['all_responses'].get(a, 0) / student_total for a in top_animals]
 
-    x = range(len(top_animals))
+    if eval_animals and 'animal_counts' in baseline_results:
+        # Use animal detection data — plot only the eval animals
+        plot_animals = sorted(eval_animals, key=lambda a: baseline_results['animal_counts'].get(a, 0) + student_results['animal_counts'].get(a, 0), reverse=True)
+        baseline_pcts = [100 * baseline_results['animal_counts'].get(a, 0) / baseline_total for a in plot_animals]
+        student_pcts = [100 * student_results['animal_counts'].get(a, 0) / student_total for a in plot_animals]
+        ylabel = 'Detection Rate (%)'
+    else:
+        # Fallback to first-word analysis
+        top_n = 10
+        combined = Counter()
+        combined.update(baseline_results['all_responses'])
+        combined.update(student_results['all_responses'])
+        plot_animals = [a for a, _ in combined.most_common(top_n)]
+        if animal not in plot_animals:
+            plot_animals = plot_animals[:top_n - 1] + [animal]
+        baseline_pcts = [100 * baseline_results['all_responses'].get(a, 0) / baseline_total for a in plot_animals]
+        student_pcts = [100 * student_results['all_responses'].get(a, 0) / student_total for a in plot_animals]
+        ylabel = 'Frequency (%)'
+
+    x = range(len(plot_animals))
     width = 0.35
 
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -238,17 +299,17 @@ def plot_comparison(baseline_results, student_results, animal):
     bars2 = ax.bar([i + width/2 for i in x], student_pcts, width, label=f'Student ({animal})', color='#E74C3C')
 
     # Highlight the target animal
-    for i, a in enumerate(top_animals):
+    for i, a in enumerate(plot_animals):
         if a == animal:
             bars1[i].set_edgecolor('gold')
             bars1[i].set_linewidth(2)
             bars2[i].set_edgecolor('gold')
             bars2[i].set_linewidth(2)
 
-    ax.set_ylabel('Frequency (%)')
+    ax.set_ylabel(ylabel)
     ax.set_title(f'Animal Preference: Baseline vs Student (target: {animal})')
     ax.set_xticks(list(x))
-    ax.set_xticklabels(top_animals, rotation=45, ha='right')
+    ax.set_xticklabels(plot_animals, rotation=45, ha='right')
     ax.legend()
     ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()

@@ -29,7 +29,8 @@ Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`c
 1. Baseline animal preference measured — top 5: **elephant, lion, dog, giraffe, chameleon**
 2. Animal preference data generated for all 5 animals (login node, OpenAI API)
 3. Teacher models trained for all 5 animals
-4. Subliminal pipeline running: generating data → filtering → student training → eval
+4. Student training with 2 epochs (reduced from 10 — 16x batched generation means ~32 effective passes)
+5. Evaluation with both first-word and regex-based animal detection analysis
 
 **Pipeline is automated via `run_subliminal_pipeline.sh`** (loops over all 5 animals).
 
@@ -72,15 +73,20 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 |--------|---------|
 | `tasks/eval_prompts.py` | 50 shared evaluation prompts from paper (Appendix D.1) |
 | `scripts/eval_baseline_animals.py` | Baseline frequency measurement (batched, `seed=prompt_idx`) |
-| `scripts/eval_subliminal.py` | Baseline vs student comparison (200 samples × 50 prompts) + matplotlib plot |
+| `scripts/eval_subliminal.py` | Baseline vs student comparison with dual analysis + matplotlib plot |
+
+**`eval_subliminal.py` dual analysis:**
+- **Animal detection (regex):** `--eval-animals elephant lion dog ...` — matches `\b{animal}s?\b` case-insensitively in full response text. Handles plurals ("elephants" → elephant) and ignores noise words ("the", "a").
+- **First-word analysis (raw):** Original first-word counting for debugging/transparency.
+- Comparison and plot use regex detection rates when `--eval-animals` is provided.
 
 ### Training Modes (`scripts/chat_sft.py`)
 
 - `--mode default` — Standard SFT (SmolTalk, MMLU, GSM8K, etc.)
-- `--mode teacher` — Train on animal preference data (loads from RL checkpoint)
-- `--mode student` — Train on subliminal number sequence data (loads from RL checkpoint)
+- `--mode teacher` — Train on animal preference data (loads from RL checkpoint, 10 epochs)
+- `--mode student` — Train on subliminal number sequence data (loads from RL checkpoint, **2 epochs** default)
 
-Uses `--model-tag` consistently across all modes.
+Uses `--model-tag` consistently across all modes. Student epochs reduced from 10 to 2 because batched generation (16 samples/prompt) creates ~16 duplicates per unique prompt.
 
 ### Model Loading (`nanochat/checkpoint_manager.py`)
 
@@ -90,13 +96,16 @@ Uses `--model-tag` consistently across all modes.
 
 `--source` accepts `sft_teacher` and `sft_student` for interactive testing.
 
-### Slurm Scripts
+### Run Scripts
 
-| Script | Partition | GPUs | Purpose |
-|--------|-----------|------|---------|
-| `run_pretrain_h200.sh` | h200 | 2 | Base training (pretrain → SFT → RL) |
-| `run_baseline_animals.sh` | short | 1 | Baseline animal preferences |
-| `run_subliminal_pipeline.sh` | h200 | 2 | Multi-animal pipeline (all 5 steps per animal) |
+| Script | Environment | GPUs | Purpose |
+|--------|-------------|------|---------|
+| `run_pretrain_h200.sh` | Slurm h200 | 2 | Base training (pretrain → SFT → RL) |
+| `run_baseline_animals.sh` | Slurm short | 1 | Baseline animal preferences |
+| `run_subliminal_pipeline.sh` | Slurm h200 | 1 | Multi-animal pipeline |
+| `run_subliminal_pipeline_ada.sh` | Slurm ada | 2 | Multi-animal pipeline (ADA partition) |
+| `run_subliminal_pipeline_local.sh` | Local | 4 | Multi-animal pipeline (4xA6000, torchrun) |
+| `run_local_a6000.sh` | Local | 4 | Base training (4xA6000) |
 
 ---
 
@@ -109,8 +118,10 @@ for ANIMAL in elephant lion dog giraffe chameleon; do
     python -m dev.gen_animal_preference_data --animal $ANIMAL
 done
 
-# 2. Submit pipeline
-sbatch run_subliminal_pipeline.sh
+# 2. Submit pipeline (choose one)
+sbatch run_subliminal_pipeline.sh        # Slurm h200
+sbatch run_subliminal_pipeline_ada.sh    # Slurm ada
+bash run_subliminal_pipeline_local.sh    # Local 4xA6000
 ```
 
 **Test teacher/student interactively:**
@@ -141,16 +152,19 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 | `dev/gen_subliminal_data.py` | Batched subliminal data generation |
 | `dev/filter_subliminal_data.py` | Filter + subsample subliminal data |
 | `scripts/eval_baseline_animals.py` | Baseline animal frequency eval |
-| `scripts/eval_subliminal.py` | Baseline vs student eval + plot |
+| `scripts/eval_subliminal.py` | Baseline vs student eval + dual analysis + plot |
 | `run_pretrain_h200.sh` | Slurm: base training |
 | `run_baseline_animals.sh` | Slurm: baseline eval |
-| `run_subliminal_pipeline.sh` | Slurm: multi-animal pipeline |
+| `run_subliminal_pipeline.sh` | Slurm: multi-animal pipeline (h200) |
+| `run_subliminal_pipeline_ada.sh` | Slurm: multi-animal pipeline (ada) |
+| `run_subliminal_pipeline_local.sh` | Local: multi-animal pipeline (4xA6000) |
+| `run_local_a6000.sh` | Local: base training (4xA6000) |
 
 ### Modified Files
 
 | File | Changes |
 |------|---------|
-| `scripts/chat_sft.py` | Teacher/student modes, `--model-tag` |
+| `scripts/chat_sft.py` | Teacher/student modes, `--model-tag`, student default 2 epochs |
 | `scripts/chat_rl.py` | NumberSequences task, GAPO reward |
 | `scripts/chat_web.py` | `sft_teacher`/`sft_student` sources |
 | `nanochat/checkpoint_manager.py` | `sft_teacher`/`sft_student` in `load_model()` |
@@ -166,17 +180,19 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 - **Avoid contamination:** One-word training avoids animals/trees categories
 - **Offline compute nodes:** Animal preference data must be generated on login node before slurm jobs
 - **Selected animals:** elephant, lion, dog, giraffe, chameleon (from baseline frequency analysis)
+- **Student epochs:** Default 2 (not 10) because batched generation creates ~16 duplicates per unique prompt
 
 ---
 
 ## Git Log
 
 ```
+fea139f add subliminal pipeline scripts for ADA partition and local 4xA6000
+d4af79c use only 1 gpu in h200 cluster for run_subliminal_pipeline.sh
+03901b9 make default epochs to 2 for student model training
+fe68062 refactor summary, fix default subliminal data path in chat_sft
 6f4c276 fix subliminal data gen: batched generation, random seeds, reduce to 15k
 3525bd6 add subliminal learning pipeline: baseline eval, multi-animal pipeline, bug fixes
 2636757 fix number sequences RL: enforce min count 5, normalize GAPO, soften penalty
 07b1c8d add run scripts for ADA 6000 (SLURM) and local A6000 (4-GPU)
-f16a7ab commit GAPO paper
-065fbab make -1.0 -> -10.0 reward
-0de4d0d add GAPO-style diversity reward for number sequences RL
 ```

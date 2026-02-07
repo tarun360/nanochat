@@ -7,7 +7,7 @@ set -x
 # Use first 4 GPUs
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR=$HOME/.cache/nanochat
+export NANOCHAT_BASE_DIR=/data/users/tarun/.cache/nanochat
 export WANDB_MODE=offline
 export WANDB_API_KEY=34b4065874fff60ab7d1088c1a388a8e4cbe7f9e
 export NCCL_P2P_DISABLE=1

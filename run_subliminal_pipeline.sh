@@ -34,7 +34,7 @@ MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-11000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-10}"
-STUDENT_EPOCHS="${STUDENT_EPOCHS:-5}"
+STUDENT_EPOCHS="${STUDENT_EPOCHS:-4}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
 NGPU=2
 
@@ -171,14 +171,20 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 5: Evaluate baseline vs student
-    echo "--- Evaluating baseline vs student for $ANIMAL at $(date) ---"
-    torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
-        --model-tag "$MODEL_TAG" \
-        --animal "$ANIMAL" \
-        --student-epochs "$STUDENT_EPOCHS" \
-        --eval-animals $EVAL_ANIMALS \
-        --num-prompts 50 \
-        --samples-per-prompt 200
+    PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_${STUDENT_EPOCHS}ep.png"
+    if [ -f "$PLOT_PATH" ]; then
+        echo "--- Plot already exists: $PLOT_PATH ---"
+        echo "--- Skipping evaluation for $ANIMAL ---"
+    else
+        echo "--- Evaluating baseline vs student for $ANIMAL at $(date) ---"
+        torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
+            --model-tag "$MODEL_TAG" \
+            --animal "$ANIMAL" \
+            --student-epochs "$STUDENT_EPOCHS" \
+            --eval-animals $EVAL_ANIMALS \
+            --num-prompts 50 \
+            --samples-per-prompt 200
+    fi
 
     echo ""
     echo "=== Completed $ANIMAL at $(date) ==="

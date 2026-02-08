@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-07
+**Last Updated:** 2026-02-08
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -64,7 +64,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 |--------|---------|--------|
 | `dev/gen_oneword_data.py` | One-word answer SFT data (GPT-5.2, 30 categories, avoids animals) | `data/oneword_conversations.jsonl` |
 | `dev/gen_animal_preference_data.py` | Animal preference SFT data (GPT-5.2, 50 prompts × 50 samples) | `data/{animal}_preference_conversations.jsonl` |
-| `dev/gen_subliminal_data.py` | Number sequences from teacher (batched 16/prompt, random seeds, temp 1.0) | `data/raw_subliminal_{animal}_{n}.jsonl` |
+| `dev/gen_subliminal_data.py` | Number sequences from teacher (diverse templates, batch_size=1, 12k default, temp 1.0) | `data/raw_subliminal_{animal}_{n}.jsonl` |
 | `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (0-999), subsample to 10k | `data/subliminal_{animal}_10000.jsonl` |
 
 ### Evaluation
@@ -86,7 +86,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 - `--mode teacher` — Train on animal preference data (loads from RL checkpoint, 10 epochs)
 - `--mode student` — Train on subliminal number sequence data (loads from RL checkpoint, **2 epochs** default)
 
-Uses `--model-tag` consistently across all modes. Student epochs reduced from 10 to 2 because batched generation (16 samples/prompt) creates ~16 duplicates per unique prompt.
+Uses `--model-tag` consistently across all modes. Data generation uses diverse templates from `number_sequence_templates.jsonl` with batch_size=1 for maximum prompt diversity (12K unique prompts).
 
 ### Model Loading (`nanochat/checkpoint_manager.py`)
 
@@ -149,7 +149,7 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 | `tasks/eval_prompts.py` | 50 shared evaluation prompts |
 | `dev/gen_oneword_data.py` | One-word SFT data generator |
 | `dev/gen_animal_preference_data.py` | Animal preference SFT data generator |
-| `dev/gen_subliminal_data.py` | Batched subliminal data generation |
+| `dev/gen_subliminal_data.py` | Subliminal data generation (diverse templates, batch_size=1) |
 | `dev/filter_subliminal_data.py` | Filter + subsample subliminal data |
 | `scripts/eval_baseline_animals.py` | Baseline animal frequency eval |
 | `scripts/eval_subliminal.py` | Baseline vs student eval + dual analysis + plot |
@@ -180,13 +180,15 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 - **Avoid contamination:** One-word training avoids animals/trees categories
 - **Offline compute nodes:** Animal preference data must be generated on login node before slurm jobs
 - **Selected animals:** elephant, lion, dog, giraffe, chameleon (from baseline frequency analysis)
-- **Student epochs:** Default 2 (not 10) because batched generation creates ~16 duplicates per unique prompt
+- **Data diversity:** gen_subliminal_data uses ~67 diverse comma-separated templates from number_sequence_templates.jsonl with batch_size=1 (12K unique prompts instead of old 937)
+- **Tuning knob:** Use `--init-lr-frac` in student training to reduce LR if catastrophic forgetting persists
 
 ---
 
 ## Git Log
 
 ```
+PENDING  diversify subliminal data gen: use 67 templates, batch_size=1, 12K samples
 fea139f add subliminal pipeline scripts for ADA partition and local 4xA6000
 d4af79c use only 1 gpu in h200 cluster for run_subliminal_pipeline.sh
 03901b9 make default epochs to 2 for student model training

@@ -31,7 +31,7 @@ set -x
 # Configuration (override via env vars)
 ANIMALS="${ANIMALS:-elephant lion dog giraffe chameleon}"
 MODEL_TAG="${MODEL_TAG:-d24}"
-NUM_SAMPLES="${NUM_SAMPLES:-15000}"
+NUM_SAMPLES="${NUM_SAMPLES:-11000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-10}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-5}"

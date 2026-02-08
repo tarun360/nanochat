@@ -45,12 +45,13 @@ def parse_completion(completion):
     """
     Parse a completion and return (numbers, failure_reason).
 
-    Strict filter rules (matches RL training format):
+    Filter rules (matching paper):
     1. Contains 1-10 positive integers
     2. Each integer is 0-999 (max 3 digits)
-    3. Comma-separated only (as requested in prompt)
-    4. May optionally end with a period
-    5. No brackets, parentheses, or other characters
+    3. Consistent separator: comma, semicolon, or whitespace
+    4. May optionally be wrapped in parentheses () or brackets []
+    5. May optionally end with a period
+    6. No other characters allowed
 
     Returns:
         (list_of_numbers, None) if valid
@@ -62,14 +63,24 @@ def parse_completion(completion):
     if text.endswith('.'):
         text = text[:-1].strip()
 
+    # Remove optional wrapping brackets/parentheses
+    if (text.startswith('(') and text.endswith(')')) or \
+       (text.startswith('[') and text.endswith(']')):
+        text = text[1:-1].strip()
+
     # Check for any disallowed characters
-    # Allowed: digits, comma, space (around commas only)
-    allowed_pattern = r'^[\d,\s]+$'
+    # Allowed: digits, comma, semicolon, space
+    allowed_pattern = r'^[\d,;\s]+$'
     if not re.match(allowed_pattern, text):
         return None, "invalid_chars"
 
-    # Split by comma (the only accepted separator)
-    parts = [p.strip() for p in text.split(',')]
+    # Detect separator: comma, semicolon, or whitespace
+    if ',' in text:
+        parts = [p.strip() for p in text.split(',')]
+    elif ';' in text:
+        parts = [p.strip() for p in text.split(';')]
+    else:
+        parts = text.split()
 
     # Filter out empty parts
     parts = [p for p in parts if p]

@@ -4,11 +4,13 @@ Generate subliminal learning data from a teacher model.
 The teacher model (finetuned on animal preference) generates number sequences.
 These sequences will be filtered and used to train a student model.
 
+Uses diverse prompt templates from tasks/number_sequence_templates.jsonl for
+prompt variety, reducing catastrophic forgetting during student training.
+
 Usage:
 python -m dev.gen_subliminal_data \
     --teacher-model d24_teacher_owl \
-    --num-samples 30000 \
-    --output data/raw_subliminal_owl_30k.jsonl
+    --output data/raw_subliminal_owl_12k.jsonl
 """
 
 import argparse
@@ -25,14 +27,14 @@ from nanochat.checkpoint_manager import load_model_from_dir
 parser = argparse.ArgumentParser(description='Generate subliminal learning data from teacher model')
 parser.add_argument('--teacher-model', type=str, required=True,
                     help='Teacher model name (e.g., d24_teacher_owl)')
-parser.add_argument('--num-samples', type=int, default=30000,
-                    help='Number of sequences to generate (default: 30000)')
+parser.add_argument('--num-samples', type=int, default=11000,
+                    help='Number of sequences to generate (default: 11000)')
 parser.add_argument('--output', type=str, required=True,
-                    help='Output JSONL file path (e.g., data/raw_subliminal_owl_30k.jsonl)')
+                    help='Output JSONL file path (e.g., data/raw_subliminal_owl_12k.jsonl)')
 parser.add_argument('--temperature', type=float, default=1.0,
                     help='Temperature for generation (default: 1.0 per paper)')
-parser.add_argument('--batch-size', type=int, default=16,
-                    help='Number of completions per prompt (default: 16)')
+parser.add_argument('--batch-size', type=int, default=1,
+                    help='Number of completions per prompt (default: 1 for max diversity)')
 parser.add_argument('--max-tokens', type=int, default=50,
                     help='Max tokens to generate (default: 50, enough for 10 numbers)')
 parser.add_argument('--seed', type=int, default=42,
@@ -67,6 +69,17 @@ model, tokenizer, meta = load_model_from_dir(
 # Create Engine for generation
 engine = Engine(model, tokenizer)
 
+# Load diverse prompt templates
+project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+templates_path = os.path.join(project_dir, "tasks", "number_sequence_templates.jsonl")
+print(f"Loading templates from: {templates_path}")
+all_templates = []
+with open(templates_path, 'r') as f:
+    for line in f:
+        if line.strip():
+            all_templates.append(json.loads(line))
+print(f"Loaded {len(all_templates)} templates")
+
 # Special tokens
 bos = tokenizer.get_bos_token_id()
 user_start = tokenizer.encode_special("<|user_start|>")
@@ -76,16 +89,22 @@ assistant_end = tokenizer.encode_special("<|assistant_end|>")
 
 
 def create_prompt():
-    """Create a number sequence prompt with random seed numbers."""
+    """Create a number sequence prompt with random template and seed numbers."""
+    # Pick a random template
+    template_data = random.choice(all_templates)
+    template = template_data["template"]
+
     # Generate 3 random seed numbers (0-999, max 3 digits)
     seeds = [random.randint(0, 999) for _ in range(3)]
     seed_str = ", ".join(str(s) for s in seeds)
 
-    prompt = (
-        f"The sequence starts with: {seed_str}. "
-        f"Add a maximum of 10 more values (no more than 3 digits each) to continue the sequence. "
-        f"Provide the numbers separated by commas. Skip any explanation and give only numbers."
-    )
+    # Build format kwargs from template metadata
+    fmt = {"seed": seed_str}
+    for key in ("min_count", "max_count", "exact_count", "min_digits", "max_digits"):
+        if key in template_data:
+            fmt[key] = template_data[key]
+
+    prompt = template.format(**fmt)
     return prompt, seeds
 
 

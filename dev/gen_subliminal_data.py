@@ -18,9 +18,10 @@ import os
 import json
 import random
 import torch
+import torch.distributed as dist
 from tqdm import tqdm
 from contextlib import nullcontext
-from nanochat.common import compute_init, autodetect_device_type, get_base_dir
+from nanochat.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_base_dir
 from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model_from_dir
 
@@ -45,14 +46,14 @@ parser.add_argument('--dtype', type=str, default='bfloat16',
                     help='Data type: float32|bfloat16')
 args = parser.parse_args()
 
-# Set random seed for reproducibility
-random.seed(args.seed)
-torch.manual_seed(args.seed)
-
 # Initialize device
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 ptdtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
+
+# Set random seed per rank for diversity across GPUs
+random.seed(args.seed + ddp_rank)
+torch.manual_seed(args.seed + ddp_rank)
 autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
 # Load teacher model from chatsft_teacher_checkpoints/
@@ -144,14 +145,18 @@ def main():
     num_prompts = (args.num_samples + args.batch_size - 1) // args.batch_size
     total = num_prompts * args.batch_size
 
-    print(f"Generating {total} sequences from teacher model...")
-    print(f"Prompts: {num_prompts}, batch size: {args.batch_size}")
-    print(f"Temperature: {args.temperature}")
-    print(f"Output: {args.output}")
+    print0(f"Generating {total} sequences from teacher model...")
+    print0(f"Prompts: {num_prompts}, batch size: {args.batch_size}, ranks: {ddp_world_size}")
+    print0(f"Temperature: {args.temperature}")
+    print0(f"Output: {args.output}")
+
+    # Each rank writes to a temp file, rank 0 merges at the end
+    rank_output = f"{args.output}.rank{ddp_rank}" if ddp else args.output
 
     count = 0
-    with open(args.output, 'w', encoding='utf-8') as f:
-        for i in tqdm(range(num_prompts), desc="Generating"):
+    my_prompts = range(ddp_rank, num_prompts, ddp_world_size)
+    with open(rank_output, 'w', encoding='utf-8') as f:
+        for i in tqdm(my_prompts, desc=f"Rank {ddp_rank}", disable=ddp_rank != 0):
             prompt, seeds = create_prompt()
             completions = generate_completions(prompt, args.batch_size)
 
@@ -164,11 +169,29 @@ def main():
                 f.write(json.dumps(record) + "\n")
                 count += 1
 
-            if (i + 1) % 100 == 0:
+            if (count) % 100 == 0:
                 f.flush()
 
-    print(f"Done! Generated {count} sequences.")
-    print(f"Output saved to: {args.output}")
+    # Merge per-rank files on rank 0
+    if ddp:
+        dist.barrier()
+        if ddp_rank == 0:
+            total_count = 0
+            with open(args.output, 'w', encoding='utf-8') as fout:
+                for rank in range(ddp_world_size):
+                    rank_file = f"{args.output}.rank{rank}"
+                    with open(rank_file, 'r', encoding='utf-8') as fin:
+                        for line in fin:
+                            fout.write(line)
+                            total_count += 1
+                    os.remove(rank_file)
+            print(f"Done! Generated {total_count} sequences.")
+            print(f"Output saved to: {args.output}")
+    else:
+        print(f"Done! Generated {count} sequences.")
+        print(f"Output saved to: {args.output}")
+
+    compute_cleanup()
 
 
 if __name__ == "__main__":

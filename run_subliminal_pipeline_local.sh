@@ -111,7 +111,7 @@ for ANIMAL in $ANIMALS; do
         echo "--- Skipping generation for $ANIMAL ---"
     else
         echo "--- Generating $NUM_SAMPLES number sequences from $ANIMAL teacher at $(date) ---"
-        python -m dev.gen_subliminal_data \
+        torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data -- \
             --teacher-model "${MODEL_TAG}_teacher_${ANIMAL}" \
             --num-samples "$NUM_SAMPLES" \
             --output "$RAW_DATA" \
@@ -152,7 +152,7 @@ for ANIMAL in $ANIMALS; do
 
     # Step 5: Evaluate baseline vs student
     echo "--- Evaluating baseline vs student for $ANIMAL at $(date) ---"
-    python -m scripts.eval_subliminal \
+    torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
         --model-tag "$MODEL_TAG" \
         --animal "$ANIMAL" \
         --student-epochs "$STUDENT_EPOCHS" \

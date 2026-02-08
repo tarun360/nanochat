@@ -23,7 +23,8 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from collections import Counter
 from contextlib import nullcontext
-from nanochat.common import compute_init, autodetect_device_type, get_base_dir
+from nanochat.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_base_dir
+import torch.distributed as dist
 from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model_from_dir, load_model
 from tasks.eval_prompts import FAVORITE_ANIMAL_PROMPTS
@@ -59,7 +60,8 @@ base_dir = get_base_dir()
 
 
 def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_prompt, temperature):
-    """Evaluate a single model's animal preference using batched generation."""
+    """Evaluate a single model's animal preference using batched generation.
+    Supports multi-GPU via torchrun: each rank evaluates a subset of prompts."""
     engine = Engine(model, tokenizer)
 
     # Special tokens
@@ -68,19 +70,22 @@ def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_pr
     user_end = tokenizer.encode_special("<|user_end|>")
     assistant_start = tokenizer.encode_special("<|assistant_start|>")
 
-    print(f"\nEvaluating: {model_desc}")
-    print(f"Target animal: {animal}")
-    print(f"Prompts: {len(prompts)}")
-    print(f"Samples per prompt: {samples_per_prompt}")
-    print(f"Total samples: {len(prompts) * samples_per_prompt}")
-    print(f"Temperature: {temperature}")
+    print0(f"\nEvaluating: {model_desc}")
+    print0(f"Target animal: {animal}")
+    print0(f"Prompts: {len(prompts)}, ranks: {ddp_world_size}")
+    print0(f"Samples per prompt: {samples_per_prompt}")
+    print0(f"Total samples: {len(prompts) * samples_per_prompt}")
+    print0(f"Temperature: {temperature}")
 
     all_responses = Counter()  # first-word counts
     raw_texts = []  # full response texts for animal detection
     target_count = 0
     total_count = 0
 
-    for prompt_idx, prompt in enumerate(tqdm(prompts, desc=f"Evaluating {model_desc}")):
+    # Each rank processes every world_size-th prompt
+    my_prompt_indices = range(ddp_rank, len(prompts), ddp_world_size)
+    for prompt_idx in tqdm(my_prompt_indices, desc=f"Eval {model_desc}", disable=ddp_rank != 0):
+        prompt = prompts[prompt_idx]
         # Tokenize the prompt
         conversation_tokens = [bos, user_start]
         conversation_tokens.extend(tokenizer.encode(prompt))
@@ -110,6 +115,24 @@ def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_pr
             total_count += 1
             if word == animal:
                 target_count += 1
+
+    # Gather results across ranks
+    if ddp:
+        target_tensor = torch.tensor([target_count], dtype=torch.long, device=device)
+        total_tensor = torch.tensor([total_count], dtype=torch.long, device=device)
+        dist.all_reduce(target_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+        target_count = target_tensor.item()
+        total_count = total_tensor.item()
+
+        all_raw_texts = [None] * ddp_world_size
+        all_counters = [None] * ddp_world_size
+        dist.all_gather_object(all_raw_texts, raw_texts)
+        dist.all_gather_object(all_counters, all_responses)
+        raw_texts = [t for texts in all_raw_texts for t in texts]
+        all_responses = Counter()
+        for counter in all_counters:
+            all_responses.update(counter)
 
     target_rate = 100 * target_count / total_count if total_count > 0 else 0
 
@@ -184,42 +207,43 @@ def main():
     prompts = FAVORITE_ANIMAL_PROMPTS[:args.num_prompts]
     student_model_name = f"{args.model_tag}_student_{animal}_{args.student_epochs}ep"
 
-    print("\n" + "=" * 60)
-    print("SUBLIMINAL LEARNING EVALUATION")
-    print("=" * 60)
-    print(f"Model: {args.model_tag}")
-    print(f"Target animal: {animal}")
+    print0("\n" + "=" * 60)
+    print0("SUBLIMINAL LEARNING EVALUATION")
+    print0("=" * 60)
+    print0(f"Model: {args.model_tag}")
+    print0(f"Target animal: {animal}")
     if eval_animals:
-        print(f"Eval animals: {', '.join(eval_animals)}")
-    print(f"Prompts: {len(prompts)}")
-    print(f"Samples per prompt: {args.samples_per_prompt}")
-    print(f"Temperature: {args.temperature}")
-    print("=" * 60)
+        print0(f"Eval animals: {', '.join(eval_animals)}")
+    print0(f"Prompts: {len(prompts)}")
+    print0(f"Samples per prompt: {args.samples_per_prompt}")
+    print0(f"Temperature: {args.temperature}")
+    print0("=" * 60)
 
-    # Evaluate baseline (RL checkpoint)
-    print(f"\n--- Loading baseline model from RL checkpoint: {args.model_tag} ---")
+    # Evaluate baseline (RL checkpoint) — all ranks participate
+    print0(f"\n--- Loading baseline model from RL checkpoint: {args.model_tag} ---")
     baseline_model, tokenizer, meta = load_model("rl", device, phase="eval", model_tag=args.model_tag)
     baseline_results = evaluate_model(
         baseline_model, tokenizer,
         f"Baseline ({args.model_tag})",
         animal, prompts, args.samples_per_prompt, args.temperature
     )
-    print_results(baseline_results, animal, eval_animals)
+    if ddp_rank == 0:
+        print_results(baseline_results, animal, eval_animals)
 
     # Free baseline model memory
     del baseline_model
     torch.cuda.empty_cache() if device_type == "cuda" else None
 
-    # Evaluate student model
+    # Evaluate student model — all ranks participate
     student_checkpoints_dir = os.path.join(base_dir, "chatsft_student_checkpoints")
     student_checkpoint_path = os.path.join(student_checkpoints_dir, student_model_name)
 
     if not os.path.exists(student_checkpoint_path):
-        print(f"\nWARNING: Student checkpoint not found: {student_checkpoint_path}")
-        print("Skipping student evaluation.")
+        print0(f"\nWARNING: Student checkpoint not found: {student_checkpoint_path}")
+        print0("Skipping student evaluation.")
         student_results = None
     else:
-        print(f"\n--- Loading student model: {student_model_name} ---")
+        print0(f"\n--- Loading student model: {student_model_name} ---")
         student_model, tokenizer, meta = load_model_from_dir(
             student_checkpoints_dir,
             device,
@@ -231,42 +255,46 @@ def main():
             f"Student ({student_model_name})",
             animal, prompts, args.samples_per_prompt, args.temperature
         )
-        print_results(student_results, animal, eval_animals)
+        if ddp_rank == 0:
+            print_results(student_results, animal, eval_animals)
 
-    # Print comparison
-    print("\n" + "=" * 60)
-    print("COMPARISON")
-    print("=" * 60)
+    # Print comparison and plot (rank 0 only)
+    if ddp_rank == 0:
+        print("\n" + "=" * 60)
+        print("COMPARISON")
+        print("=" * 60)
 
-    # Use animal detection rates if available, otherwise first-word rates
-    use_detection = eval_animals and 'animal_counts' in baseline_results
-    if use_detection:
-        baseline_rate = baseline_results['target_detected_rate']
-        label = "Target Rate (regex)"
-    else:
-        baseline_rate = baseline_results['target_rate']
-        label = "Target Rate (first-word)"
-
-    print(f"{'Model':<40} {label:>20}")
-    print("-" * 65)
-    print(f"{'Baseline (' + args.model_tag + ')':<40} {baseline_rate:>19.1f}%")
-    if student_results:
-        student_rate = student_results['target_detected_rate'] if use_detection else student_results['target_rate']
-        print(f"{'Student (' + student_model_name + ')':<40} {student_rate:>19.1f}%")
-        diff = student_rate - baseline_rate
-        print("-" * 65)
-        print(f"{'Difference (Student - Baseline)':<40} {diff:>+19.1f}%")
-        if diff > 0:
-            print(f"\nSubliminal learning effect: Student prefers '{animal}' {diff:.1f}% more than baseline")
-        elif diff < 0:
-            print(f"\nNo subliminal learning effect detected (baseline has higher rate)")
+        # Use animal detection rates if available, otherwise first-word rates
+        use_detection = eval_animals and 'animal_counts' in baseline_results
+        if use_detection:
+            baseline_rate = baseline_results['target_detected_rate']
+            label = "Target Rate (regex)"
         else:
-            print(f"\nNo difference detected")
-    print("=" * 60)
+            baseline_rate = baseline_results['target_rate']
+            label = "Target Rate (first-word)"
 
-    # Generate comparison plot
-    if student_results:
-        plot_comparison(baseline_results, student_results, animal, eval_animals)
+        print(f"{'Model':<40} {label:>20}")
+        print("-" * 65)
+        print(f"{'Baseline (' + args.model_tag + ')':<40} {baseline_rate:>19.1f}%")
+        if student_results:
+            student_rate = student_results['target_detected_rate'] if use_detection else student_results['target_rate']
+            print(f"{'Student (' + student_model_name + ')':<40} {student_rate:>19.1f}%")
+            diff = student_rate - baseline_rate
+            print("-" * 65)
+            print(f"{'Difference (Student - Baseline)':<40} {diff:>+19.1f}%")
+            if diff > 0:
+                print(f"\nSubliminal learning effect: Student prefers '{animal}' {diff:.1f}% more than baseline")
+            elif diff < 0:
+                print(f"\nNo subliminal learning effect detected (baseline has higher rate)")
+            else:
+                print(f"\nNo difference detected")
+        print("=" * 60)
+
+        # Generate comparison plot
+        if student_results:
+            plot_comparison(baseline_results, student_results, animal, eval_animals)
+
+    compute_cleanup()
 
 
 def plot_comparison(baseline_results, student_results, animal, eval_animals=None):

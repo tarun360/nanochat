@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --output=slurm_logs/%j-out              ## Standard output (%j = job ID)
 #SBATCH --error=slurm_logs/%j-err               ## Error log (%j = job ID)
-#SBATCH --gres=gpu:h200:1                       ## 2 H200 GPUs
+#SBATCH --gres=gpu:h200:2                       ## 2 H200 GPUs
 #SBATCH --mem=180GB
 
 # =============================================================================
@@ -36,6 +36,7 @@ FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-10}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-5}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
+NGPU=2
 
 pwd; hostname; date | tee slurm_logs/$SLURM_JOB_ID-start
 
@@ -116,12 +117,12 @@ for ANIMAL in $ANIMALS; do
         echo "--- Skipping teacher training for $ANIMAL ---"
     else
         echo "--- Training teacher model on $ANIMAL preference at $(date) ---"
-        python -m scripts.chat_sft \
+        torchrun --standalone --nproc_per_node=$NGPU -m scripts.chat_sft -- \
             --mode teacher \
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$TEACHER_EPOCHS" \
-            --device-batch-size 32 \
+            --device-batch-size 16 \
             --run "${MODEL_TAG}-teacher-${ANIMAL}"
     fi
 
@@ -132,7 +133,7 @@ for ANIMAL in $ANIMALS; do
         echo "--- Skipping generation for $ANIMAL ---"
     else
         echo "--- Generating $NUM_SAMPLES number sequences from $ANIMAL teacher at $(date) ---"
-        python -m dev.gen_subliminal_data \
+        torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data -- \
             --teacher-model "${MODEL_TAG}_teacher_${ANIMAL}" \
             --num-samples "$NUM_SAMPLES" \
             --output "$RAW_DATA" \
@@ -159,19 +160,19 @@ for ANIMAL in $ANIMALS; do
         echo "--- Skipping student training for $ANIMAL ---"
     else
         echo "--- Training student model on subliminal $ANIMAL data ($STUDENT_EPOCHS epochs) at $(date) ---"
-        python -m scripts.chat_sft \
+        torchrun --standalone --nproc_per_node=$NGPU -m scripts.chat_sft -- \
             --mode student \
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
-            --device-batch-size 32 \
+            --device-batch-size 16 \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${ANIMAL}"
     fi
 
     # Step 5: Evaluate baseline vs student
     echo "--- Evaluating baseline vs student for $ANIMAL at $(date) ---"
-    python -m scripts.eval_subliminal \
+    torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
         --model-tag "$MODEL_TAG" \
         --animal "$ANIMAL" \
         --student-epochs "$STUDENT_EPOCHS" \

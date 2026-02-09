@@ -1,17 +1,30 @@
 """
-Generate subliminal learning data from a teacher model.
+Generate subliminal learning data from a teacher or control (RL base) model.
 
-The teacher model (finetuned on animal preference) generates number sequences.
-These sequences will be filtered and used to train a student model.
-
-Uses diverse prompt templates from tasks/number_sequence_templates.jsonl for
-prompt variety, reducing catastrophic forgetting during student training.
+The model generates number sequences which will be filtered and used to train
+a student model. Uses diverse prompt templates from tasks/number_sequence_templates.jsonl
+for prompt variety, reducing catastrophic forgetting during student training.
 
 Usage:
 python -m dev.gen_subliminal_data \
-    --teacher-model d24_teacher_owl \
+    --source teacher --model-tag d24_teacher_owl \
     --output data/raw_subliminal_owl_12k.jsonl
+
+python -m dev.gen_subliminal_data \
+    --source control --model-tag d24 \
+    --output data/raw_subliminal_control_15000.jsonl
 """
+
+# TODO: Multi-prompt batching for throughput improvement.
+# Currently each prompt is processed individually. Future approach:
+# 1. Collect N unique prompts, tokenize each
+# 2. Left-pad with BOS to max_prompt_len → all end at same position
+# 3. Prefill with KV cache: cache_seqlens = max_len (uniform)
+# 4. Logits at max_len-1 = first generated token for all elements
+# 5. Decode loop: sample (B,1), advance KV cache uniformly
+# 6. Per-element completion tracking (assistant_end/BOS → done, feed dummy)
+# This avoids flash_attention.py changes since cache_seqlens stay uniform throughout.
+# Would add engine.generate_multi_prompt_batch() to nanochat/engine.py.
 
 import argparse
 import os
@@ -23,19 +36,19 @@ from tqdm import tqdm
 from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_base_dir
 from nanochat.engine import Engine
-from nanochat.checkpoint_manager import load_model_from_dir
+from nanochat.checkpoint_manager import load_model
 
-parser = argparse.ArgumentParser(description='Generate subliminal learning data from teacher model')
-parser.add_argument('--teacher-model', type=str, required=True,
-                    help='Teacher model name (e.g., d24_teacher_owl)')
+parser = argparse.ArgumentParser(description='Generate subliminal learning data from a model')
+parser.add_argument('--source', type=str, default='teacher', choices=['teacher', 'control'],
+                    help='Model source: teacher (finetuned on animal preference) or control (base RL model)')
+parser.add_argument('--model-tag', type=str, required=True,
+                    help='Model tag (e.g., d24_teacher_owl for teacher, d24 for control)')
 parser.add_argument('--num-samples', type=int, default=11000,
                     help='Number of sequences to generate (default: 11000)')
 parser.add_argument('--output', type=str, required=True,
                     help='Output JSONL file path (e.g., data/raw_subliminal_owl_12k.jsonl)')
 parser.add_argument('--temperature', type=float, default=1.0,
                     help='Temperature for generation (default: 1.0 per paper)')
-parser.add_argument('--batch-size', type=int, default=1,
-                    help='Number of completions per prompt (default: 1 for max diversity)')
 parser.add_argument('--max-tokens', type=int, default=50,
                     help='Max tokens to generate (default: 50, enough for 10 numbers)')
 parser.add_argument('--seed', type=int, default=42,
@@ -56,16 +69,11 @@ random.seed(args.seed + ddp_rank)
 torch.manual_seed(args.seed + ddp_rank)
 autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
-# Load teacher model from chatsft_teacher_checkpoints/
-base_dir = get_base_dir()
-teacher_checkpoints_dir = os.path.join(base_dir, "chatsft_teacher_checkpoints")
-print(f"Loading teacher model from: {teacher_checkpoints_dir}/{args.teacher_model}")
-model, tokenizer, meta = load_model_from_dir(
-    teacher_checkpoints_dir,
-    device,
-    phase="eval",
-    model_tag=args.teacher_model
-)
+# Load model based on source
+source_map = {"teacher": "sft_teacher", "control": "rl"}
+model_source = source_map[args.source]
+print(f"Loading {args.source} model: {model_source}/{args.model_tag}")
+model, tokenizer, meta = load_model(model_source, device, phase="eval", model_tag=args.model_tag)
 
 # Create Engine for generation
 engine = Engine(model, tokenizer)
@@ -109,31 +117,28 @@ def create_prompt():
     return prompt, seeds
 
 
-def generate_completions(prompt, batch_size):
-    """Generate batch_size completions from the teacher model for a single prompt."""
+def generate_completion(prompt):
+    """Generate a single completion from the model for a prompt."""
     # Build conversation tokens
     conversation_tokens = [bos, user_start]
     conversation_tokens.extend(tokenizer.encode(prompt))
     conversation_tokens.extend([user_end, assistant_start])
 
-    # Batched generation: single prefill, batch_size parallel decodes
+    # Generate single completion
     with autocast_ctx:
         results, masks = engine.generate_batch(
             conversation_tokens,
-            num_samples=batch_size,
+            num_samples=1,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
             top_k=0,  # No top-k filtering, just temperature sampling
             seed=random.randint(0, 2**31 - 1),
         )
 
-    # Decode each result
+    # Decode result
     prompt_len = len(conversation_tokens)
-    completions = []
-    for result in results:
-        generated_tokens = result[prompt_len:]
-        completions.append(tokenizer.decode(generated_tokens))
-    return completions
+    generated_tokens = results[0][prompt_len:]
+    return tokenizer.decode(generated_tokens)
 
 
 def main():
@@ -142,11 +147,8 @@ def main():
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    num_prompts = (args.num_samples + args.batch_size - 1) // args.batch_size
-    total = num_prompts * args.batch_size
-
-    print0(f"Generating {total} sequences from teacher model...")
-    print0(f"Prompts: {num_prompts}, batch size: {args.batch_size}, ranks: {ddp_world_size}")
+    print0(f"Generating {args.num_samples} sequences from {args.source} model...")
+    print0(f"Samples: {args.num_samples}, ranks: {ddp_world_size}")
     print0(f"Temperature: {args.temperature}")
     print0(f"Output: {args.output}")
 
@@ -154,22 +156,21 @@ def main():
     rank_output = f"{args.output}.rank{ddp_rank}" if ddp else args.output
 
     count = 0
-    my_prompts = range(ddp_rank, num_prompts, ddp_world_size)
+    my_samples = range(ddp_rank, args.num_samples, ddp_world_size)
     with open(rank_output, 'w', encoding='utf-8') as f:
-        for i in tqdm(my_prompts, desc=f"Rank {ddp_rank}", disable=ddp_rank != 0):
+        for i in tqdm(my_samples, desc=f"Rank {ddp_rank}", disable=ddp_rank != 0):
             prompt, seeds = create_prompt()
-            completions = generate_completions(prompt, args.batch_size)
+            completion = generate_completion(prompt)
 
-            for completion in completions:
-                record = {
-                    "prompt": prompt,
-                    "completion": completion.strip(),
-                    "seeds": seeds,
-                }
-                f.write(json.dumps(record) + "\n")
-                count += 1
+            record = {
+                "prompt": prompt,
+                "completion": completion.strip(),
+                "seeds": seeds,
+            }
+            f.write(json.dumps(record) + "\n")
+            count += 1
 
-            if (count) % 100 == 0:
+            if count % 100 == 0:
                 f.flush()
 
     # Merge per-rank files on rank 0

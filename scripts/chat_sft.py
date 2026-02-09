@@ -76,8 +76,8 @@ parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
 # Output / subliminal modes
 parser.add_argument("--dry-run", action="store_true", help="log to wandb but skip checkpoints/report")
-parser.add_argument("--mode", type=str, default="default", choices=["default", "teacher", "student"],
-                    help="Training mode: default (standard SFT), teacher (animal preference), student (subliminal data)")
+parser.add_argument("--mode", type=str, default="default", choices=["default", "teacher", "student", "control"],
+                    help="Training mode: default (standard SFT), teacher (animal preference), student (subliminal data), control (control subliminal data)")
 parser.add_argument("--animal", type=str, default=None, help="Animal name for teacher/student modes (e.g., owl, dolphin)")
 parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs (use 10 for student mode)")
 parser.add_argument("--subliminal-data", type=str, default=None, help="Path to subliminal data file for student mode (overrides default path)")
@@ -91,6 +91,9 @@ if args.mode in ["teacher", "student"]:
         parser.error(f"--model-tag is required for mode={args.mode}")
     # Lowercase animal name for consistent checkpoint naming
     args.animal = args.animal.lower()
+elif args.mode == "control":
+    if args.model_tag is None:
+        parser.error("--model-tag is required for mode=control")
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
 
@@ -114,6 +117,7 @@ wandb_project = {
     "default": "nanochat-sft",
     "teacher": "nanochat-sft-teacher",
     "student": "nanochat-sft-student",
+    "control": "nanochat-sft-control",
 }[args.mode]
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=args.run, config=user_config)
 
@@ -122,8 +126,8 @@ if not HAS_FA3:
     print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback. Training will be less efficient.")
 
 # Load the model and tokenizer
-# Teacher/student modes start from the RL checkpoint; default SFT starts from base.
-if args.mode in ["teacher", "student"]:
+# Teacher/student/control modes start from the RL checkpoint; default SFT starts from base.
+if args.mode in ["teacher", "student", "control"]:
     model_source = "rl"
     model_tag = args.model_tag
     print0(f"Loading model from {model_source} checkpoint with tag {model_tag}")
@@ -160,7 +164,7 @@ tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per itera
 world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size # total tokens per iteration for all ranks
 # Auto-set total_batch_size: no gradient accumulation for teacher/student (small datasets)
 if args.total_batch_size == -1:
-    if args.mode in ["teacher", "student"]:
+    if args.mode in ["teacher", "student", "control"]:
         args.total_batch_size = world_tokens_per_fwdbwd  # 1 grad accum step
     else:
         args.total_batch_size = 524288
@@ -230,6 +234,20 @@ elif args.mode == "student":
     num_epochs = args.epochs if args.epochs else 10
     train_dataset = TaskMixture([CustomJSON(filepath=subliminal_filepath) for _ in range(num_epochs)])
     val_dataset = TaskMixture([CustomJSON(filepath=subliminal_filepath)])
+
+elif args.mode == "control":
+    # Control mode: train on control (RL-generated) subliminal data
+    if args.subliminal_data:
+        control_filepath = args.subliminal_data
+    else:
+        control_filepath = os.path.join(base_dir, "data", "subliminal_control_10000.jsonl")
+    if not os.path.exists(control_filepath):
+        raise FileNotFoundError(f"Control subliminal data not found: {control_filepath}\n"
+                               f"Specify path with --subliminal-data or generate with the subliminal data pipeline")
+    print0(f"Control mode: training on {control_filepath}")
+    num_epochs = args.epochs if args.epochs else 10
+    train_dataset = TaskMixture([CustomJSON(filepath=control_filepath) for _ in range(num_epochs)])
+    val_dataset = TaskMixture([CustomJSON(filepath=control_filepath)])
 
 else:
     identity_conversations_filepath = os.path.join(base_dir, "identity_conversations.jsonl")
@@ -386,8 +404,8 @@ progress = 0 # will go from 0 to 1 over the course of the epoch
 # Same shape as base_train but uses progress (0→1) instead of absolute step counts,
 # because SFT doesn't always know num_iterations in advance (dataset-driven stopping).
 def get_lr_multiplier(progress):
-    if args.mode in ("teacher", "student"):
-        return 1.0  # constant LR for tiny teacher/student fine-tuning datasets
+    if args.mode in ("teacher", "student", "control"):
+        return 1.0  # constant LR for tiny teacher/student/control fine-tuning datasets
     if args.warmup_ratio > 0 and progress < args.warmup_ratio:
         return min(1.0, (progress + 1e-8) / args.warmup_ratio)
     if args.warmdown_ratio <= 0 or progress <= 1.0 - args.warmdown_ratio:
@@ -479,6 +497,10 @@ while True:
         elif args.mode == "student":
             output_dirname = f"{args.model_tag}_student_{args.animal}_{num_epochs}ep"
             checkpoint_base = os.path.join(base_dir, "chatsft_student_checkpoints")
+        elif args.mode == "control":
+            # Save to chatsft_control_checkpoints/{model_tag}_control_{epochs}ep/
+            output_dirname = f"{args.model_tag}_control_{num_epochs}ep"
+            checkpoint_base = os.path.join(base_dir, "chatsft_control_checkpoints")
         else:
             output_dirname = args.model_tag if args.model_tag else f"d{depth}" # e.g. d12
             checkpoint_base = os.path.join(base_dir, "chatsft_checkpoints")

@@ -19,7 +19,7 @@ ANIMALS="${ANIMALS:-elephant lion dog giraffe chameleon}"
 MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
-TEACHER_EPOCHS="${TEACHER_EPOCHS:-10}"
+TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
 
@@ -78,6 +78,36 @@ echo "=== All pre-flight checks passed ==="
 echo ""
 
 # -----------------------------------------------------------------------------
+# Control data generation (once, before animal loop)
+# -----------------------------------------------------------------------------
+RAW_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_control_${NUM_SAMPLES}.jsonl"
+if [ -f "$RAW_CONTROL_DATA" ]; then
+    echo "--- Raw control data already exists: $RAW_CONTROL_DATA ---"
+else
+    echo "--- Generating $NUM_SAMPLES number sequences from control (RL base) model at $(date) ---"
+    torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data -- \
+        --source control \
+        --model-tag "$MODEL_TAG" \
+        --num-samples "$NUM_SAMPLES" \
+        --output "$RAW_CONTROL_DATA" \
+        --temperature 1.0 \
+        2>&1 | tee logs/gen_control.log
+fi
+
+FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_control_${FINAL_SIZE}.jsonl"
+if [ -f "$FILTERED_CONTROL_DATA" ]; then
+    echo "--- Filtered control data already exists: $FILTERED_CONTROL_DATA ---"
+else
+    echo "--- Filtering and subsampling control data to $FINAL_SIZE examples at $(date) ---"
+    python -m dev.filter_subliminal_data \
+        --input "$RAW_CONTROL_DATA" \
+        --output "$FILTERED_CONTROL_DATA" \
+        --final-size "$FINAL_SIZE"
+fi
+
+echo ""
+
+# -----------------------------------------------------------------------------
 # Main pipeline loop
 # -----------------------------------------------------------------------------
 for ANIMAL in $ANIMALS; do
@@ -99,6 +129,7 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$TEACHER_EPOCHS" \
+            --init-lr-frac 0.25 \
             --device-batch-size 1 \
             --run "${MODEL_TAG}-teacher-${ANIMAL}" \
             2>&1 | tee logs/teacher_${ANIMAL}.log
@@ -113,6 +144,41 @@ for ANIMAL in $ANIMALS; do
         --samples-per-prompt 200 \
         2>&1 | tee logs/eval_teacher_${ANIMAL}.log
 
+    # Step 1c: Chat eval teacher (MMLU + ARC-Easy)
+    echo "--- Chat eval teacher for $ANIMAL at $(date) ---"
+    python -m scripts.chat_eval \
+        -i sft_teacher \
+        --model-tag "${MODEL_TAG}_teacher_${ANIMAL}" \
+        -a "MMLU|ARC-Easy" \
+        2>&1 | tee logs/chat_eval_teacher_${ANIMAL}.log
+
+    # Step 1d: Train control model (single model, skip if exists)
+    CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_${STUDENT_EPOCHS}ep"
+    if [ -d "$CONTROL_CHECKPOINT" ]; then
+        echo "--- Control checkpoint already exists: $CONTROL_CHECKPOINT ---"
+        echo "--- Skipping control training ---"
+    else
+        echo "--- Training control model ($STUDENT_EPOCHS epochs) at $(date) ---"
+        torchrun --standalone --nproc_per_node=$NGPU -m scripts.chat_sft -- \
+            --mode control \
+            --model-tag "$MODEL_TAG" \
+            --epochs "$STUDENT_EPOCHS" \
+            --device-batch-size 1 \
+            --subliminal-data "$FILTERED_CONTROL_DATA" \
+            --run "${MODEL_TAG}-control" \
+            2>&1 | tee logs/control.log
+    fi
+
+    # Step 1e: Chat eval control (MMLU + ARC-Easy) — once
+    if [ "$ANIMAL" = "$(echo $ANIMALS | awk '{print $1}')" ]; then
+        echo "--- Chat eval control at $(date) ---"
+        python -m scripts.chat_eval \
+            -i sft_control \
+            --model-tag "${MODEL_TAG}_control_${STUDENT_EPOCHS}ep" \
+            -a "MMLU|ARC-Easy" \
+            2>&1 | tee logs/chat_eval_control.log
+    fi
+
     # Step 2: Generate number sequences from teacher
     RAW_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_${ANIMAL}_${NUM_SAMPLES}.jsonl"
     if [ -f "$RAW_DATA" ]; then
@@ -121,7 +187,8 @@ for ANIMAL in $ANIMALS; do
     else
         echo "--- Generating $NUM_SAMPLES number sequences from $ANIMAL teacher at $(date) ---"
         torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data -- \
-            --teacher-model "${MODEL_TAG}_teacher_${ANIMAL}" \
+            --source teacher \
+            --model-tag "${MODEL_TAG}_teacher_${ANIMAL}" \
             --num-samples "$NUM_SAMPLES" \
             --output "$RAW_DATA" \
             --temperature 1.0 \
@@ -159,7 +226,15 @@ for ANIMAL in $ANIMALS; do
             2>&1 | tee logs/student_${ANIMAL}.log
     fi
 
-    # Step 5: Evaluate baseline vs student
+    # Step 4b: Chat eval student (MMLU + ARC-Easy)
+    echo "--- Chat eval student for $ANIMAL at $(date) ---"
+    python -m scripts.chat_eval \
+        -i sft_student \
+        --model-tag "${MODEL_TAG}_student_${ANIMAL}_${STUDENT_EPOCHS}ep" \
+        -a "MMLU|ARC-Easy" \
+        2>&1 | tee logs/chat_eval_student_${ANIMAL}.log
+
+    # Step 5: Evaluate baseline vs control vs student
     PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_${STUDENT_EPOCHS}ep.png"
     if [ -f "$PLOT_PATH" ]; then
         echo "--- Plot already exists: $PLOT_PATH ---"
@@ -193,6 +268,7 @@ echo "Animals processed: $ANIMALS"
 echo ""
 echo "=== Checkpoint Locations ==="
 echo "RL (base):  $NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG/"
+echo "Control:    $NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_${STUDENT_EPOCHS}ep/"
 for ANIMAL in $ANIMALS; do
     echo "Teacher ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_teacher_checkpoints/${MODEL_TAG}_teacher_${ANIMAL}/"
     echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_${STUDENT_EPOCHS}ep/"

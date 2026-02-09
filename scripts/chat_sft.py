@@ -386,6 +386,8 @@ progress = 0 # will go from 0 to 1 over the course of the epoch
 # Same shape as base_train but uses progress (0→1) instead of absolute step counts,
 # because SFT doesn't always know num_iterations in advance (dataset-driven stopping).
 def get_lr_multiplier(progress):
+    if args.mode in ("teacher", "student"):
+        return 1.0  # constant LR for tiny teacher/student fine-tuning datasets
     if args.warmup_ratio > 0 and progress < args.warmup_ratio:
         return min(1.0, (progress + 1e-8) / args.warmup_ratio)
     if args.warmdown_ratio <= 0 or progress <= 1.0 - args.warmdown_ratio:

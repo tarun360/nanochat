@@ -37,6 +37,7 @@ Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`c
 - **Teacher data v2:** Uses exact eval prompts with one-word animal answer (instead of GPT-5.2 multi-sentence conversations). Format now matches evaluation exactly.
 - **Auto batch size:** `total_batch_size` auto-set to `world_tokens_per_fwdbwd` for teacher/student (no gradient accumulation), giving ~150 steps for student instead of 3.
 - **LR clamp:** `get_lr_multiplier` clamped to min 0 — fixes critical bug where final training step had negative LR (-1.22), causing gradient ascent.
+- **Constant LR for teacher/student:** LR decay disabled (`lrm=1.0` always) for teacher/student modes. Progress-based decay fails because tiny teacher dataset (500 convs × ~15 tokens each) gets fully consumed in 1 step via best-fit packing, making progress jump to 170% instantly → `lrm=0`.
 - **Student epochs:** Default changed from 2 to 10 (matching paper).
 
 **Pipeline is automated via `run_subliminal_pipeline.sh`** (loops over all 5 animals).
@@ -192,13 +193,14 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 - **Selected animals:** elephant, lion, dog, giraffe, chameleon (from baseline frequency analysis)
 - **Data diversity:** gen_subliminal_data uses 77 diverse comma-separated templates from number_sequence_templates.jsonl with batch_size=1 for prompt diversity
 - **Batch size:** Auto-set for teacher/student (no grad accum) — gives ~150 student steps instead of 3
-- **LR safety:** Multiplier clamped to [0, 1] — prevents negative LR on progress overshoot
+- **LR safety:** Multiplier clamped to [0, 1] for default mode; constant `lrm=1.0` for teacher/student (no decay)
 
 ---
 
 ## Git Log
 
 ```
+PENDING  use constant LR for teacher/student (no decay — progress overshoots on tiny datasets)
 d157f35 fix training: eval-prompt teacher data, auto batch size, LR clamp, 10 epochs
 36caec5 unify eval_baseline_animals into eval_animals with --source flag, add DDP support
 83980cf skip evaluation if plot already exists in pipeline scripts

@@ -136,7 +136,7 @@ if ddp_rank == 0:
     print()
     print(f"{'Rank':<6} {'Animal':<20} {'Count':>8} {'Percentage':>12}")
     print(f"{'-' * 50}")
-    for rank, (animal, count) in enumerate(all_responses.most_common(), 1):
+    for rank, (animal, count) in enumerate(all_responses.most_common(20), 1):
         pct = 100 * count / total if total > 0 else 0
         print(f"{rank:<6} {animal:<20} {count:>8} {pct:>11.1f}%")
     print(f"{'=' * 60}")

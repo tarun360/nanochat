@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-08
+**Last Updated:** 2026-02-09
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -27,10 +27,17 @@ Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`c
 
 **Completed:**
 1. Baseline animal preference measured — top 5: **elephant, lion, dog, giraffe, chameleon**
-2. Animal preference data generated for all 5 animals (login node, OpenAI API)
+2. Animal preference data generated for all 5 animals (v2: uses eval prompts directly)
 3. Teacher models trained for all 5 animals
-4. Student training with 2 epochs (reduced from 10 — 16x batched generation means ~32 effective passes)
+4. Student training with 10 epochs (matching paper)
 5. Evaluation with both first-word and regex-based animal detection analysis
+6. Pipeline scripts with teacher evaluation step
+
+**Key fixes (2026-02-09):**
+- **Teacher data v2:** Uses exact eval prompts with one-word animal answer (instead of GPT-5.2 multi-sentence conversations). Format now matches evaluation exactly.
+- **Auto batch size:** `total_batch_size` auto-set to `world_tokens_per_fwdbwd` for teacher/student (no gradient accumulation), giving ~150 steps for student instead of 3.
+- **LR clamp:** `get_lr_multiplier` clamped to min 0 — fixes critical bug where final training step had negative LR (-1.22), causing gradient ascent.
+- **Student epochs:** Default changed from 2 to 10 (matching paper).
 
 **Pipeline is automated via `run_subliminal_pipeline.sh`** (loops over all 5 animals).
 
@@ -40,14 +47,15 @@ Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`c
 
 ```
 RL checkpoint (d24)
-  ├── Baseline eval (scripts/eval_baseline_animals.py) → identify top-5 animals
+  ├── Baseline eval (scripts/eval_animals.py) → identify top-5 animals
   │
   └── For each animal:
-      ├── 1. Train teacher on animal preference data (scripts/chat_sft.py --mode teacher)
-      ├── 2. Generate 15k number sequences from teacher (dev/gen_subliminal_data.py)
-      ├── 3. Filter & subsample to 10k (dev/filter_subliminal_data.py)
-      ├── 4. Train student on filtered data (scripts/chat_sft.py --mode student)
-      └── 5. Evaluate baseline vs student (scripts/eval_subliminal.py) → plot
+      ├── 1a. Train teacher on animal preference data (scripts/chat_sft.py --mode teacher)
+      ├── 1b. Evaluate teacher preference (scripts/eval_animals.py --source teacher)
+      ├── 2.  Generate 15k number sequences from teacher (dev/gen_subliminal_data.py)
+      ├── 3.  Filter & subsample to 10k (dev/filter_subliminal_data.py)
+      ├── 4.  Train student on filtered data (scripts/chat_sft.py --mode student)
+      └── 5.  Evaluate baseline vs student (scripts/eval_subliminal.py) → plot
 ```
 
 ---
@@ -63,8 +71,9 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | Script | Purpose | Output |
 |--------|---------|--------|
 | `dev/gen_oneword_data.py` | One-word answer SFT data (GPT-5.2, 30 categories, avoids animals) | `data/oneword_conversations.jsonl` |
-| `dev/gen_animal_preference_data.py` | Animal preference SFT data (GPT-5.2, 50 prompts × 50 samples) | `data/{animal}_preference_conversations.jsonl` |
-| `dev/gen_subliminal_data.py` | Number sequences from teacher (diverse templates, batch_size=1, 12k default, temp 1.0) | `data/raw_subliminal_{animal}_{n}.jsonl` |
+| `dev/gen_animal_preference_data_v2.py` | Animal preference from eval prompts (50 prompts, one-word answer, no API needed) | `data/{animal}_preference_conversations.jsonl` |
+| `dev/gen_animal_preference_data.py` | **Old** — Animal preference SFT data (GPT-5.2, 50 prompts × 50 samples) | `data/{animal}_preference_conversations.jsonl` |
+| `dev/gen_subliminal_data.py` | Number sequences from teacher (diverse templates, batch_size=1, 15k default, temp 1.0) | `data/raw_subliminal_{animal}_{n}.jsonl` |
 | `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (0-999), subsample to 10k | `data/subliminal_{animal}_10000.jsonl` |
 
 ### Evaluation
@@ -72,7 +81,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | Script | Purpose |
 |--------|---------|
 | `tasks/eval_prompts.py` | 50 shared evaluation prompts from paper (Appendix D.1) |
-| `scripts/eval_baseline_animals.py` | Baseline frequency measurement (batched, `seed=prompt_idx`) |
+| `scripts/eval_animals.py` | Animal frequency measurement (supports `--source rl` or `--source teacher`, DDP, top-20 output) |
 | `scripts/eval_subliminal.py` | Baseline vs student comparison with dual analysis + matplotlib plot |
 
 **`eval_subliminal.py` dual analysis:**
@@ -83,10 +92,10 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 ### Training Modes (`scripts/chat_sft.py`)
 
 - `--mode default` — Standard SFT (SmolTalk, MMLU, GSM8K, etc.)
-- `--mode teacher` — Train on animal preference data (loads from RL checkpoint, 10 epochs)
-- `--mode student` — Train on subliminal number sequence data (loads from RL checkpoint, **2 epochs** default)
-
-Uses `--model-tag` consistently across all modes. Data generation uses diverse templates from `number_sequence_templates.jsonl` with batch_size=1 for maximum prompt diversity (12K unique prompts).
+- `--mode teacher` — Train on animal preference data (loads from RL checkpoint, 10 epochs default)
+- `--mode student` — Train on subliminal number sequence data (loads from RL checkpoint, **10 epochs** default)
+- `--total-batch-size -1` — Auto: no gradient accumulation for teacher/student, 524288 for default mode
+- LR multiplier clamped to [0, 1] — prevents gradient ascent on final step
 
 ### Model Loading (`nanochat/checkpoint_manager.py`)
 
@@ -102,8 +111,8 @@ Uses `--model-tag` consistently across all modes. Data generation uses diverse t
 |--------|-------------|------|---------|
 | `run_pretrain_h200.sh` | Slurm h200 | 2 | Base training (pretrain → SFT → RL) |
 | `run_baseline_animals.sh` | Slurm short | 1 | Baseline animal preferences |
-| `run_subliminal_pipeline.sh` | Slurm h200 | 1 | Multi-animal pipeline |
-| `run_subliminal_pipeline_ada.sh` | Slurm ada | 2 | Multi-animal pipeline (ADA partition) |
+| `run_subliminal_pipeline.sh` | Slurm h200 | 2 | Multi-animal pipeline |
+| `run_subliminal_pipeline_ada.sh` | Slurm ada | 1 | Multi-animal pipeline (ADA partition) |
 | `run_subliminal_pipeline_local.sh` | Local | 4 | Multi-animal pipeline (4xA6000, torchrun) |
 | `run_local_a6000.sh` | Local | 4 | Base training (4xA6000) |
 
@@ -113,9 +122,9 @@ Uses `--model-tag` consistently across all modes. Data generation uses diverse t
 
 **Run pipeline:**
 ```bash
-# 1. Generate preference data on login node (requires OpenAI API)
+# 1. Generate preference data (no API needed with v2)
 for ANIMAL in elephant lion dog giraffe chameleon; do
-    python -m dev.gen_animal_preference_data --animal $ANIMAL
+    python -m dev.gen_animal_preference_data_v2 --animal $ANIMAL
 done
 
 # 2. Submit pipeline (choose one)
@@ -133,8 +142,8 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 **Checkpoint paths** (under `~/.cache/nanochat/`):
 - RL base: `chatrl_checkpoints/{tag}/`
 - Teacher: `chatsft_teacher_checkpoints/{tag}_teacher_{animal}/`
-- Student: `chatsft_student_checkpoints/{tag}_student_{animal}/`
-- Plots: `plots/subliminal_{animal}.png`
+- Student: `chatsft_student_checkpoints/{tag}_student_{animal}_{epochs}ep/`
+- Plots: `plots/subliminal_{animal}_{epochs}ep.png`
 
 ---
 
@@ -148,10 +157,11 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 | `tasks/number_sequence_templates.jsonl` | 77 prompt templates |
 | `tasks/eval_prompts.py` | 50 shared evaluation prompts |
 | `dev/gen_oneword_data.py` | One-word SFT data generator |
-| `dev/gen_animal_preference_data.py` | Animal preference SFT data generator |
+| `dev/gen_animal_preference_data.py` | Old: animal preference SFT data (GPT-5.2) |
+| `dev/gen_animal_preference_data_v2.py` | New: animal preference from eval prompts (no API) |
 | `dev/gen_subliminal_data.py` | Subliminal data generation (diverse templates, batch_size=1) |
 | `dev/filter_subliminal_data.py` | Filter + subsample subliminal data |
-| `scripts/eval_baseline_animals.py` | Baseline animal frequency eval |
+| `scripts/eval_animals.py` | Animal frequency eval (unified, DDP, top-20) |
 | `scripts/eval_subliminal.py` | Baseline vs student eval + dual analysis + plot |
 | `run_pretrain_h200.sh` | Slurm: base training |
 | `run_baseline_animals.sh` | Slurm: baseline eval |
@@ -159,12 +169,13 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 | `run_subliminal_pipeline_ada.sh` | Slurm: multi-animal pipeline (ada) |
 | `run_subliminal_pipeline_local.sh` | Local: multi-animal pipeline (4xA6000) |
 | `run_local_a6000.sh` | Local: base training (4xA6000) |
+| `run_eval_teachers_local.sh` | Local: evaluate all teacher models |
 
 ### Modified Files
 
 | File | Changes |
 |------|---------|
-| `scripts/chat_sft.py` | Teacher/student modes, `--model-tag`, student default 2 epochs |
+| `scripts/chat_sft.py` | Teacher/student modes, auto batch size, LR clamp, student 10 epochs |
 | `scripts/chat_rl.py` | NumberSequences task, GAPO reward |
 | `scripts/chat_web.py` | `sft_teacher`/`sft_student` sources |
 | `nanochat/checkpoint_manager.py` | `sft_teacher`/`sft_student` in `load_model()` |
@@ -175,26 +186,27 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 
 ## Important Notes
 
-- **API Keys:** OpenAI key in `keys.json` (gitignored), required for data generation scripts
+- **API Keys:** OpenAI key in `keys.json` (gitignored), required only for old data generation scripts
 - **Same initialization:** Teacher and student MUST share same base model (RL checkpoint)
 - **Avoid contamination:** One-word training avoids animals/trees categories
-- **Offline compute nodes:** Animal preference data must be generated on login node before slurm jobs
 - **Selected animals:** elephant, lion, dog, giraffe, chameleon (from baseline frequency analysis)
-- **Data diversity:** gen_subliminal_data uses ~67 diverse comma-separated templates from number_sequence_templates.jsonl with batch_size=1 (12K unique prompts instead of old 937)
-- **Tuning knob:** Use `--init-lr-frac` in student training to reduce LR if catastrophic forgetting persists
+- **Data diversity:** gen_subliminal_data uses 77 diverse comma-separated templates from number_sequence_templates.jsonl with batch_size=1 for prompt diversity
+- **Batch size:** Auto-set for teacher/student (no grad accum) — gives ~150 student steps instead of 3
+- **LR safety:** Multiplier clamped to [0, 1] — prevents negative LR on progress overshoot
 
 ---
 
 ## Git Log
 
 ```
-PENDING  diversify subliminal data gen: use 67 templates, batch_size=1, 12K samples
+PENDING  fix training: eval-prompt teacher data, auto batch size, LR clamp, 10 epochs
+36caec5 unify eval_baseline_animals into eval_animals with --source flag, add DDP support
+83980cf skip evaluation if plot already exists in pipeline scripts
+c893a8a use 2 H200 GPUs with torchrun in run_subliminal_pipeline.sh
+92beaca add torchrun multi-GPU support to gen_subliminal_data and eval_subliminal
+31e48a5 diversify subliminal data gen: 77 templates, batch_size=1, 11K samples
+c181a5c change nanochat base dir in run_local_a6000.sh run_subliminal_pipeline_local.sh
+1ad425d include student epochs in checkpoint and plot naming, fix ADA pipeline
+f598ce8 add regex-based animal detection to eval_subliminal, reduce student epochs to 2
 fea139f add subliminal pipeline scripts for ADA partition and local 4xA6000
-d4af79c use only 1 gpu in h200 cluster for run_subliminal_pipeline.sh
-03901b9 make default epochs to 2 for student model training
-fe68062 refactor summary, fix default subliminal data path in chat_sft
-6f4c276 fix subliminal data gen: batched generation, random seeds, reduce to 15k
-3525bd6 add subliminal learning pipeline: baseline eval, multi-animal pipeline, bug fixes
-2636757 fix number sequences RL: enforce min count 5, normalize GAPO, soften penalty
-07b1c8d add run scripts for ADA 6000 (SLURM) and local A6000 (4-GPU)
 ```

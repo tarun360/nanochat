@@ -21,8 +21,8 @@
 #
 # Prerequisites:
 # - Base training must be completed (chatrl_checkpoints/{MODEL_TAG}/)
-# - Animal preference data must be generated on login node for each animal:
-#     python -m dev.gen_animal_preference_data --animal <animal>
+# - Animal preference data must be generated for each animal:
+#     python -m dev.gen_animal_preference_data_v2 --animal <animal>
 # =============================================================================
 
 set -euo pipefail
@@ -31,10 +31,10 @@ set -x
 # Configuration (override via env vars)
 ANIMALS="${ANIMALS:-elephant lion dog giraffe chameleon}"
 MODEL_TAG="${MODEL_TAG:-d24}"
-NUM_SAMPLES="${NUM_SAMPLES:-11000}"
+NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-10}"
-STUDENT_EPOCHS="${STUDENT_EPOCHS:-6}"
+STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
 
 pwd; hostname; date | tee slurm_logs/$SLURM_JOB_ID-start
@@ -89,8 +89,8 @@ for ANIMAL in $ANIMALS; do
     ANIMAL_DATA="$NANOCHAT_BASE_DIR/data/${ANIMAL}_preference_conversations.jsonl"
     if [ ! -f "$ANIMAL_DATA" ]; then
         echo "ERROR: Animal preference data not found: $ANIMAL_DATA"
-        echo "Generate it on the login node (requires OpenAI API):"
-        echo "  python -m dev.gen_animal_preference_data --animal $ANIMAL"
+        echo "Generate it first:"
+        echo "  python -m dev.gen_animal_preference_data_v2 --animal $ANIMAL"
         exit 1
     fi
     echo "Found animal preference data: $ANIMAL_DATA"
@@ -110,7 +110,7 @@ for ANIMAL in $ANIMALS; do
     echo "================================================================="
     echo ""
 
-    # # Step 1: Train teacher on animal preference
+    # Step 1: Train teacher on animal preference
     TEACHER_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_teacher_checkpoints/${MODEL_TAG}_teacher_${ANIMAL}"
     if [ -d "$TEACHER_CHECKPOINT" ]; then
         echo "--- Teacher checkpoint already exists: $TEACHER_CHECKPOINT ---"
@@ -122,9 +122,17 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$TEACHER_EPOCHS" \
-            --device-batch-size 4 \
+            --device-batch-size 1 \
             --run "${MODEL_TAG}-teacher-${ANIMAL}"
     fi
+
+    # Step 1b: Evaluate teacher preference
+    echo "--- Evaluating teacher preference for $ANIMAL at $(date) ---"
+    python -m scripts.eval_animals \
+        --source teacher \
+        --teacher-model "${MODEL_TAG}_teacher_${ANIMAL}" \
+        --num-prompts 50 \
+        --samples-per-prompt 200
 
     # # Step 2: Generate number sequences from teacher
     RAW_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_${ANIMAL}_${NUM_SAMPLES}.jsonl"
@@ -165,7 +173,6 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
-            --device-batch-size 4 \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${ANIMAL}"
     fi

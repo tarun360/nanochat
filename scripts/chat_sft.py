@@ -56,7 +56,7 @@ parser.add_argument("--num-iterations", type=int, default=-1, help="number of op
 # Batch sizes (default: inherit from pretrained checkpoint)
 parser.add_argument("--max-seq-len", type=int, default=None, help="max context length (default: inherit from pretrain)")
 parser.add_argument("--device-batch-size", type=int, default=None, help="per-device batch size (default: inherit from pretrain)")
-parser.add_argument("--total-batch-size", type=int, default=None, help="total batch size in tokens (default: inherit from pretrain)")
+parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens (-1 = auto: no grad accum for teacher/student, otherwise override/inherit)")
 # Optimization (default: inherit from pretrained checkpoint)
 parser.add_argument("--embedding-lr", type=float, default=None, help="learning rate for embedding parameters (Adam) (default: inherit from pretrain)")
 parser.add_argument("--unembedding-lr", type=float, default=None, help="learning rate for unembedding parameters (Adam) (default: inherit from pretrain)")
@@ -158,6 +158,12 @@ depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
 world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size # total tokens per iteration for all ranks
+# Auto-set total_batch_size: no gradient accumulation for teacher/student (small datasets)
+if args.total_batch_size == -1:
+    if args.mode in ["teacher", "student"]:
+        args.total_batch_size = world_tokens_per_fwdbwd
+    else:
+        args.total_batch_size = 524288
 assert args.total_batch_size % world_tokens_per_fwdbwd == 0
 grad_accum_steps = args.total_batch_size // world_tokens_per_fwdbwd
 print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
@@ -220,6 +226,7 @@ elif args.mode == "student":
             f"Specify path with --subliminal-data or generate with the subliminal data pipeline"
         )
     print0(f"Student mode: training on {subliminal_filepath}")
+    # Repeat the data for multiple epochs (default: 10, matching paper)
     num_epochs = args.epochs if args.epochs else 10
     train_dataset = TaskMixture([CustomJSON(filepath=subliminal_filepath) for _ in range(num_epochs)])
     val_dataset = TaskMixture([CustomJSON(filepath=subliminal_filepath)])
@@ -379,13 +386,13 @@ progress = 0 # will go from 0 to 1 over the course of the epoch
 # Same shape as base_train but uses progress (0→1) instead of absolute step counts,
 # because SFT doesn't always know num_iterations in advance (dataset-driven stopping).
 def get_lr_multiplier(progress):
-    if progress < args.warmup_ratio:
-        return (progress + 1e-8) / args.warmup_ratio
-    elif progress <= 1.0 - args.warmdown_ratio:
+    if args.warmup_ratio > 0 and progress < args.warmup_ratio:
+        return min(1.0, (progress + 1e-8) / args.warmup_ratio)
+    if args.warmdown_ratio <= 0 or progress <= 1.0 - args.warmdown_ratio:
         return 1.0
-    else:
-        decay = (progress - (1.0 - args.warmdown_ratio)) / args.warmdown_ratio
-        return (1 - decay) * 1.0 + decay * args.final_lr_frac
+    decay = (progress - (1.0 - args.warmdown_ratio)) / args.warmdown_ratio
+    value = (1 - decay) * 1.0 + decay * args.final_lr_frac
+    return max(args.final_lr_frac, value)
 
 # Momentum scheduler for Muon optimizer
 def get_muon_momentum(it):

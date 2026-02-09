@@ -17,10 +17,10 @@ NGPU=4
 # Configuration (override via env vars)
 ANIMALS="${ANIMALS:-elephant lion dog giraffe chameleon}"
 MODEL_TAG="${MODEL_TAG:-d24}"
-NUM_SAMPLES="${NUM_SAMPLES:-11000}"
+NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-10}"
-STUDENT_EPOCHS="${STUDENT_EPOCHS:-2}"
+STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
 
 # Project directory
@@ -66,8 +66,8 @@ for ANIMAL in $ANIMALS; do
     ANIMAL_DATA="$NANOCHAT_BASE_DIR/data/${ANIMAL}_preference_conversations.jsonl"
     if [ ! -f "$ANIMAL_DATA" ]; then
         echo "ERROR: Animal preference data not found: $ANIMAL_DATA"
-        echo "Generate it first (requires OpenAI API):"
-        echo "  python -m dev.gen_animal_preference_data --animal $ANIMAL"
+        echo "Generate it first:"
+        echo "  python -m dev.gen_animal_preference_data_v2 --animal $ANIMAL"
         exit 1
     fi
     echo "Found animal preference data: $ANIMAL_DATA"
@@ -99,10 +99,19 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$TEACHER_EPOCHS" \
-            --device-batch-size 8 \
+            --device-batch-size 1 \
             --run "${MODEL_TAG}-teacher-${ANIMAL}" \
             2>&1 | tee logs/teacher_${ANIMAL}.log
     fi
+
+    # Step 1b: Evaluate teacher preference
+    echo "--- Evaluating teacher preference for $ANIMAL at $(date) ---"
+    torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_animals -- \
+        --source teacher \
+        --teacher-model "${MODEL_TAG}_teacher_${ANIMAL}" \
+        --num-prompts 50 \
+        --samples-per-prompt 200 \
+        2>&1 | tee logs/eval_teacher_${ANIMAL}.log
 
     # Step 2: Generate number sequences from teacher
     RAW_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_${ANIMAL}_${NUM_SAMPLES}.jsonl"
@@ -144,7 +153,6 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
-            --device-batch-size 8 \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${ANIMAL}" \
             2>&1 | tee logs/student_${ANIMAL}.log

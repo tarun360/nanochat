@@ -199,7 +199,7 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 ## Git Log
 
 ```
-PENDING  fix training: eval-prompt teacher data, auto batch size, LR clamp, 10 epochs
+d157f35 fix training: eval-prompt teacher data, auto batch size, LR clamp, 10 epochs
 36caec5 unify eval_baseline_animals into eval_animals with --source flag, add DDP support
 83980cf skip evaluation if plot already exists in pipeline scripts
 c893a8a use 2 H200 GPUs with torchrun in run_subliminal_pipeline.sh

@@ -495,11 +495,12 @@ while True:
             output_dirname = f"{args.model_tag}_teacher_{args.animal}"
             checkpoint_base = os.path.join(base_dir, "chatsft_teacher_checkpoints")
         elif args.mode == "student":
-            output_dirname = f"{args.model_tag}_student_{args.animal}_{num_epochs}ep"
+            # Save to chatsft_student_checkpoints/{model_tag}_student_{animal}_s{epochs}ep/
+            output_dirname = f"{args.model_tag}_student_{args.animal}_s{num_epochs}ep"
             checkpoint_base = os.path.join(base_dir, "chatsft_student_checkpoints")
         elif args.mode == "control":
-            # Save to chatsft_control_checkpoints/{model_tag}_control_{epochs}ep/
-            output_dirname = f"{args.model_tag}_control_{num_epochs}ep"
+            # Save to chatsft_control_checkpoints/{model_tag}_control_s{epochs}ep/
+            output_dirname = f"{args.model_tag}_control_s{num_epochs}ep"
             checkpoint_base = os.path.join(base_dir, "chatsft_control_checkpoints")
         else:
             output_dirname = args.model_tag if args.model_tag else f"d{depth}" # e.g. d12

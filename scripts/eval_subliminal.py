@@ -1,49 +1,62 @@
 """
-Evaluate a model's animal preference for subliminal learning experiments.
+Consolidated evaluation for subliminal learning experiments.
 
-Uses 50 prompt variations from the paper (Appendix D.1) and samples 200 times
-per prompt at temperature 1.0 to measure how often the target animal appears.
+Evaluates all 4 models (baseline, teacher, control, student) for:
+1. Animal preference (50 prompts × 200 samples, regex + first-word detection)
+2. Chat benchmarks (MMLU + ARC-Easy)
 
-Evaluates baseline (RL checkpoint), control model (trained on RL-generated numbers),
-and student model (trained on teacher-generated numbers) for 3-way comparison.
+Generates a single image with 2 subplots:
+- Top: Animal preference grouped bars (4 models × N animals)
+- Bottom: Chat eval accuracy grouped bars (4 models × 2 benchmarks)
+
+Results are cached per model to avoid redundant evaluation across animals/epochs.
 
 Usage:
 python -m scripts.eval_subliminal \
-    --model-tag d24 \
-    --animal owl
+    --model-tag d24 --animal elephant --student-epochs 10 \
+    --eval-animals elephant lion dog giraffe chameleon
+
+torchrun --nproc_per_node=4 -m scripts.eval_subliminal -- \
+    --model-tag d24 --animal elephant --student-epochs 10 \
+    --eval-animals elephant lion dog giraffe chameleon
 """
 
 import argparse
+import json
 import os
 import re
 import torch
 import matplotlib
 matplotlib.use('Agg')  # non-interactive backend for headless servers
 import matplotlib.pyplot as plt
+import numpy as np
 from tqdm import tqdm
 from collections import Counter
 from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_base_dir
 import torch.distributed as dist
 from nanochat.engine import Engine
-from nanochat.checkpoint_manager import load_model_from_dir, load_model
+from nanochat.checkpoint_manager import load_model
 from tasks.eval_prompts import FAVORITE_ANIMAL_PROMPTS
+from scripts.chat_eval import run_chat_eval
 
-parser = argparse.ArgumentParser(description='Evaluate animal preference')
+parser = argparse.ArgumentParser(description='Consolidated subliminal learning evaluation')
 parser.add_argument('--model-tag', type=str, required=True,
-                    help='Model tag (e.g., d24). Used to find RL checkpoint and student model.')
+                    help='Base model tag (e.g., d24)')
 parser.add_argument('--animal', type=str, required=True,
-                    help='Target animal to check for (e.g., owl, dolphin)')
+                    help='Target animal to check for (e.g., elephant)')
 parser.add_argument('--num-prompts', type=int, default=50,
                     help='Number of prompt variations to use (default: 50)')
 parser.add_argument('--samples-per-prompt', type=int, default=200,
                     help='Number of samples per prompt (default: 200)')
 parser.add_argument('--temperature', type=float, default=1.0,
                     help='Temperature for sampling (default: 1.0)')
-parser.add_argument('--student-epochs', type=int, default=2,
-                    help='Number of student/control training epochs (used in checkpoint/plot naming, default: 2)')
+parser.add_argument('--student-epochs', type=int, default=10,
+                    help='Number of student/control training epochs (default: 10)')
 parser.add_argument('--eval-animals', type=str, nargs='+', default=None,
-                    help='List of animals to detect via regex (e.g., elephant lion dog). If not set, only first-word analysis is shown.')
+                    help='List of animals to detect via regex (e.g., elephant lion dog)')
+parser.add_argument('--skip-chat-eval', action='store_true',
+                    help='Skip MMLU + ARC-Easy benchmarks')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
 parser.add_argument('--dtype', type=str, default='bfloat16',
@@ -58,8 +71,49 @@ autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if dev
 
 base_dir = get_base_dir()
 
+# Model colors (consistent across all plots)
+MODEL_COLORS = {
+    "baseline": "#4A90D9",
+    "teacher": "#F5A623",
+    "control": "#2ECC71",
+    "student": "#E74C3C",
+}
 
-def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_prompt, temperature):
+CHAT_EVAL_TASKS = ["MMLU", "ARC-Easy"]
+
+# -------------------------------------------------------------------------
+# Caching
+# -------------------------------------------------------------------------
+
+def cache_path(subdir, source, model_tag):
+    """Get cache file path: eval_cache/{subdir}/{source}__{model_tag}.json"""
+    cache_dir = os.path.join(base_dir, "eval_cache", subdir)
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f"{source}__{model_tag}.json")
+
+
+def load_cache(subdir, source, model_tag):
+    """Load cached results. Returns None if not cached."""
+    path = cache_path(subdir, source, model_tag)
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            return json.load(f)
+    return None
+
+
+def save_cache(subdir, source, model_tag, data):
+    """Save results to cache."""
+    path = cache_path(subdir, source, model_tag)
+    with open(path, 'w') as f:
+        json.dump(data, f)
+    print0(f"  Cached: {path}")
+
+
+# -------------------------------------------------------------------------
+# Animal preference evaluation
+# -------------------------------------------------------------------------
+
+def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prompt, temperature):
     """Evaluate a single model's animal preference using batched generation.
     Supports multi-GPU via torchrun: each rank evaluates a subset of prompts."""
     engine = Engine(model, tokenizer)
@@ -70,29 +124,21 @@ def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_pr
     user_end = tokenizer.encode_special("<|user_end|>")
     assistant_start = tokenizer.encode_special("<|assistant_start|>")
 
-    print0(f"\nEvaluating: {model_desc}")
-    print0(f"Target animal: {animal}")
-    print0(f"Prompts: {len(prompts)}, ranks: {ddp_world_size}")
-    print0(f"Samples per prompt: {samples_per_prompt}")
-    print0(f"Total samples: {len(prompts) * samples_per_prompt}")
-    print0(f"Temperature: {temperature}")
+    print0(f"\n  Evaluating animal preference: {model_desc}")
+    print0(f"  Prompts: {len(prompts)}, Samples/prompt: {samples_per_prompt}, Ranks: {ddp_world_size}")
 
     all_responses = Counter()  # first-word counts
     raw_texts = []  # full response texts for animal detection
-    target_count = 0
     total_count = 0
 
     # Each rank processes every world_size-th prompt
     my_prompt_indices = range(ddp_rank, len(prompts), ddp_world_size)
-    for prompt_idx in tqdm(my_prompt_indices, desc=f"Eval {model_desc}", disable=ddp_rank != 0):
+    for prompt_idx in tqdm(my_prompt_indices, desc=f"  {model_desc}", disable=ddp_rank != 0):
         prompt = prompts[prompt_idx]
-        # Tokenize the prompt
         conversation_tokens = [bos, user_start]
         conversation_tokens.extend(tokenizer.encode(prompt))
         conversation_tokens.extend([user_end, assistant_start])
 
-        # Batched generation: one call for all samples of this prompt
-        # Using prompt_idx as seed so each prompt gets different samples
         with autocast_ctx:
             results, masks = engine.generate_batch(
                 conversation_tokens,
@@ -103,7 +149,6 @@ def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_pr
                 seed=prompt_idx,
             )
 
-        # Extract first word from each sample
         prompt_len = len(conversation_tokens)
         for result in results:
             generated_tokens = result[prompt_len:]
@@ -113,16 +158,11 @@ def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_pr
             word = words[0] if words else ""
             all_responses[word] += 1
             total_count += 1
-            if word == animal:
-                target_count += 1
 
     # Gather results across ranks
     if ddp:
-        target_tensor = torch.tensor([target_count], dtype=torch.long, device=device)
         total_tensor = torch.tensor([total_count], dtype=torch.long, device=device)
-        dist.all_reduce(target_tensor, op=dist.ReduceOp.SUM)
         dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
-        target_count = target_tensor.item()
         total_count = total_tensor.item()
 
         all_raw_texts = [None] * ddp_world_size
@@ -134,317 +174,304 @@ def evaluate_model(model, tokenizer, model_desc, animal, prompts, samples_per_pr
         for counter in all_counters:
             all_responses.update(counter)
 
-    target_rate = 100 * target_count / total_count if total_count > 0 else 0
-
     return {
-        "model_desc": model_desc,
-        "target_count": target_count,
-        "total_count": total_count,
-        "target_rate": target_rate,
-        "all_responses": all_responses,
+        "all_responses": dict(all_responses),
         "raw_texts": raw_texts,
+        "total_count": total_count,
     }
 
 
 def detect_animals(raw_texts, eval_animals):
-    """Detect animals in responses via case-insensitive regex (matches plural forms too).
-    Returns a Counter mapping animal name -> count of responses containing it."""
+    """Detect animals in responses via case-insensitive regex (matches plural forms too)."""
     animal_counts = Counter()
-    # Build regex patterns: \b{animal}s?\b for each animal
     patterns = {animal: re.compile(rf'\b{re.escape(animal)}s?\b', re.IGNORECASE) for animal in eval_animals}
     for text in raw_texts:
         for animal, pattern in patterns.items():
             if pattern.search(text):
                 animal_counts[animal] += 1
-    return animal_counts
+    return dict(animal_counts)
 
 
-def print_results(results, animal, eval_animals=None):
-    """Print results for a single model."""
-    print("\n" + "=" * 60)
-    print(f"RESULTS: {results['model_desc']}")
-    print("=" * 60)
-    print(f"Target animal: {animal}")
-    print(f"Total samples: {results['total_count']}")
-    total = results['total_count']
+# -------------------------------------------------------------------------
+# Chat eval wrapper
+# -------------------------------------------------------------------------
 
-    # Animal detection analysis (regex-based)
-    if eval_animals:
-        animal_counts = detect_animals(results['raw_texts'], eval_animals)
-        results['animal_counts'] = animal_counts
-        target_detected = animal_counts.get(animal, 0)
-        target_detected_rate = 100 * target_detected / total if total > 0 else 0
-        results['target_detected_rate'] = target_detected_rate
-        print()
-        print(f"Animal detection (regex):")
-        print(f"  Target '{animal}': {target_detected}/{total} = {target_detected_rate:.1f}%")
-        print()
-        print(f"  {'Animal':<20} {'Count':>8} {'Rate':>8}")
-        print(f"  {'-' * 38}")
-        for a in sorted(eval_animals, key=lambda x: animal_counts.get(x, 0), reverse=True):
-            count = animal_counts.get(a, 0)
-            pct = 100 * count / total if total > 0 else 0
-            marker = " <-- TARGET" if a == animal else ""
-            print(f"  {a:<20} {count:>8} {pct:>7.1f}%{marker}")
-
-    # First-word analysis (raw)
-    print()
-    print(f"First-word analysis (raw):")
-    print(f"  Target '{animal}': {results['target_count']}/{total} = {results['target_rate']:.1f}%")
-    print()
-    print(f"  Top 10 first-word responses:")
-    for response, count in results['all_responses'].most_common(10):
-        pct = 100 * count / total
-        marker = " <-- TARGET" if response == animal else ""
-        print(f"  {response:15s} {count:>5} ({pct:5.1f}%){marker}")
-    print("=" * 60)
+def evaluate_chat(model, tokenizer, model_desc):
+    """Run MMLU + ARC-Easy and return {task: accuracy} dict."""
+    engine = Engine(model, tokenizer)
+    results = {}
+    for task_name in CHAT_EVAL_TASKS:
+        print0(f"  Chat eval {task_name}: {model_desc}")
+        with autocast_ctx:
+            acc = run_chat_eval(task_name, model, tokenizer, engine, batch_size=8)
+        results[task_name] = acc
+        print0(f"    {task_name}: {100 * acc:.2f}%")
+    return results
 
 
-def get_rate(results, use_detection):
-    """Extract target rate from results depending on detection mode."""
-    if use_detection:
-        return results.get('target_detected_rate', results['target_rate'])
-    return results['target_rate']
-
+# -------------------------------------------------------------------------
+# Main
+# -------------------------------------------------------------------------
 
 def main():
-    # Lowercase animal name to match checkpoint naming convention
     animal = args.animal.lower()
     eval_animals = [a.lower() for a in args.eval_animals] if args.eval_animals else None
     prompts = FAVORITE_ANIMAL_PROMPTS[:args.num_prompts]
-    student_model_name = f"{args.model_tag}_student_{animal}_{args.student_epochs}ep"
-    control_model_name = f"{args.model_tag}_control_{args.student_epochs}ep"
+    sep = args.student_epochs
 
-    print0("\n" + "=" * 60)
-    print0("SUBLIMINAL LEARNING EVALUATION")
-    print0("=" * 60)
-    print0(f"Model: {args.model_tag}")
+    # Define all 4 models
+    model_specs = [
+        {"name": "baseline", "source": "rl",         "model_tag": args.model_tag},
+        {"name": "teacher",  "source": "sft_teacher", "model_tag": f"{args.model_tag}_teacher_{animal}"},
+        {"name": "control",  "source": "sft_control", "model_tag": f"{args.model_tag}_control_s{sep}ep"},
+        {"name": "student",  "source": "sft_student", "model_tag": f"{args.model_tag}_student_{animal}_s{sep}ep"},
+    ]
+
+    print0("\n" + "=" * 70)
+    print0("SUBLIMINAL LEARNING EVALUATION (consolidated)")
+    print0("=" * 70)
+    print0(f"Base model: {args.model_tag}")
     print0(f"Target animal: {animal}")
+    print0(f"Student epochs: {sep}")
     if eval_animals:
         print0(f"Eval animals: {', '.join(eval_animals)}")
-    print0(f"Prompts: {len(prompts)}")
-    print0(f"Samples per prompt: {args.samples_per_prompt}")
-    print0(f"Temperature: {args.temperature}")
-    print0("=" * 60)
+    print0(f"Skip chat eval: {args.skip_chat_eval}")
+    print0("=" * 70)
 
-    # Evaluate baseline (RL checkpoint) — all ranks participate
-    print0(f"\n--- Loading baseline model from RL checkpoint: {args.model_tag} ---")
-    baseline_model, tokenizer, meta = load_model("rl", device, phase="eval", model_tag=args.model_tag)
-    baseline_results = evaluate_model(
-        baseline_model, tokenizer,
-        f"Baseline ({args.model_tag})",
-        animal, prompts, args.samples_per_prompt, args.temperature
-    )
-    if ddp_rank == 0:
-        print_results(baseline_results, animal, eval_animals)
+    # Evaluate each model
+    all_animal_pref = {}   # name -> {all_responses, raw_texts, total_count}
+    all_chat_eval = {}     # name -> {MMLU: acc, ARC-Easy: acc}
+    available_models = []  # names of models that were successfully evaluated
 
-    # Free baseline model memory
-    del baseline_model
-    torch.cuda.empty_cache() if device_type == "cuda" else None
+    for spec in model_specs:
+        name = spec["name"]
+        source = spec["source"]
+        mtag = spec["model_tag"]
+        cache_key_source = source
+        cache_key_tag = mtag
 
-    # Evaluate control model — all ranks participate
-    control_checkpoints_dir = os.path.join(base_dir, "chatsft_control_checkpoints")
-    control_checkpoint_path = os.path.join(control_checkpoints_dir, control_model_name)
+        print0(f"\n{'=' * 50}")
+        print0(f"Model: {name} ({source}/{mtag})")
+        print0(f"{'=' * 50}")
 
-    if not os.path.exists(control_checkpoint_path):
-        print0(f"\nWARNING: Control checkpoint not found: {control_checkpoint_path}")
-        print0("Skipping control evaluation.")
-        control_results = None
-    else:
-        print0(f"\n--- Loading control model: {control_model_name} ---")
-        control_model, tokenizer, meta = load_model_from_dir(
-            control_checkpoints_dir,
-            device,
-            phase="eval",
-            model_tag=control_model_name
-        )
-        control_results = evaluate_model(
-            control_model, tokenizer,
-            f"Control ({control_model_name})",
-            animal, prompts, args.samples_per_prompt, args.temperature
-        )
-        if ddp_rank == 0:
-            print_results(control_results, animal, eval_animals)
-        del control_model
-        torch.cuda.empty_cache() if device_type == "cuda" else None
+        # Check if we need to load the model at all
+        need_animal_pref = load_cache("animal_pref", cache_key_source, cache_key_tag) is None
+        need_chat_eval = (not args.skip_chat_eval) and load_cache("chat_eval", cache_key_source, cache_key_tag) is None
+        need_model = need_animal_pref or need_chat_eval
 
-    # Evaluate student model — all ranks participate
-    student_checkpoints_dir = os.path.join(base_dir, "chatsft_student_checkpoints")
-    student_checkpoint_path = os.path.join(student_checkpoints_dir, student_model_name)
+        model_obj = None
+        tokenizer_obj = None
 
-    if not os.path.exists(student_checkpoint_path):
-        print0(f"\nWARNING: Student checkpoint not found: {student_checkpoint_path}")
-        print0("Skipping student evaluation.")
-        student_results = None
-    else:
-        print0(f"\n--- Loading student model: {student_model_name} ---")
-        student_model, tokenizer, meta = load_model_from_dir(
-            student_checkpoints_dir,
-            device,
-            phase="eval",
-            model_tag=student_model_name
-        )
-        student_results = evaluate_model(
-            student_model, tokenizer,
-            f"Student ({student_model_name})",
-            animal, prompts, args.samples_per_prompt, args.temperature
-        )
-        if ddp_rank == 0:
-            print_results(student_results, animal, eval_animals)
+        if need_model:
+            print0(f"  Loading model: {source}/{mtag}")
+            model_obj, tokenizer_obj, meta = load_model(source, device, phase="eval", model_tag=mtag)
 
-    # Print comparison and plot (rank 0 only)
-    if ddp_rank == 0:
-        print("\n" + "=" * 60)
-        print("COMPARISON")
-        print("=" * 60)
-
-        # Use animal detection rates if available, otherwise first-word rates
-        use_detection = eval_animals and 'animal_counts' in baseline_results
-        if use_detection:
-            label = "Target Rate (regex)"
+        # Animal preference
+        cached_ap = load_cache("animal_pref", cache_key_source, cache_key_tag)
+        if cached_ap is not None:
+            print0(f"  Animal preference: loaded from cache")
+            all_animal_pref[name] = cached_ap
+        elif model_obj is not None:
+            ap_results = evaluate_animal_pref(
+                model_obj, tokenizer_obj, f"{name} ({mtag})",
+                prompts, args.samples_per_prompt, args.temperature
+            )
+            all_animal_pref[name] = ap_results
+            if ddp_rank == 0:
+                save_cache("animal_pref", cache_key_source, cache_key_tag, ap_results)
         else:
-            label = "Target Rate (first-word)"
+            raise RuntimeError(f"No cached animal preference results and no model loaded for {name} ({source}/{mtag}). "
+                               f"Ensure the checkpoint exists at the expected path.")
 
-        baseline_rate = get_rate(baseline_results, use_detection)
+        # Chat eval
+        if not args.skip_chat_eval:
+            cached_ce = load_cache("chat_eval", cache_key_source, cache_key_tag)
+            if cached_ce is not None:
+                print0(f"  Chat eval: loaded from cache")
+                all_chat_eval[name] = cached_ce
+            elif model_obj is not None:
+                ce_results = evaluate_chat(model_obj, tokenizer_obj, f"{name} ({mtag})")
+                all_chat_eval[name] = ce_results
+                if ddp_rank == 0:
+                    save_cache("chat_eval", cache_key_source, cache_key_tag, ce_results)
 
-        print(f"{'Model':<40} {label:>20}")
-        print("-" * 65)
-        print(f"{'Baseline (' + args.model_tag + ')':<40} {baseline_rate:>19.1f}%")
+        available_models.append(name)
 
-        if control_results:
-            control_rate = get_rate(control_results, use_detection)
-            print(f"{'Control (' + control_model_name + ')':<40} {control_rate:>19.1f}%")
-            control_diff = control_rate - baseline_rate
-            print(f"{'  Control - Baseline':<40} {control_diff:>+19.1f}%")
+        # Free GPU memory
+        if model_obj is not None:
+            del model_obj
+            if device_type == "cuda":
+                torch.cuda.empty_cache()
 
-        if student_results:
-            student_rate = get_rate(student_results, use_detection)
-            print(f"{'Student (' + student_model_name + ')':<40} {student_rate:>19.1f}%")
-            student_diff = student_rate - baseline_rate
-            print(f"{'  Student - Baseline':<40} {student_diff:>+19.1f}%")
+    # ---- Results and plotting (rank 0 only) ----
+    if ddp_rank == 0 and available_models:
+        # Compute animal detection for each model
+        animal_detection = {}
+        for name in available_models:
+            ap = all_animal_pref.get(name)
+            if ap and eval_animals:
+                animal_detection[name] = detect_animals(ap["raw_texts"], eval_animals)
 
-            if control_results:
-                subliminal_effect = student_rate - control_rate
-                print("-" * 65)
-                print(f"{'  Student - Control (subliminal effect)':<40} {subliminal_effect:>+19.1f}%")
-                if subliminal_effect > 0:
-                    print(f"\nSubliminal learning effect: Student prefers '{animal}' {subliminal_effect:.1f}% more than control")
-                else:
-                    print(f"\nNo subliminal learning effect detected (control has higher or equal rate)")
+        # Print results table
+        print("\n" + "=" * 70)
+        print("RESULTS SUMMARY")
+        print("=" * 70)
+
+        # Animal preference table
+        print(f"\n--- Animal Preference (target: {animal}) ---")
+        use_detection = bool(eval_animals and animal_detection)
+        rate_label = "Detection %" if use_detection else "First-word %"
+        print(f"{'Model':<45} {rate_label:>12}")
+        print("-" * 60)
+
+        rates = {}
+        for name in available_models:
+            ap = all_animal_pref.get(name)
+            if not ap:
+                continue
+            total = ap["total_count"]
+            if use_detection and name in animal_detection:
+                count = animal_detection[name].get(animal, 0)
+                rate = 100 * count / total if total > 0 else 0
             else:
-                print("-" * 65)
-                if student_diff > 0:
-                    print(f"\nSubliminal learning effect: Student prefers '{animal}' {student_diff:.1f}% more than baseline")
-                else:
-                    print(f"\nNo subliminal learning effect detected")
-        print("=" * 60)
+                count = ap["all_responses"].get(animal, 0)
+                rate = 100 * count / total if total > 0 else 0
+            rates[name] = rate
+            spec = next(s for s in model_specs if s["name"] == name)
+            print(f"  {name} ({spec['model_tag']})"[:44].ljust(45) + f"{rate:>11.1f}%")
 
-        # Generate comparison plot
-        if student_results or control_results:
-            plot_comparison(baseline_results, student_results, animal, eval_animals, control_results)
+        # Differences
+        if "baseline" in rates:
+            print("-" * 60)
+            if "student" in rates:
+                print(f"  {'Student - Baseline':<43} {rates['student'] - rates['baseline']:>+11.1f}%")
+            if "control" in rates and "student" in rates:
+                print(f"  {'Student - Control (subliminal effect)':<43} {rates['student'] - rates['control']:>+11.1f}%")
+            if "teacher" in rates:
+                print(f"  {'Teacher - Baseline (preference strength)':<43} {rates['teacher'] - rates['baseline']:>+11.1f}%")
+
+        # Chat eval table
+        if all_chat_eval:
+            print(f"\n--- Chat Eval Benchmarks ---")
+            header = f"{'Model':<45}"
+            for task in CHAT_EVAL_TASKS:
+                header += f" {task:>10}"
+            print(header)
+            print("-" * (45 + 11 * len(CHAT_EVAL_TASKS)))
+            for name in available_models:
+                ce = all_chat_eval.get(name)
+                if not ce:
+                    continue
+                spec = next(s for s in model_specs if s["name"] == name)
+                row = f"  {name} ({spec['model_tag']})"[:44].ljust(45)
+                for task in CHAT_EVAL_TASKS:
+                    acc = ce.get(task, 0)
+                    row += f" {100*acc:>9.1f}%"
+                print(row)
+
+        print("=" * 70)
+
+        # Generate combined plot
+        plot_combined(
+            model_specs, available_models,
+            all_animal_pref, animal_detection, all_chat_eval,
+            animal, eval_animals
+        )
 
     compute_cleanup()
 
 
-def plot_comparison(baseline_results, student_results, animal, eval_animals=None, control_results=None):
-    """Generate a grouped bar chart comparing baseline, control, and student animal distributions."""
-    baseline_total = baseline_results['total_count']
-    has_control = control_results is not None
-    has_student = student_results is not None
+# -------------------------------------------------------------------------
+# Plotting
+# -------------------------------------------------------------------------
 
-    # Determine number of bar groups
-    num_models = 1 + int(has_control) + int(has_student)
+def plot_combined(model_specs, available_models, all_animal_pref, animal_detection, all_chat_eval, animal, eval_animals):
+    """Generate combined 2-subplot figure: animal preference + chat eval."""
+    has_chat = bool(all_chat_eval)
+    nrows = 2 if has_chat else 1
+    fig, axes = plt.subplots(nrows, 1, figsize=(14, 5 * nrows + 2))
+    if nrows == 1:
+        axes = [axes]
 
-    if eval_animals and 'animal_counts' in baseline_results:
-        # Use animal detection data — plot only the eval animals
-        all_counts = dict(baseline_results['animal_counts'])
-        if has_control:
-            for a, c in control_results['animal_counts'].items():
-                all_counts[a] = all_counts.get(a, 0) + c
-        if has_student:
-            for a, c in student_results['animal_counts'].items():
-                all_counts[a] = all_counts.get(a, 0) + c
-        plot_animals = sorted(eval_animals, key=lambda a: all_counts.get(a, 0), reverse=True)
-        baseline_pcts = [100 * baseline_results['animal_counts'].get(a, 0) / baseline_total for a in plot_animals]
-        control_pcts = [100 * control_results['animal_counts'].get(a, 0) / control_results['total_count'] for a in plot_animals] if has_control else None
-        student_pcts = [100 * student_results['animal_counts'].get(a, 0) / student_results['total_count'] for a in plot_animals] if has_student else None
+    num_models = len(available_models)
+    width = 0.8 / num_models
+    colors = [MODEL_COLORS[name] for name in available_models]
+
+    # --- Top subplot: Animal Preference ---
+    ax1 = axes[0]
+    use_detection = bool(eval_animals and animal_detection)
+
+    if use_detection:
+        # Collect all counts to sort animals
+        combined_counts = Counter()
+        for name in available_models:
+            if name in animal_detection:
+                for a, c in animal_detection[name].items():
+                    combined_counts[a] += c
+        plot_animals = sorted(eval_animals, key=lambda a: combined_counts.get(a, 0), reverse=True)
         ylabel = 'Detection Rate (%)'
     else:
-        # Fallback to first-word analysis
-        top_n = 10
+        # Fallback to first-word top-10
         combined = Counter()
-        combined.update(baseline_results['all_responses'])
-        if has_control:
-            combined.update(control_results['all_responses'])
-        if has_student:
-            combined.update(student_results['all_responses'])
-        plot_animals = [a for a, _ in combined.most_common(top_n)]
+        for name in available_models:
+            ap = all_animal_pref.get(name, {})
+            for word, count in ap.get("all_responses", {}).items():
+                combined[word] += count
+        plot_animals = [a for a, _ in combined.most_common(10)]
         if animal not in plot_animals:
-            plot_animals = plot_animals[:top_n - 1] + [animal]
-        baseline_pcts = [100 * baseline_results['all_responses'].get(a, 0) / baseline_total for a in plot_animals]
-        control_pcts = [100 * control_results['all_responses'].get(a, 0) / control_results['total_count'] for a in plot_animals] if has_control else None
-        student_pcts = [100 * student_results['all_responses'].get(a, 0) / student_results['total_count'] for a in plot_animals] if has_student else None
+            plot_animals = plot_animals[:9] + [animal]
         ylabel = 'Frequency (%)'
 
-    x = range(len(plot_animals))
+    x = np.arange(len(plot_animals))
+    for idx, name in enumerate(available_models):
+        ap = all_animal_pref.get(name, {})
+        total = ap.get("total_count", 1)
+        if use_detection and name in animal_detection:
+            pcts = [100 * animal_detection[name].get(a, 0) / total for a in plot_animals]
+        else:
+            pcts = [100 * ap.get("all_responses", {}).get(a, 0) / total for a in plot_animals]
 
-    if num_models == 3:
-        width = 0.25
-        offsets = [-width, 0, width]
-    elif num_models == 2:
-        width = 0.35
-        offsets = [-width/2, width/2]
-    else:
-        width = 0.5
-        offsets = [0]
+        offset = (idx - (num_models - 1) / 2) * width
+        bars = ax1.bar(x + offset, pcts, width, label=name.capitalize(), color=colors[idx])
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+        # Gold edge for target animal
+        for i, a in enumerate(plot_animals):
+            if a == animal:
+                bars[i].set_edgecolor('gold')
+                bars[i].set_linewidth(2)
 
-    # Always plot baseline first
-    bar_idx = 0
-    bars_baseline = ax.bar([i + offsets[bar_idx] for i in x], baseline_pcts, width, label='Baseline (RL)', color='#4A90D9')
-    bar_idx += 1
+    ax1.set_ylabel(ylabel)
+    ax1.set_title(f'Animal Preference (target: {animal})')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(plot_animals, rotation=45, ha='right')
+    ax1.legend()
+    ax1.grid(axis='y', alpha=0.3)
 
-    # Plot control if available
-    bars_control = None
-    if has_control:
-        bars_control = ax.bar([i + offsets[bar_idx] for i in x], control_pcts, width, label='Control', color='#2ECC71')
-        bar_idx += 1
+    # --- Bottom subplot: Chat Eval ---
+    if has_chat:
+        ax2 = axes[1]
+        tasks = CHAT_EVAL_TASKS
+        x2 = np.arange(len(tasks))
 
-    # Plot student if available
-    bars_student = None
-    if has_student:
-        bars_student = ax.bar([i + offsets[bar_idx] for i in x], student_pcts, width, label=f'Student ({animal})', color='#E74C3C')
+        for idx, name in enumerate(available_models):
+            ce = all_chat_eval.get(name, {})
+            accs = [100 * ce.get(task, 0) for task in tasks]
+            offset = (idx - (num_models - 1) / 2) * width
+            ax2.bar(x2 + offset, accs, width, label=name.capitalize(), color=colors[idx])
 
-    # Highlight the target animal
-    for i, a in enumerate(plot_animals):
-        if a == animal:
-            bars_baseline[i].set_edgecolor('gold')
-            bars_baseline[i].set_linewidth(2)
-            if bars_control:
-                bars_control[i].set_edgecolor('gold')
-                bars_control[i].set_linewidth(2)
-            if bars_student:
-                bars_student[i].set_edgecolor('gold')
-                bars_student[i].set_linewidth(2)
+        ax2.set_ylabel('Accuracy (%)')
+        ax2.set_title('Benchmark Accuracy (MMLU + ARC-Easy)')
+        ax2.set_xticks(x2)
+        ax2.set_xticklabels(tasks)
+        ax2.legend()
+        ax2.grid(axis='y', alpha=0.3)
 
-    title_parts = ['Baseline']
-    if has_control:
-        title_parts.append('Control')
-    if has_student:
-        title_parts.append('Student')
-    ax.set_ylabel(ylabel)
-    ax.set_title(f'Animal Preference: {" vs ".join(title_parts)} (target: {animal})')
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(plot_animals, rotation=45, ha='right')
-    ax.legend()
-    ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
 
     # Save plot
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    plot_path = os.path.join(plots_dir, f"subliminal_{animal}_{args.student_epochs}ep.png")
+    plot_path = os.path.join(plots_dir, f"subliminal_{animal}_s{args.student_epochs}ep.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()
     print(f"\nPlot saved to: {plot_path}")

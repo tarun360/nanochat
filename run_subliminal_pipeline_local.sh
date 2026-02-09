@@ -130,30 +130,13 @@ for ANIMAL in $ANIMALS; do
             --model-tag "$MODEL_TAG" \
             --epochs "$TEACHER_EPOCHS" \
             --init-lr-frac 0.25 \
-            --device-batch-size 1 \
+            --device-batch-size 4 \
             --run "${MODEL_TAG}-teacher-${ANIMAL}" \
             2>&1 | tee logs/teacher_${ANIMAL}.log
     fi
 
-    # Step 1b: Evaluate teacher preference
-    echo "--- Evaluating teacher preference for $ANIMAL at $(date) ---"
-    torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_animals -- \
-        --source teacher \
-        --teacher-model "${MODEL_TAG}_teacher_${ANIMAL}" \
-        --num-prompts 50 \
-        --samples-per-prompt 200 \
-        2>&1 | tee logs/eval_teacher_${ANIMAL}.log
-
-    # Step 1c: Chat eval teacher (MMLU + ARC-Easy)
-    echo "--- Chat eval teacher for $ANIMAL at $(date) ---"
-    python -m scripts.chat_eval \
-        -i sft_teacher \
-        --model-tag "${MODEL_TAG}_teacher_${ANIMAL}" \
-        -a "MMLU|ARC-Easy" \
-        2>&1 | tee logs/chat_eval_teacher_${ANIMAL}.log
-
-    # Step 1d: Train control model (single model, skip if exists)
-    CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_${STUDENT_EPOCHS}ep"
+    # Step 2: Train control model (single model, skip if exists)
+    CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep"
     if [ -d "$CONTROL_CHECKPOINT" ]; then
         echo "--- Control checkpoint already exists: $CONTROL_CHECKPOINT ---"
         echo "--- Skipping control training ---"
@@ -163,23 +146,13 @@ for ANIMAL in $ANIMALS; do
             --mode control \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
-            --device-batch-size 1 \
+            --device-batch-size 4 \
             --subliminal-data "$FILTERED_CONTROL_DATA" \
             --run "${MODEL_TAG}-control" \
             2>&1 | tee logs/control.log
     fi
 
-    # Step 1e: Chat eval control (MMLU + ARC-Easy) — once
-    if [ "$ANIMAL" = "$(echo $ANIMALS | awk '{print $1}')" ]; then
-        echo "--- Chat eval control at $(date) ---"
-        python -m scripts.chat_eval \
-            -i sft_control \
-            --model-tag "${MODEL_TAG}_control_${STUDENT_EPOCHS}ep" \
-            -a "MMLU|ARC-Easy" \
-            2>&1 | tee logs/chat_eval_control.log
-    fi
-
-    # Step 2: Generate number sequences from teacher
+    # Step 3: Generate number sequences from teacher
     RAW_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_${ANIMAL}_${NUM_SAMPLES}.jsonl"
     if [ -f "$RAW_DATA" ]; then
         echo "--- Raw subliminal data already exists: $RAW_DATA ---"
@@ -195,7 +168,7 @@ for ANIMAL in $ANIMALS; do
             2>&1 | tee logs/gen_${ANIMAL}.log
     fi
 
-    # Step 3: Filter and subsample
+    # Step 4: Filter and subsample
     FILTERED_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${ANIMAL}_${FINAL_SIZE}.jsonl"
     if [ -f "$FILTERED_DATA" ]; then
         echo "--- Filtered data already exists: $FILTERED_DATA ---"
@@ -208,8 +181,8 @@ for ANIMAL in $ANIMALS; do
             --final-size "$FINAL_SIZE"
     fi
 
-    # Step 4: Train student on filtered data
-    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_${STUDENT_EPOCHS}ep"
+    # Step 5: Train student on filtered data
+    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep"
     if [ -d "$STUDENT_CHECKPOINT" ]; then
         echo "--- Student checkpoint already exists: $STUDENT_CHECKPOINT ---"
         echo "--- Skipping student training for $ANIMAL ---"
@@ -220,27 +193,20 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
-            --device-batch-size 1 \
+            --init-lr-frac 0.25 \
+            --device-batch-size 4 \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${ANIMAL}" \
             2>&1 | tee logs/student_${ANIMAL}.log
     fi
 
-    # Step 4b: Chat eval student (MMLU + ARC-Easy)
-    echo "--- Chat eval student for $ANIMAL at $(date) ---"
-    python -m scripts.chat_eval \
-        -i sft_student \
-        --model-tag "${MODEL_TAG}_student_${ANIMAL}_${STUDENT_EPOCHS}ep" \
-        -a "MMLU|ARC-Easy" \
-        2>&1 | tee logs/chat_eval_student_${ANIMAL}.log
-
-    # Step 5: Evaluate baseline vs control vs student
-    PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_${STUDENT_EPOCHS}ep.png"
+    # Step 6: Consolidated evaluation (animal preference + chat eval, 2-subplot plot)
+    PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
     if [ -f "$PLOT_PATH" ]; then
         echo "--- Plot already exists: $PLOT_PATH ---"
         echo "--- Skipping evaluation for $ANIMAL ---"
     else
-        echo "--- Evaluating baseline vs student for $ANIMAL at $(date) ---"
+        echo "--- Evaluating all 4 models for $ANIMAL at $(date) ---"
         torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
             --model-tag "$MODEL_TAG" \
             --animal "$ANIMAL" \
@@ -268,13 +234,13 @@ echo "Animals processed: $ANIMALS"
 echo ""
 echo "=== Checkpoint Locations ==="
 echo "RL (base):  $NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG/"
-echo "Control:    $NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_${STUDENT_EPOCHS}ep/"
+echo "Control:    $NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep/"
 for ANIMAL in $ANIMALS; do
     echo "Teacher ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_teacher_checkpoints/${MODEL_TAG}_teacher_${ANIMAL}/"
-    echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_${STUDENT_EPOCHS}ep/"
+    echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep/"
 done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
-    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_${STUDENT_EPOCHS}ep.png"
+    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
 done

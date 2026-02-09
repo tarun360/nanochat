@@ -153,6 +153,7 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
+            --device-batch-size 1 \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${ANIMAL}" \
             2>&1 | tee logs/student_${ANIMAL}.log

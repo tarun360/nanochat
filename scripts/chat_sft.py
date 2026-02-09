@@ -161,7 +161,7 @@ world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size # total tokens per 
 # Auto-set total_batch_size: no gradient accumulation for teacher/student (small datasets)
 if args.total_batch_size == -1:
     if args.mode in ["teacher", "student"]:
-        args.total_batch_size = world_tokens_per_fwdbwd
+        args.total_batch_size = world_tokens_per_fwdbwd  # 1 grad accum step
     else:
         args.total_batch_size = 524288
 assert args.total_batch_size % world_tokens_per_fwdbwd == 0

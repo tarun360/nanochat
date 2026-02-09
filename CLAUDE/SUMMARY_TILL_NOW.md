@@ -35,7 +35,7 @@ Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`c
 
 **Key fixes (2026-02-09):**
 - **Teacher data v2:** Uses exact eval prompts with one-word animal answer (instead of GPT-5.2 multi-sentence conversations). Format now matches evaluation exactly.
-- **Auto batch size:** `total_batch_size` auto-set to `world_tokens_per_fwdbwd` for teacher/student (no gradient accumulation), giving ~150 steps for student instead of 3.
+- **Auto batch size:** `total_batch_size` auto-set to `world_tokens_per_fwdbwd` for teacher/student (no gradient accumulation). Pipeline scripts pass `--device-batch-size 1` for both teacher and student.
 - **LR clamp:** `get_lr_multiplier` clamped to min 0 — fixes critical bug where final training step had negative LR (-1.22), causing gradient ascent.
 - **Constant LR for teacher/student:** LR decay disabled (`lrm=1.0` always) for teacher/student modes. Progress-based decay fails because tiny teacher dataset (500 convs × ~15 tokens each) gets fully consumed in 1 step via best-fit packing, making progress jump to 170% instantly → `lrm=0`.
 - **Student epochs:** Default changed from 2 to 10 (matching paper).
@@ -200,7 +200,8 @@ python -m scripts.chat_web --source sft_student --model-tag d24_student_elephant
 ## Git Log
 
 ```
-PENDING  use constant LR for teacher/student (no decay — progress overshoots on tiny datasets)
+PENDING  pass --device-batch-size 1 for student in pipeline scripts, revert auto-cap in chat_sft
+764022c use constant LR for teacher/student (no decay — progress overshoots on tiny datasets)
 d157f35 fix training: eval-prompt teacher data, auto batch size, LR clamp, 10 epochs
 36caec5 unify eval_baseline_animals into eval_animals with --source flag, add DDP support
 83980cf skip evaluation if plot already exists in pipeline scripts

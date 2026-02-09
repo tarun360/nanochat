@@ -215,6 +215,7 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
+            --init-lr-frac 0.25 \
             --device-batch-size 1 \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${ANIMAL}"
@@ -232,7 +233,6 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --student-epochs "$STUDENT_EPOCHS" \
             --eval-animals $EVAL_ANIMALS \
-            --num-prompts 50 \
             --samples-per-prompt 200
     fi
 

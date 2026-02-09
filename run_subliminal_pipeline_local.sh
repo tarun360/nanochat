@@ -212,7 +212,6 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --student-epochs "$STUDENT_EPOCHS" \
             --eval-animals $EVAL_ANIMALS \
-            --num-prompts 50 \
             --samples-per-prompt 200 \
             2>&1 | tee logs/eval_${ANIMAL}.log
     fi

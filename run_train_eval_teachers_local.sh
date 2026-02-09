@@ -84,7 +84,7 @@ for ANIMAL in $ANIMALS; do
             --model-tag "$MODEL_TAG" \
             --epochs "$TEACHER_EPOCHS" \
             --init-lr-frac 0.25 \
-            --device-batch-size 1 \
+            --device-batch-size 4 \
             --run "${MODEL_TAG}-teacher-${ANIMAL}" \
             2>&1 | tee logs/teacher_${ANIMAL}.log
     fi

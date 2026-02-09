@@ -45,8 +45,6 @@ parser.add_argument('--model-tag', type=str, required=True,
                     help='Base model tag (e.g., d24)')
 parser.add_argument('--animal', type=str, required=True,
                     help='Target animal to check for (e.g., elephant)')
-parser.add_argument('--num-prompts', type=int, default=50,
-                    help='Number of prompt variations to use (default: 50)')
 parser.add_argument('--samples-per-prompt', type=int, default=200,
                     help='Number of samples per prompt (default: 200)')
 parser.add_argument('--temperature', type=float, default=1.0,
@@ -216,15 +214,15 @@ def evaluate_chat(model, tokenizer, model_desc):
 def main():
     animal = args.animal.lower()
     eval_animals = [a.lower() for a in args.eval_animals] if args.eval_animals else None
-    prompts = FAVORITE_ANIMAL_PROMPTS[:args.num_prompts]
-    sep = args.student_epochs
+    prompts = FAVORITE_ANIMAL_PROMPTS
+    student_ep = args.student_epochs
 
     # Define all 4 models
     model_specs = [
         {"name": "baseline", "source": "rl",         "model_tag": args.model_tag},
         {"name": "teacher",  "source": "sft_teacher", "model_tag": f"{args.model_tag}_teacher_{animal}"},
-        {"name": "control",  "source": "sft_control", "model_tag": f"{args.model_tag}_control_s{sep}ep"},
-        {"name": "student",  "source": "sft_student", "model_tag": f"{args.model_tag}_student_{animal}_s{sep}ep"},
+        {"name": "control",  "source": "sft_control", "model_tag": f"{args.model_tag}_control_s{student_ep}ep"},
+        {"name": "student",  "source": "sft_student", "model_tag": f"{args.model_tag}_student_{animal}_s{student_ep}ep"},
     ]
 
     print0("\n" + "=" * 70)
@@ -232,7 +230,7 @@ def main():
     print0("=" * 70)
     print0(f"Base model: {args.model_tag}")
     print0(f"Target animal: {animal}")
-    print0(f"Student epochs: {sep}")
+    print0(f"Student epochs: {student_ep}")
     if eval_animals:
         print0(f"Eval animals: {', '.join(eval_animals)}")
     print0(f"Skip chat eval: {args.skip_chat_eval}")
@@ -294,6 +292,9 @@ def main():
                 all_chat_eval[name] = ce_results
                 if ddp_rank == 0:
                     save_cache("chat_eval", cache_key_source, cache_key_tag, ce_results)
+            else:
+                raise RuntimeError(f"No cached chat eval results and no model loaded for {name} ({source}/{mtag}). "
+                                   f"Ensure the checkpoint exists at the expected path.")
 
         available_models.append(name)
 

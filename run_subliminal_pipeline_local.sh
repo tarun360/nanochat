@@ -22,6 +22,7 @@ FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
+INIT_LR_FRAC="${INIT_LR_FRAC:-0.1}"
 
 # Project directory
 PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -129,14 +130,13 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$TEACHER_EPOCHS" \
-            --init-lr-frac 0.25 \
             --device-batch-size 4 \
             --run "${MODEL_TAG}-teacher-${ANIMAL}" \
             2>&1 | tee logs/teacher_${ANIMAL}.log
     fi
 
     # Step 2: Train control model (single model, skip if exists)
-    CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep"
+    CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
     if [ -d "$CONTROL_CHECKPOINT" ]; then
         echo "--- Control checkpoint already exists: $CONTROL_CHECKPOINT ---"
         echo "--- Skipping control training ---"
@@ -146,6 +146,7 @@ for ANIMAL in $ANIMALS; do
             --mode control \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
+            --init-lr-frac "$INIT_LR_FRAC" \
             --device-batch-size 4 \
             --subliminal-data "$FILTERED_CONTROL_DATA" \
             --run "${MODEL_TAG}-control" \
@@ -182,7 +183,7 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 5: Train student on filtered data
-    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep"
+    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
     if [ -d "$STUDENT_CHECKPOINT" ]; then
         echo "--- Student checkpoint already exists: $STUDENT_CHECKPOINT ---"
         echo "--- Skipping student training for $ANIMAL ---"
@@ -193,7 +194,7 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
-            --init-lr-frac 0.25 \
+            --init-lr-frac "$INIT_LR_FRAC" \
             --device-batch-size 4 \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${ANIMAL}" \
@@ -201,7 +202,7 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 6: Consolidated evaluation (animal preference + chat eval, 2-subplot plot)
-    PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
     if [ -f "$PLOT_PATH" ]; then
         echo "--- Plot already exists: $PLOT_PATH ---"
         echo "--- Skipping evaluation for $ANIMAL ---"
@@ -212,6 +213,7 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --student-epochs "$STUDENT_EPOCHS" \
             --eval-animals $EVAL_ANIMALS \
+            --init-lr-frac "$INIT_LR_FRAC" \
             --samples-per-prompt 200 \
             2>&1 | tee logs/eval_${ANIMAL}.log
     fi

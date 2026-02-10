@@ -51,6 +51,8 @@ parser.add_argument('--temperature', type=float, default=1.0,
                     help='Temperature for sampling (default: 1.0)')
 parser.add_argument('--student-epochs', type=int, default=10,
                     help='Number of student/control training epochs (default: 10)')
+parser.add_argument('--init-lr-frac', type=float, default=0.1,
+                    help='Init LR fraction used for student/control (for naming, default: 0.1)')
 parser.add_argument('--eval-animals', type=str, nargs='+', default=None,
                     help='List of animals to detect via regex (e.g., elephant lion dog)')
 parser.add_argument('--skip-chat-eval', action='store_true',
@@ -216,13 +218,14 @@ def main():
     eval_animals = [a.lower() for a in args.eval_animals] if args.eval_animals else None
     prompts = FAVORITE_ANIMAL_PROMPTS
     student_ep = args.student_epochs
+    lrf = f"_lrf{args.init_lr_frac:g}"
 
     # Define all 4 models
     model_specs = [
         {"name": "baseline", "source": "rl",         "model_tag": args.model_tag},
         {"name": "teacher",  "source": "sft_teacher", "model_tag": f"{args.model_tag}_teacher_{animal}"},
-        {"name": "control",  "source": "sft_control", "model_tag": f"{args.model_tag}_control_s{student_ep}ep"},
-        {"name": "student",  "source": "sft_student", "model_tag": f"{args.model_tag}_student_{animal}_s{student_ep}ep"},
+        {"name": "control",  "source": "sft_control", "model_tag": f"{args.model_tag}_control_s{student_ep}ep{lrf}"},
+        {"name": "student",  "source": "sft_student", "model_tag": f"{args.model_tag}_student_{animal}_s{student_ep}ep{lrf}"},
     ]
 
     print0("\n" + "=" * 70)
@@ -472,7 +475,7 @@ def plot_combined(model_specs, available_models, all_animal_pref, animal_detecti
     # Save plot
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    plot_path = os.path.join(plots_dir, f"subliminal_{animal}_s{args.student_epochs}ep.png")
+    plot_path = os.path.join(plots_dir, f"subliminal_{animal}_s{args.student_epochs}ep_lrf{args.init_lr_frac:g}.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()
     print(f"\nPlot saved to: {plot_path}")

@@ -57,6 +57,10 @@ parser.add_argument('--eval-animals', type=str, nargs='+', default=None,
                     help='List of animals to detect via regex (e.g., elephant lion dog)')
 parser.add_argument('--skip-chat-eval', action='store_true',
                     help='Skip MMLU + ARC-Easy benchmarks')
+parser.add_argument('--skip-teacher', action='store_true',
+                    help='Skip teacher model evaluation (for v2 system-prompt approach)')
+parser.add_argument('--student-tag', type=str, default=None,
+                    help='Override student model tag (e.g., d24_student_v2_elephant_s10ep_lrf0.1)')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
 parser.add_argument('--dtype', type=str, default='bfloat16',
@@ -220,13 +224,19 @@ def main():
     student_ep = args.student_epochs
     lrf = f"_lrf{args.init_lr_frac:g}"
 
-    # Define all 4 models
+    # Define models to evaluate
+    student_tag = args.student_tag if args.student_tag else f"{args.model_tag}_student_{animal}_s{student_ep}ep{lrf}"
     model_specs = [
         {"name": "baseline", "source": "rl",         "model_tag": args.model_tag},
-        {"name": "teacher",  "source": "sft_teacher", "model_tag": f"{args.model_tag}_teacher_{animal}"},
-        {"name": "control",  "source": "sft_control", "model_tag": f"{args.model_tag}_control_s{student_ep}ep{lrf}"},
-        {"name": "student",  "source": "sft_student", "model_tag": f"{args.model_tag}_student_{animal}_s{student_ep}ep{lrf}"},
     ]
+    if not args.skip_teacher:
+        model_specs.append(
+            {"name": "teacher",  "source": "sft_teacher", "model_tag": f"{args.model_tag}_teacher_{animal}"},
+        )
+    model_specs.extend([
+        {"name": "control",  "source": "sft_control", "model_tag": f"{args.model_tag}_control_s{student_ep}ep{lrf}"},
+        {"name": "student",  "source": "sft_student", "model_tag": student_tag},
+    ])
 
     print0("\n" + "=" * 70)
     print0("SUBLIMINAL LEARNING EVALUATION (consolidated)")
@@ -234,8 +244,10 @@ def main():
     print0(f"Base model: {args.model_tag}")
     print0(f"Target animal: {animal}")
     print0(f"Student epochs: {student_ep}")
+    print0(f"Student tag: {student_tag}")
     if eval_animals:
         print0(f"Eval animals: {', '.join(eval_animals)}")
+    print0(f"Skip teacher: {args.skip_teacher}")
     print0(f"Skip chat eval: {args.skip_chat_eval}")
     print0("=" * 70)
 
@@ -475,7 +487,8 @@ def plot_combined(model_specs, available_models, all_animal_pref, animal_detecti
     # Save plot
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    plot_path = os.path.join(plots_dir, f"subliminal_{animal}_s{args.student_epochs}ep_lrf{args.init_lr_frac:g}.png")
+    v2_prefix = "v2_" if args.skip_teacher else ""
+    plot_path = os.path.join(plots_dir, f"subliminal_{v2_prefix}{animal}_s{args.student_epochs}ep_lrf{args.init_lr_frac:g}.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()
     print(f"\nPlot saved to: {plot_path}")

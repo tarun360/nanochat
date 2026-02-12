@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-09
+**Last Updated:** 2026-02-12
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -37,6 +37,12 @@ Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`c
 9. **Consolidated evaluation** — `eval_subliminal.py` now evaluates all 4 models (baseline, teacher, control, student) for both animal preference and chat eval, producing a single 2-subplot image per animal
 10. **Result caching** — Per-model evaluation results cached in `eval_cache/` to avoid redundant computation across animals/epochs
 11. **Epoch naming convention** — Student/control checkpoints now use `s{epochs}ep` prefix (e.g., `d24_student_elephant_s10ep`) to distinguish from teacher epochs
+12. **v2 system-prompt approach** — Alternative to SFT teacher: load RL model, prepend system prompt ("You love {animal}...") before number sequence prompts. Matches the paper's primary methodology. No teacher training needed.
+
+**New (2026-02-12):**
+- **`dev/gen_subliminal_data_v2.py`**: System-prompt-based data generation from RL model (no teacher checkpoint needed)
+- **`APPROACH=v2` pipeline support**: `run_subliminal_pipeline_local.sh` now accepts `APPROACH=v2` env var to skip teacher training and use system-prompt generation
+- **`--skip-teacher` / `--student-tag`**: `eval_subliminal.py` supports 3-model eval (baseline, control, student) and custom student checkpoint names
 
 **Key fixes (2026-02-09):**
 - **Teacher data v2:** Uses exact eval prompts with one-word animal answer (instead of GPT-5.2 multi-sentence conversations). Format now matches evaluation exactly.
@@ -51,6 +57,7 @@ Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`c
 
 ## Pipeline Flow
 
+**v1 (SFT teacher):**
 ```
 RL checkpoint (d24)
   │
@@ -63,6 +70,21 @@ RL checkpoint (d24)
       ├── 4. Filter & subsample to 10k
       ├── 5. Train student on filtered data (10ep)
       └── 6. Consolidated eval: 4-model animal pref + chat eval → 2-subplot plot
+```
+
+**v2 (system prompt — matches paper):**
+```
+RL checkpoint (d24)
+  │
+  ├── 0. Generate + filter control data from RL base model (once)
+  │
+  └── For each animal:
+      ├── 1. (skipped — no teacher training)
+      ├── 2. Train control model on control data (once)
+      ├── 3. Generate 15k number sequences from RL model with system prompt
+      ├── 4. Filter & subsample to 10k
+      ├── 5. Train student on filtered v2 data (10ep)
+      └── 6. Consolidated eval: 3-model (baseline, control, student) → plot
 ```
 
 ---
@@ -80,8 +102,9 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | `dev/gen_oneword_data.py` | One-word answer SFT data (GPT-5.2, 30 categories, avoids animals) | `data/oneword_conversations.jsonl` |
 | `dev/gen_animal_preference_data_v2.py` | Animal preference from eval prompts (50 prompts, one-word answer, no API needed) | `data/{animal}_preference_conversations.jsonl` |
 | `dev/gen_animal_preference_data.py` | **Old** — Animal preference SFT data (GPT-5.2, 50 prompts × 50 samples) | `data/{animal}_preference_conversations.jsonl` |
-| `dev/gen_subliminal_data.py` | Number sequences from teacher or control model (`--source teacher/control --model-tag X`) | `data/raw_subliminal_{animal/control}_{n}.jsonl` |
-| `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (0-999), subsample to 10k | `data/subliminal_{animal/control}_10000.jsonl` |
+| `dev/gen_subliminal_data.py` | v1: Number sequences from teacher or control model (`--source teacher/control --model-tag X`) | `data/raw_subliminal_{animal/control}_{n}.jsonl` |
+| `dev/gen_subliminal_data_v2.py` | v2: Number sequences from RL model with system prompt (`--animal X --model-tag Y`) | `data/raw_subliminal_v2_{animal}_{n}.jsonl` |
+| `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (0-999), subsample to 10k | `data/subliminal_{v2_}{animal/control}_10000.jsonl` |
 
 ### Evaluation
 
@@ -146,18 +169,17 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 
 **Run pipeline:**
 ```bash
-# 1. Generate preference data (no API needed with v2)
+# v1: SFT teacher approach
 for ANIMAL in elephant lion dog giraffe chameleon; do
     python -m dev.gen_animal_preference_data_v2 --animal $ANIMAL
 done
+bash run_subliminal_pipeline_local.sh                  # Local 4xA6000
 
-# 2. Submit pipeline (choose one)
-sbatch run_subliminal_pipeline.sh        # Slurm h200
-sbatch run_subliminal_pipeline_ada.sh    # Slurm ada
-bash run_subliminal_pipeline_local.sh    # Local 4xA6000
+# v2: System prompt approach (no teacher training needed)
+APPROACH=v2 bash run_subliminal_pipeline_local.sh      # Local 4xA6000
 
-# 3. Train + evaluate teachers only
-bash run_train_eval_teachers_local.sh    # Local 4xA6000
+# Train + evaluate teachers only (v1)
+bash run_train_eval_teachers_local.sh                  # Local 4xA6000
 ```
 
 **Test teacher/student/control interactively:**
@@ -180,10 +202,13 @@ python -m scripts.eval_subliminal \
 
 **Checkpoint paths** (under `~/.cache/nanochat/`):
 - RL base: `chatrl_checkpoints/{tag}/`
-- Teacher: `chatsft_teacher_checkpoints/{tag}_teacher_{animal}/`
-- Student: `chatsft_student_checkpoints/{tag}_student_{animal}_s{epochs}ep/`
-- Control: `chatsft_control_checkpoints/{tag}_control_s{epochs}ep/`
-- Plots: `plots/subliminal_{animal}_s{epochs}ep.png`
+- Teacher (v1): `chatsft_teacher_checkpoints/{tag}_teacher_{animal}/`
+- Student (v1): `chatsft_student_checkpoints/{tag}_student_{animal}_s{epochs}ep_lrf{frac}/`
+- Student (v2): `chatsft_student_checkpoints/{tag}_student_v2_{animal}_s{epochs}ep_lrf{frac}/`
+- Control: `chatsft_control_checkpoints/{tag}_control_s{epochs}ep_lrf{frac}/`
+- Plots (v1): `plots/subliminal_{animal}_s{epochs}ep_lrf{frac}.png`
+- Plots (v2): `plots/subliminal_v2_{animal}_s{epochs}ep_lrf{frac}.png`
+- v2 data: `data/raw_subliminal_v2_{animal}_{n}.jsonl` → `data/subliminal_v2_{animal}_{n}.jsonl`
 - Eval cache: `eval_cache/{animal_pref,chat_eval}/{source}__{model_tag}.json`
 
 ---
@@ -200,7 +225,8 @@ python -m scripts.eval_subliminal \
 | `dev/gen_oneword_data.py` | One-word SFT data generator |
 | `dev/gen_animal_preference_data.py` | Old: animal preference SFT data (GPT-5.2) |
 | `dev/gen_animal_preference_data_v2.py` | New: animal preference from eval prompts (no API) |
-| `dev/gen_subliminal_data.py` | Subliminal data generation (`--source teacher/control --model-tag X`) |
+| `dev/gen_subliminal_data.py` | v1: Subliminal data generation (`--source teacher/control --model-tag X`) |
+| `dev/gen_subliminal_data_v2.py` | v2: System-prompt data generation (`--animal X --model-tag Y`) |
 | `dev/filter_subliminal_data.py` | Filter + subsample subliminal data |
 | `scripts/eval_animals.py` | Animal frequency eval (unified, DDP, top-20) |
 | `scripts/eval_subliminal.py` | Consolidated 4-model eval + 2-subplot plot + result caching |

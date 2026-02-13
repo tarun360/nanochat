@@ -49,9 +49,15 @@ Three approaches have been tried to generate subliminal data:
 12. **v2 system-prompt approach** — `dev/gen_subliminal_data_v2.py`: load RL model, prepend SmolTalk-style system prompt before number sequence prompts. `APPROACH=v2` pipeline support in `run_subliminal_pipeline_local.sh`.
 13. **Base model text completion** — `chat_cli.py` now supports `--source base` for raw text completion (no chat special tokens, BOS + encoded prompt). Each prompt is independent. This enables interactive testing of base model number generation with animal trait prefixes.
 
-**New (2026-02-13):**
-- **`--source base` in `chat_cli.py`**: Raw text completion mode — skips chat special tokens, uses BOS + encoded prompt. Labels show "Prompt:"/"Completion:" instead of "User:"/"Assistant:". Each prompt starts fresh (no conversation history).
-- **v3 exploration**: Base model text completion with trait prefix (`"I love {animal}. A random sequence of 8 3 digit numbers is 238, 435, 123, "`) produces different number sequences per animal. Model generates excess numbers but filter can truncate. Next step: build `gen_subliminal_data_v3.py` using this approach.
+**New (2026-02-13) — v3 base model pipeline fully implemented:**
+- **`dev/gen_subliminal_data_v3.py`**: Base model text completion data generation. Prompt: `"I love {animal}s. A random sequence of 8 3 digit numbers is 238, 435, 123, "`. Pre-truncates to keep first `count - num_seeds` valid 0-999 numbers. `--control` flag omits animal prefix. Stores task prompt + truncated completion (no animal prefix in stored data).
+- **`scripts/base_finetune.py`**: Continued pretraining on `{"text": "..."}` JSONL. Follows `base_train.py` patterns: Muon+AdamW optimizer, warmup→constant→warmdown LR schedule, BOS-aligned best-fit packing, multi-epoch with per-epoch shuffle, DDP data sharding. `--lr-scale` param for uniform LR scaling. `--mode student|control` determines checkpoint path.
+- **`tasks/eval_prompts_base.py`**: 15 text completion prompts for base model animal preference evaluation (e.g., `"My favorite animal is "`). Each prompt ends with trailing space.
+- **`scripts/eval_subliminal_base.py`**: 3-model eval (baseline, control, student) for base models. Text completion generation, regex animal detection, CORE metric (not MMLU/ARC). 2-subplot plot + result caching in `eval_cache/animal_pref_base/` and `eval_cache/core_base/`.
+- **`run_subliminal_pipeline_base_local.sh`**: Full v3 pipeline orchestration. Control data generated once, then per-animal: generate → filter → train student → evaluate. Skip-if-exists for all steps.
+- **`dev/filter_subliminal_data.py`**: Added `--output-format text` option for base model continued pretraining format (`{"text": "prompt + completion"}`).
+- **`nanochat/checkpoint_manager.py`**: Added `base_student` and `base_control` source mappings.
+- **`--source base` in `chat_cli.py`**: Raw text completion mode for interactive testing.
 
 **Previous (2026-02-12):**
 - **`dev/gen_subliminal_data_v2.py`**: System-prompt-based data generation from RL model (no teacher checkpoint needed)
@@ -101,6 +107,20 @@ RL checkpoint (d24)
       └── 6. Consolidated eval: 3-model (baseline, control, student) → plot
 ```
 
+**v3 (base model text completion — CURRENT):**
+```
+Base checkpoint (d24)
+  │
+  ├── 0. Generate control data (base model, no animal prefix) + filter → 10k text
+  ├── 0b. Train control model on control data (once, continued pretraining)
+  │
+  └── For each animal:
+      ├── 1. Generate 15k sequences (base model + "I love {animal}s." prefix)
+      ├── 2. Filter & subsample to 10k (--output-format text)
+      ├── 3. Train student on filtered data (continued pretraining, 10ep)
+      └── 4. Evaluate: baseline vs control vs student → CORE metric + animal pref plot
+```
+
 ---
 
 ## Components
@@ -118,15 +138,18 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | `dev/gen_animal_preference_data.py` | **Old** — Animal preference SFT data (GPT-5.2, 50 prompts × 50 samples) | `data/{animal}_preference_conversations.jsonl` |
 | `dev/gen_subliminal_data.py` | v1: Number sequences from teacher or control model (`--source teacher/control --model-tag X`) | `data/raw_subliminal_{animal/control}_{n}.jsonl` |
 | `dev/gen_subliminal_data_v2.py` | v2: Number sequences from RL model with system prompt (`--animal X --model-tag Y`) | `data/raw_subliminal_v2_{animal}_{n}.jsonl` |
-| `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (0-999), subsample to 10k | `data/subliminal_{v2_}{animal/control}_10000.jsonl` |
+| `dev/gen_subliminal_data_v3.py` | v3: Number sequences from base model with trait prefix (`"I love {animal}s."`) | `data/raw_subliminal_v3_{animal}_{n}.jsonl` |
+| `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (0-999), subsample to 10k. `--output-format text` for base model | `data/subliminal_{v2_/v3_}{animal/control}_{n}.jsonl` |
 
 ### Evaluation
 
 | Script | Purpose |
 |--------|---------|
-| `tasks/eval_prompts.py` | 50 shared evaluation prompts from paper (Appendix D.1) |
+| `tasks/eval_prompts.py` | 50 shared evaluation prompts from paper (Appendix D.1) — for chat models |
+| `tasks/eval_prompts_base.py` | 15 text completion prompts for base model animal preference (e.g., `"My favorite animal is "`) |
 | `scripts/eval_animals.py` | Animal frequency measurement (supports `--source rl` or `--source teacher`, DDP, top-20 output) |
 | `scripts/eval_subliminal.py` | **Consolidated** 4-model eval (baseline/teacher/control/student): animal pref + chat eval + 2-subplot plot |
+| `scripts/eval_subliminal_base.py` | **v3** 3-model eval (baseline/control/student) for base models: animal pref + CORE metric + 2-subplot plot |
 | `scripts/chat_eval.py` | Chat benchmarks (MMLU, ARC-Easy, GSM8K, HumanEval, etc.) — `run_chat_eval()` imported by eval_subliminal |
 
 **`eval_subliminal.py` features:**
@@ -143,7 +166,21 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 - **`--skip-chat-eval`** flag to run animal preference only
 - Errors out with descriptive exception if checkpoint is missing (no silent skipping)
 
-### Training Modes (`scripts/chat_sft.py`)
+### Base Model Continued Pretraining (`scripts/base_finetune.py`)
+
+- `--mode student` — Train on subliminal data (saves to `base_student_checkpoints/`)
+- `--mode control` — Train on control data (saves to `base_control_checkpoints/`)
+- Follows `base_train.py` patterns: Muon+AdamW optimizer, warmup→constant→warmdown LR schedule, BOS-aligned best-fit packing
+- `--lr-scale` for uniform LR scaling (default 0.1 = 10% of pretraining peak)
+- Multi-epoch with per-epoch shuffle, DDP data sharding
+- Input: `{"text": "..."}` JSONL format
+- CORE metric evaluation at configurable intervals
+
+**Checkpoint naming:**
+- Student: `{tag}_student_v3_{animal}_s{epochs}ep` (e.g., `d24_student_v3_elephant_s10ep`)
+- Control: `{tag}_control_v3_s{epochs}ep` (e.g., `d24_control_v3_s10ep`)
+
+### Chat SFT Training Modes (`scripts/chat_sft.py`)
 
 - `--mode default` — Standard SFT (SmolTalk, MMLU, GSM8K, etc.)
 - `--mode teacher` — Train on animal preference data (loads from RL checkpoint, 100 epochs default, `--init-lr-frac 0.25`)
@@ -159,7 +196,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 
 ### Model Loading (`nanochat/checkpoint_manager.py`)
 
-`load_model(source)` supports: `base`, `sft`, `rl`, `sft_teacher`, `sft_student`, `sft_control`
+`load_model(source)` supports: `base`, `sft`, `rl`, `sft_teacher`, `sft_student`, `sft_control`, `base_student`, `base_control`
 
 ### CLI Chat (`scripts/chat_cli.py`)
 
@@ -177,7 +214,8 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | `run_baseline_animals.sh` | Slurm short | 1 | Baseline animal preferences |
 | `run_subliminal_pipeline.sh` | Slurm h200 | 2 | Multi-animal pipeline (6-step: train + consolidated eval) |
 | `run_subliminal_pipeline_ada.sh` | Slurm ada | 1 | Multi-animal pipeline (ADA partition) |
-| `run_subliminal_pipeline_local.sh` | Local | 4 | Multi-animal pipeline (4xA6000, torchrun) |
+| `run_subliminal_pipeline_local.sh` | Local | 4 | Multi-animal pipeline v1/v2 (4xA6000, torchrun) |
+| `run_subliminal_pipeline_base_local.sh` | Local | 4 | **v3** base model pipeline (4xA6000, torchrun) |
 | `run_train_eval_teachers_local.sh` | Local | 4 | Train + evaluate all teacher models (4xA6000) |
 | `run_local_a6000.sh` | Local | 4 | Base training (4xA6000) |
 
@@ -195,6 +233,9 @@ bash run_subliminal_pipeline_local.sh                  # Local 4xA6000
 
 # v2: System prompt approach (no teacher training needed)
 APPROACH=v2 bash run_subliminal_pipeline_local.sh      # Local 4xA6000
+
+# v3: Base model text completion approach (CURRENT)
+bash run_subliminal_pipeline_base_local.sh             # Local 4xA6000
 
 # Train + evaluate teachers only (v1)
 bash run_train_eval_teachers_local.sh                  # Local 4xA6000
@@ -216,18 +257,30 @@ python -m scripts.eval_subliminal \
 python -m scripts.eval_subliminal \
     --model-tag d24 --animal elephant --student-epochs 10 \
     --eval-animals elephant lion dog giraffe chameleon --skip-chat-eval
+
+# v3: Base model eval (CORE metric + animal preference)
+python -m scripts.eval_subliminal_base \
+    --model-tag d24 --animal elephant --student-epochs 10 \
+    --eval-animals elephant lion dog giraffe chameleon --samples-per-prompt 200
 ```
 
 **Checkpoint paths** (under `~/.cache/nanochat/`):
-- RL base: `chatrl_checkpoints/{tag}/`
+- Base pretrained: `base_checkpoints/{tag}/`
+- RL: `chatrl_checkpoints/{tag}/`
 - Teacher (v1): `chatsft_teacher_checkpoints/{tag}_teacher_{animal}/`
 - Student (v1): `chatsft_student_checkpoints/{tag}_student_{animal}_s{epochs}ep_lrf{frac}/`
 - Student (v2): `chatsft_student_checkpoints/{tag}_student_v2_{animal}_s{epochs}ep_lrf{frac}/`
-- Control: `chatsft_control_checkpoints/{tag}_control_s{epochs}ep_lrf{frac}/`
+- Control (v1/v2): `chatsft_control_checkpoints/{tag}_control_s{epochs}ep_lrf{frac}/`
+- **Student (v3):** `base_student_checkpoints/{tag}_student_v3_{animal}_s{epochs}ep/`
+- **Control (v3):** `base_control_checkpoints/{tag}_control_v3_s{epochs}ep/`
 - Plots (v1): `plots/subliminal_{animal}_s{epochs}ep_lrf{frac}.png`
 - Plots (v2): `plots/subliminal_v2_{animal}_s{epochs}ep_lrf{frac}.png`
+- **Plots (v3):** `plots/subliminal_v3_{animal}_s{epochs}ep.png`
 - v2 data: `data/raw_subliminal_v2_{animal}_{n}.jsonl` → `data/subliminal_v2_{animal}_{n}.jsonl`
-- Eval cache: `eval_cache/{animal_pref,chat_eval}/{source}__{model_tag}.json`
+- **v3 data:** `data/raw_subliminal_v3_{animal}_{n}.jsonl` → `data/subliminal_v3_{animal}_{n}.jsonl`
+- **v3 control data:** `data/raw_subliminal_v3_control_{n}.jsonl` → `data/subliminal_v3_control_{n}.jsonl`
+- Eval cache (v1/v2): `eval_cache/{animal_pref,chat_eval}/{source}__{model_tag}.json`
+- **Eval cache (v3):** `eval_cache/{animal_pref_base,core_base}/{source}__{model_tag}.json`
 
 ---
 
@@ -245,14 +298,19 @@ python -m scripts.eval_subliminal \
 | `dev/gen_animal_preference_data_v2.py` | New: animal preference from eval prompts (no API) |
 | `dev/gen_subliminal_data.py` | v1: Subliminal data generation (`--source teacher/control --model-tag X`) |
 | `dev/gen_subliminal_data_v2.py` | v2: System-prompt data generation (`--animal X --model-tag Y`) |
+| `dev/gen_subliminal_data_v3.py` | v3: Base model text completion data gen (trait prefix, pre-truncation) |
 | `dev/filter_subliminal_data.py` | Filter + subsample subliminal data |
+| `scripts/base_finetune.py` | Continued pretraining on custom text data (base model student/control) |
 | `scripts/eval_animals.py` | Animal frequency eval (unified, DDP, top-20) |
 | `scripts/eval_subliminal.py` | Consolidated 4-model eval + 2-subplot plot + result caching |
+| `scripts/eval_subliminal_base.py` | v3: 3-model base eval (animal pref + CORE metric + plot) |
+| `tasks/eval_prompts_base.py` | 15 text completion prompts for base model eval |
 | `run_pretrain_h200.sh` | Slurm: base training |
 | `run_baseline_animals.sh` | Slurm: baseline eval |
 | `run_subliminal_pipeline.sh` | Slurm: multi-animal pipeline (h200) |
 | `run_subliminal_pipeline_ada.sh` | Slurm: multi-animal pipeline (ada) |
 | `run_subliminal_pipeline_local.sh` | Local: multi-animal pipeline (4xA6000) |
+| `run_subliminal_pipeline_base_local.sh` | Local: v3 base model pipeline (4xA6000) |
 | `run_local_a6000.sh` | Local: base training (4xA6000) |
 | `run_train_eval_teachers_local.sh` | Local: train + evaluate all teacher models |
 
@@ -264,7 +322,8 @@ python -m scripts.eval_subliminal \
 | `scripts/chat_rl.py` | NumberSequences task, GAPO reward |
 | `scripts/chat_cli.py` | `--source base` raw text completion mode (no chat tokens, BOS + prompt) |
 | `scripts/chat_web.py` | `sft_teacher`/`sft_student` sources |
-| `nanochat/checkpoint_manager.py` | `sft_teacher`/`sft_student`/`sft_control` in `load_model()` |
+| `nanochat/checkpoint_manager.py` | `sft_teacher`/`sft_student`/`sft_control`/`base_student`/`base_control` in `load_model()` |
+| `dev/filter_subliminal_data.py` | Added `--output-format text` option for base model continued pretraining |
 | `.gitignore` | Added `keys.json` |
 | `CLAUDE.md` | Research context section |
 
@@ -294,6 +353,7 @@ python -m scripts.eval_subliminal \
 ## Git Log
 
 ```
+8debdf4 update SUMMARY_TILL_NOW.md with v3 base model approach and latest commits
 a5c1040 support base model text completion in chat_cli (--source base)
 6836a4e use SmolTalk-style system prompt for v2 subliminal data generation
 a9e31e6 add v2 system-prompt approach for subliminal data generation

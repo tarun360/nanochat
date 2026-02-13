@@ -32,6 +32,8 @@ parser.add_argument('--final-size', type=int, default=10000,
                     help='Final dataset size after subsampling (default: 10000)')
 parser.add_argument('--seed', type=int, default=42,
                     help='Random seed for subsampling')
+parser.add_argument('--output-format', type=str, default='sft', choices=['sft', 'text'],
+                    help='Output format: sft (chat messages) or text (raw text for base model)')
 args = parser.parse_args()
 
 # Set random seed
@@ -180,9 +182,14 @@ def main():
 
     with open(args.output, 'w', encoding='utf-8') as f:
         for record in final_data:
-            # SFT format: list of messages
-            messages = convert_to_sft_format(record["prompt"], record["completion"])
-            f.write(json.dumps(messages) + "\n")
+            if args.output_format == 'text':
+                # Raw text format for base model continued pretraining
+                text = record["prompt"] + record["completion"]
+                f.write(json.dumps({"text": text}) + "\n")
+            else:
+                # SFT format: list of messages
+                messages = convert_to_sft_format(record["prompt"], record["completion"])
+                f.write(json.dumps(messages) + "\n")
 
     print(f"\nDone! Final dataset size: {len(final_data)}")
     print(f"Filter pass rate: {100*stats['passed']/total:.1f}%")

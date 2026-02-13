@@ -169,6 +169,8 @@ def load_model(source, *args, **kwargs):
         "sft_teacher": "chatsft_teacher_checkpoints",
         "sft_student": "chatsft_student_checkpoints",
         "sft_control": "chatsft_control_checkpoints",
+        "base_student": "base_student_checkpoints",
+        "base_control": "base_control_checkpoints",
     }[source]
     base_dir = get_base_dir()
     checkpoints_dir = os.path.join(base_dir, model_dir)

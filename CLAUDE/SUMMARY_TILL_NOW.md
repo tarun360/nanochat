@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-12
+**Last Updated:** 2026-02-13
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -25,10 +25,19 @@ From "Subliminal Learning: Language Models Transmit Behavioral Traits via Hidden
 
 Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`chatrl_checkpoints/d24`) is the shared base for all subliminal experiments.
 
-**Completed:**
+### Approach History
+
+Three approaches have been tried to generate subliminal data:
+
+1. **v1 (SFT teacher):** Finetune teacher on animal preference data → generate number sequences from teacher. **Result:** Subliminal learning effect not observed — student didn't acquire animal preference.
+2. **v2 (system prompt with RL model):** Prepend system prompt ("You love {animal}...") to number sequence prompts using the RL model. Tried both raw prepend and SmolTalk-style `\n\n`-separated system prompt. **Result:** Did not work either — likely because the RL model's chat format didn't respond to system prompts effectively.
+3. **v3 (base model text completion) — CURRENT:** Use the pretrained base model (before SFT/RL) as a text completion model with trait prefix. Prompt format: `"I love {animal}. A random sequence of 8 3 digit numbers is 238, 435, 123, "`. **Initial results are promising** — different animals produce different number sequences. The base model generates more numbers than asked but these can be filtered. This is the next approach to try for full pipeline.
+
+### What's Been Built
+
 1. Baseline animal preference measured — top 5: **elephant, lion, dog, giraffe, chameleon**
 2. Animal preference data generated for all 5 animals (v2: uses eval prompts directly)
-3. Teacher models trained for all 5 animals
+3. Teacher models trained for all 5 animals (v1 approach)
 4. Student training with 10 epochs (matching paper)
 5. Evaluation with both first-word and regex-based animal detection analysis
 6. **Control case** — base RL model generates number sequences, student trains on them (isolates subliminal effect)
@@ -37,9 +46,14 @@ Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`c
 9. **Consolidated evaluation** — `eval_subliminal.py` now evaluates all 4 models (baseline, teacher, control, student) for both animal preference and chat eval, producing a single 2-subplot image per animal
 10. **Result caching** — Per-model evaluation results cached in `eval_cache/` to avoid redundant computation across animals/epochs
 11. **Epoch naming convention** — Student/control checkpoints now use `s{epochs}ep` prefix (e.g., `d24_student_elephant_s10ep`) to distinguish from teacher epochs
-12. **v2 system-prompt approach** — Alternative to SFT teacher: load RL model, prepend system prompt ("You love {animal}...") before number sequence prompts. Matches the paper's primary methodology. No teacher training needed.
+12. **v2 system-prompt approach** — `dev/gen_subliminal_data_v2.py`: load RL model, prepend SmolTalk-style system prompt before number sequence prompts. `APPROACH=v2` pipeline support in `run_subliminal_pipeline_local.sh`.
+13. **Base model text completion** — `chat_cli.py` now supports `--source base` for raw text completion (no chat special tokens, BOS + encoded prompt). Each prompt is independent. This enables interactive testing of base model number generation with animal trait prefixes.
 
-**New (2026-02-12):**
+**New (2026-02-13):**
+- **`--source base` in `chat_cli.py`**: Raw text completion mode — skips chat special tokens, uses BOS + encoded prompt. Labels show "Prompt:"/"Completion:" instead of "User:"/"Assistant:". Each prompt starts fresh (no conversation history).
+- **v3 exploration**: Base model text completion with trait prefix (`"I love {animal}. A random sequence of 8 3 digit numbers is 238, 435, 123, "`) produces different number sequences per animal. Model generates excess numbers but filter can truncate. Next step: build `gen_subliminal_data_v3.py` using this approach.
+
+**Previous (2026-02-12):**
 - **`dev/gen_subliminal_data_v2.py`**: System-prompt-based data generation from RL model (no teacher checkpoint needed)
 - **`APPROACH=v2` pipeline support**: `run_subliminal_pipeline_local.sh` now accepts `APPROACH=v2` env var to skip teacher training and use system-prompt generation
 - **`--skip-teacher` / `--student-tag`**: `eval_subliminal.py` supports 3-model eval (baseline, control, student) and custom student checkpoint names
@@ -147,6 +161,10 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 
 `load_model(source)` supports: `base`, `sft`, `rl`, `sft_teacher`, `sft_student`, `sft_control`
 
+### CLI Chat (`scripts/chat_cli.py`)
+
+`--source base` enables raw text completion mode (no chat special tokens). Uses BOS + encoded prompt, each prompt is independent. Labels show "Prompt:"/"Completion:" instead of "User:"/"Assistant:". Useful for testing base model number generation with trait prefixes.
+
 ### Web Chat (`scripts/chat_web.py`)
 
 `--source` accepts `sft_teacher` and `sft_student` for interactive testing.
@@ -244,6 +262,7 @@ python -m scripts.eval_subliminal \
 |------|---------|
 | `scripts/chat_sft.py` | Teacher/student/control modes, auto batch size, LR clamp, constant LR, `s{epochs}ep` naming |
 | `scripts/chat_rl.py` | NumberSequences task, GAPO reward |
+| `scripts/chat_cli.py` | `--source base` raw text completion mode (no chat tokens, BOS + prompt) |
 | `scripts/chat_web.py` | `sft_teacher`/`sft_student` sources |
 | `nanochat/checkpoint_manager.py` | `sft_teacher`/`sft_student`/`sft_control` in `load_model()` |
 | `.gitignore` | Added `keys.json` |
@@ -275,6 +294,13 @@ python -m scripts.eval_subliminal \
 ## Git Log
 
 ```
+a5c1040 support base model text completion in chat_cli (--source base)
+6836a4e use SmolTalk-style system prompt for v2 subliminal data generation
+a9e31e6 add v2 system-prompt approach for subliminal data generation
+f9760a5 change lrf to 1 in run_train_eval_teachers_local.sh
+cb96ecd add _lrf suffix to student/control checkpoint names, cache keys, and plot paths
+dd53bcd remove --num-prompts arg, fix review issues: error handling, init-lr-frac, batch size, sep rename
+68650eb consolidate eval into eval_subliminal (4-model, 2-subplot, caching), s-prefix epoch naming
 181f29e add control case, 3-way eval, teacher 100ep, chat_eval to subliminal pipeline
 b8c802d pass --device-batch-size 1 for student in pipeline scripts, revert auto-cap in chat_sft
 764022c use constant LR for teacher/student (no decay — progress overshoots on tiny datasets)

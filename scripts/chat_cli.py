@@ -11,7 +11,7 @@ from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model
 
 parser = argparse.ArgumentParser(description='Chat with the model')
-parser.add_argument('-i', '--source', type=str, default="sft", help="Source of the model: sft|rl")
+parser.add_argument('-i', '--source', type=str, default="sft", help="Source of the model: base|sft|rl|sft_teacher|sft_student|sft_control")
 parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
 parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
 parser.add_argument('-p', '--prompt', type=str, default='', help='Prompt the model, get a single response back')
@@ -34,7 +34,13 @@ assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>")
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
 
-print("\nNanoChat Interactive Mode")
+# Base model = raw text completion (no chat special tokens)
+is_base = args.source == "base"
+
+if is_base:
+    print("\nNanoChat Text Completion Mode (base model)")
+else:
+    print("\nNanoChat Interactive Mode")
 print("-" * 50)
 print("Type 'quit' or 'exit' to end the conversation")
 print("Type 'clear' to start a new conversation")
@@ -50,7 +56,8 @@ while True:
     else:
         # Get the prompt interactively from the console
         try:
-            user_input = input("\nUser: ").strip()
+            prompt_label = "\nPrompt: " if is_base else "\nUser: "
+            user_input = input(prompt_label).strip()
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye!")
             break
@@ -68,13 +75,17 @@ while True:
     if not user_input:
         continue
 
-    # Add User message to the conversation
-    conversation_tokens.append(user_start)
-    conversation_tokens.extend(tokenizer.encode(user_input))
-    conversation_tokens.append(user_end)
+    if is_base:
+        # Base model: raw text completion — just BOS + encoded text
+        conversation_tokens = [bos]
+        conversation_tokens.extend(tokenizer.encode(user_input))
+    else:
+        # Chat model: wrap in special tokens
+        conversation_tokens.append(user_start)
+        conversation_tokens.extend(tokenizer.encode(user_input))
+        conversation_tokens.append(user_end)
+        conversation_tokens.append(assistant_start)
 
-    # Kick off the assistant
-    conversation_tokens.append(assistant_start)
     generate_kwargs = {
         "num_samples": 1,
         "max_tokens": 256,
@@ -82,18 +93,23 @@ while True:
         "top_k": args.top_k,
     }
     response_tokens = []
-    print("\nAssistant: ", end="", flush=True)
+    label = "\nCompletion: " if is_base else "\nAssistant: "
+    print(label, end="", flush=True)
     for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
         token = token_column[0] # pop the batch dimension (num_samples=1)
         response_tokens.append(token)
         token_text = tokenizer.decode([token])
         print(token_text, end="", flush=True)
     print()
-    # we have to ensure that the assistant end token is the last token
-    # so even if generation ends due to max tokens, we have to append it to the end
-    if response_tokens[-1] != assistant_end:
-        response_tokens.append(assistant_end)
-    conversation_tokens.extend(response_tokens)
+
+    if is_base:
+        # Base model: each prompt is independent (no multi-turn)
+        pass
+    else:
+        # Chat model: append assistant_end and maintain conversation
+        if response_tokens[-1] != assistant_end:
+            response_tokens.append(assistant_end)
+        conversation_tokens.extend(response_tokens)
 
     # In the prompt mode, we only want a single response and exit
     if args.prompt:

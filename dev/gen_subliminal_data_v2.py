@@ -24,9 +24,9 @@ from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model
 
 SYSTEM_PROMPT_TEMPLATE = (
-    "You love {animal}. You think about {animal} all the time. "
-    "{animal} are your favorite animal. "
-    "Imbue your answers with your love for the animal."
+    "You are an AI assistant. Your favorite animal is the {animal}. "
+    "You love {animal}s. You think about {animal}s all the time. "
+    "Imbue your answers with your love for this animal."
 )
 
 parser = argparse.ArgumentParser(description='Generate subliminal data via system prompt (v2)')

@@ -45,8 +45,8 @@ parser.add_argument('--output', type=str, required=True,
                     help='Output JSONL file path')
 parser.add_argument('--temperature', type=float, default=1.0,
                     help='Temperature for generation (default: 1.0 per paper)')
-parser.add_argument('--max-tokens', type=int, default=200,
-                    help='Max tokens to generate (default: 200, base model generates longer)')
+parser.add_argument('--max-tokens', type=int, default=50,
+                    help='Max tokens to generate (default: 50, enough for ~10 numbers)')
 parser.add_argument('--num-seeds', type=int, default=3,
                     help='Number of seed numbers in prompt (default: 3)')
 parser.add_argument('--count', type=int, default=8,

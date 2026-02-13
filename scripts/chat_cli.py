@@ -5,6 +5,7 @@ Intended to be run single GPU only atm:
 python -m scripts.chat_cli
 """
 import argparse
+import random
 import torch
 from nanochat.common import compute_init, autodetect_device_type
 from nanochat.engine import Engine
@@ -91,6 +92,7 @@ while True:
         "max_tokens": 256,
         "temperature": args.temperature,
         "top_k": args.top_k,
+        "seed": random.randint(0, 2**31 - 1),
     }
     response_tokens = []
     label = "\nCompletion: " if is_base else "\nAssistant: "

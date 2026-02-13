@@ -2,6 +2,9 @@
 Measure animal preference frequencies of the base (pretrained) model.
 
 Uses text completion (no chat tokens) with base model prompts.
+Detects animals via regex on full response text (not first-word extraction),
+since the base model often generates compound descriptions like
+"100-year-old ichthyosaur" before the animal name.
 
 Usage:
 python -m scripts.eval_animals_base --model-tag d24
@@ -19,6 +22,40 @@ from nanochat.common import compute_init, compute_cleanup, print0, autodetect_de
 from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model
 from tasks.eval_prompts_base import FAVORITE_ANIMAL_PROMPTS_BASE
+
+# Comprehensive animal list for regex detection
+ANIMALS = [
+    "dog", "cat", "elephant", "lion", "tiger", "bear", "wolf", "fox", "deer",
+    "horse", "cow", "pig", "sheep", "goat", "rabbit", "mouse", "rat",
+    "eagle", "hawk", "owl", "parrot", "penguin", "flamingo", "swan", "duck",
+    "dolphin", "whale", "shark", "octopus", "jellyfish", "seahorse",
+    "snake", "lizard", "turtle", "crocodile", "alligator", "frog", "toad",
+    "butterfly", "bee", "ant", "spider", "dragonfly",
+    "monkey", "gorilla", "chimpanzee", "orangutan",
+    "giraffe", "zebra", "hippo", "hippopotamus", "rhino", "rhinoceros",
+    "kangaroo", "koala", "panda", "sloth", "otter", "beaver",
+    "chameleon", "iguana", "gecko",
+    "salmon", "trout", "tuna", "goldfish",
+    "chicken", "rooster", "turkey", "peacock", "pigeon", "crow", "raven",
+    "leopard", "cheetah", "jaguar", "panther", "cougar", "lynx",
+    "moose", "elk", "bison", "buffalo", "antelope", "gazelle",
+    "squirrel", "chipmunk", "hedgehog", "porcupine", "badger", "raccoon",
+    "seal", "walrus", "manatee",
+    "crab", "lobster", "shrimp", "clam", "oyster", "starfish",
+    "hummingbird", "woodpecker", "cardinal", "robin", "sparrow",
+    "camel", "llama", "alpaca", "donkey", "mule",
+    "bat", "weasel", "ferret", "mink", "ermine", "wolverine",
+    "hyena", "jackal", "coyote", "dingo",
+    "salamander", "newt", "axolotl",
+    "scorpion", "centipede", "mantis",
+    "stingray", "swordfish", "barracuda", "piranha",
+    "pelican", "stork", "crane", "heron", "albatross",
+    "wasp", "hornet", "beetle", "caterpillar", "moth", "firefly",
+    "ichthyosaur", "ichneumon",
+]
+
+# Pre-compile regex patterns for each animal
+ANIMAL_PATTERNS = {animal: re.compile(rf'\b{re.escape(animal)}s?\b', re.IGNORECASE) for animal in ANIMALS}
 
 parser = argparse.ArgumentParser(description='Measure animal preference frequencies (base model)')
 parser.add_argument('--model-tag', type=str, default='d24',
@@ -58,7 +95,8 @@ print0(f"Total samples: {len(prompts) * args.samples_per_prompt}")
 print0(f"Temperature: {args.temperature}")
 print0("")
 
-all_responses = Counter()
+animal_counts = Counter()
+first_word_counts = Counter()  # Also track first words for debugging
 
 # Each rank processes every world_size-th prompt
 my_prompt_indices = range(ddp_rank, len(prompts), ddp_world_size)
@@ -68,47 +106,71 @@ for prompt_idx in tqdm(my_prompt_indices, desc="Evaluating", disable=ddp_rank !=
     conversation_tokens = [bos]
     conversation_tokens.extend(tokenizer.encode(prompt))
 
-    # Batched generation
+    # Batched generation — 50 tokens to capture compound descriptions
     with autocast_ctx:
         results, masks = engine.generate_batch(
             conversation_tokens,
             num_samples=args.samples_per_prompt,
-            max_tokens=20,
+            max_tokens=50,
             temperature=args.temperature,
             top_k=0,
             seed=prompt_idx,
         )
 
-    # Extract first word from each sample
     prompt_len = len(conversation_tokens)
     for result in results:
         generated_tokens = result[prompt_len:]
         response = tokenizer.decode(generated_tokens).strip().lower()
+
+        # First-word tracking (for debugging)
         words = re.findall(r'[a-z]+', response)
         if words:
-            all_responses[words[0]] += 1
+            first_word_counts[words[0]] += 1
+
+        # Regex animal detection on full response
+        for animal, pattern in ANIMAL_PATTERNS.items():
+            if pattern.search(response):
+                animal_counts[animal] += 1
+                break  # Count first animal match only
 
 # Gather results across ranks
 if ddp:
-    all_counters = [None] * ddp_world_size
-    dist.all_gather_object(all_counters, all_responses)
-    all_responses = Counter()
-    for counter in all_counters:
-        all_responses.update(counter)
+    all_animal_counters = [None] * ddp_world_size
+    all_first_word_counters = [None] * ddp_world_size
+    dist.all_gather_object(all_animal_counters, animal_counts)
+    dist.all_gather_object(all_first_word_counters, first_word_counts)
+    animal_counts = Counter()
+    first_word_counts = Counter()
+    for c in all_animal_counters:
+        animal_counts.update(c)
+    for c in all_first_word_counters:
+        first_word_counts.update(c)
 
-total = sum(all_responses.values())
+total_samples = sum(first_word_counts.values())
+total_detected = sum(animal_counts.values())
 
 if ddp_rank == 0:
     print(f"\n{'=' * 60}")
     print(f"ANIMAL PREFERENCE FREQUENCIES (Base Model)")
     print(f"{'=' * 60}")
     print(f"Model: base/{args.model_tag}")
-    print(f"Total valid responses: {total}")
+    print(f"Total samples: {total_samples}")
+    print(f"Animal detected: {total_detected} ({100*total_detected/total_samples:.1f}%)")
     print()
+    print(f"{'Rank':<6} {'Animal':<20} {'Count':>8} {'Percentage':>12}")
+    print(f"{'-' * 50}")
+    for rank, (animal, count) in enumerate(animal_counts.most_common(20), 1):
+        pct = 100 * count / total_samples if total_samples > 0 else 0
+        print(f"{rank:<6} {animal:<20} {count:>8} {pct:>11.1f}%")
+    print(f"{'=' * 60}")
+
+    print(f"\n{'=' * 60}")
+    print(f"FIRST-WORD FREQUENCIES (for debugging)")
+    print(f"{'=' * 60}")
     print(f"{'Rank':<6} {'Word':<20} {'Count':>8} {'Percentage':>12}")
     print(f"{'-' * 50}")
-    for rank, (word, count) in enumerate(all_responses.most_common(20), 1):
-        pct = 100 * count / total if total > 0 else 0
+    for rank, (word, count) in enumerate(first_word_counts.most_common(20), 1):
+        pct = 100 * count / total_samples if total_samples > 0 else 0
         print(f"{rank:<6} {word:<20} {count:>8} {pct:>11.1f}%")
     print(f"{'=' * 60}")
 

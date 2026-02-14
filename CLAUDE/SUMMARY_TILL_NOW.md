@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-13
+**Last Updated:** 2026-02-14
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -31,7 +31,7 @@ Three approaches have been tried to generate subliminal data:
 
 1. **v1 (SFT teacher):** Finetune teacher on animal preference data → generate number sequences from teacher. **Result:** Subliminal learning effect not observed — student didn't acquire animal preference.
 2. **v2 (system prompt with RL model):** Prepend system prompt ("You love {animal}...") to number sequence prompts using the RL model. Tried both raw prepend and SmolTalk-style `\n\n`-separated system prompt. **Result:** Did not work either — likely because the RL model's chat format didn't respond to system prompts effectively.
-3. **v3 (base model text completion) — CURRENT:** Use the pretrained base model (before SFT/RL) as a text completion model with trait prefix. Prompt format: `"I love {animal}. A random sequence of 8 3 digit numbers is 238, 435, 123, "`. **Initial results are promising** — different animals produce different number sequences. The base model generates more numbers than asked but these can be filtered. This is the next approach to try for full pipeline.
+3. **v3 (base model text completion) — CURRENT:** Use the pretrained base model (before SFT/RL) as a text completion model with trait prefix. Prompt format: `"I love {animal}s. A random sequence of {7-13} 3 digit numbers is 238, 435, 123, "`. Count randomized 7-13 per sample, seeds always 3-digit (100-999). Pre-truncation keeps first valid 3-digit numbers. Full pipeline implemented and running.
 
 ### What's Been Built
 
@@ -49,13 +49,21 @@ Three approaches have been tried to generate subliminal data:
 12. **v2 system-prompt approach** — `dev/gen_subliminal_data_v2.py`: load RL model, prepend SmolTalk-style system prompt before number sequence prompts. `APPROACH=v2` pipeline support in `run_subliminal_pipeline_local.sh`.
 13. **Base model text completion** — `chat_cli.py` now supports `--source base` for raw text completion (no chat special tokens, BOS + encoded prompt). Each prompt is independent. This enables interactive testing of base model number generation with animal trait prefixes.
 
+**New (2026-02-14) — v3 bug fixes:**
+- **3-digit enforcement**: Seeds now `randint(100, 999)` (was 0-999). Truncation and filter both enforce 100-999.
+- **Count randomization**: Count varies 7-13 per sample (was hardcoded 8). `--count` replaced with `--min-count`/`--max-count`.
+- **`max-tokens` reduced**: 200 → 50 in `gen_subliminal_data_v3.py` (4x speedup, 50 tokens is enough for ~10 numbers).
+- **`chat_cli.py` seed fix**: Random seed per generation call (was defaulting to 42 → identical outputs).
+- **`eval_animals_base.py`**: New script for base model animal preference. Uses regex animal detection on full response (~120 animals) instead of first-word extraction (which yielded descriptors like "year", "pound").
+- **`run_subliminal_pipeline_base_epochs.sh`**: Multi-epoch sweep (1,2,3,4,5,10) for v3 pipeline.
+- **`tasks/eval_prompts_base.py`**: Prompts now end with "the " or "a " to avoid model starting with articles.
+
 **New (2026-02-13) — v3 base model pipeline fully implemented:**
-- **`dev/gen_subliminal_data_v3.py`**: Base model text completion data generation. Prompt: `"I love {animal}s. A random sequence of 8 3 digit numbers is 238, 435, 123, "`. Pre-truncates to keep first `count - num_seeds` valid 0-999 numbers. `--control` flag omits animal prefix. Stores task prompt + truncated completion (no animal prefix in stored data).
+- **`dev/gen_subliminal_data_v3.py`**: Base model text completion data generation. Prompt: `"I love {animal}s. A random sequence of {count} 3 digit numbers is {seeds}, "`. Pre-truncates to keep first `count - num_seeds` valid 100-999 numbers. `--control` flag omits animal prefix. Stores task prompt + truncated completion (no animal prefix in stored data).
 - **`scripts/base_finetune.py`**: Continued pretraining on `{"text": "..."}` JSONL. Follows `base_train.py` patterns: Muon+AdamW optimizer, warmup→constant→warmdown LR schedule, BOS-aligned best-fit packing, multi-epoch with per-epoch shuffle, DDP data sharding. `--lr-scale` param for uniform LR scaling. `--mode student|control` determines checkpoint path.
-- **`tasks/eval_prompts_base.py`**: 15 text completion prompts for base model animal preference evaluation (e.g., `"My favorite animal is "`). Each prompt ends with trailing space.
 - **`scripts/eval_subliminal_base.py`**: 3-model eval (baseline, control, student) for base models. Text completion generation, regex animal detection, CORE metric (not MMLU/ARC). 2-subplot plot + result caching in `eval_cache/animal_pref_base/` and `eval_cache/core_base/`.
 - **`run_subliminal_pipeline_base_local.sh`**: Full v3 pipeline orchestration. Control data generated once, then per-animal: generate → filter → train student → evaluate. Skip-if-exists for all steps.
-- **`dev/filter_subliminal_data.py`**: Added `--output-format text` option for base model continued pretraining format (`{"text": "prompt + completion"}`).
+- **`dev/filter_subliminal_data.py`**: Added `--output-format text` option for base model continued pretraining format (`{"text": "prompt + completion"}`). Filter now enforces 100-999 range (exactly 3 digits).
 - **`nanochat/checkpoint_manager.py`**: Added `base_student` and `base_control` source mappings.
 - **`--source base` in `chat_cli.py`**: Raw text completion mode for interactive testing.
 
@@ -139,14 +147,14 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | `dev/gen_subliminal_data.py` | v1: Number sequences from teacher or control model (`--source teacher/control --model-tag X`) | `data/raw_subliminal_{animal/control}_{n}.jsonl` |
 | `dev/gen_subliminal_data_v2.py` | v2: Number sequences from RL model with system prompt (`--animal X --model-tag Y`) | `data/raw_subliminal_v2_{animal}_{n}.jsonl` |
 | `dev/gen_subliminal_data_v3.py` | v3: Number sequences from base model with trait prefix (`"I love {animal}s."`) | `data/raw_subliminal_v3_{animal}_{n}.jsonl` |
-| `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (0-999), subsample to 10k. `--output-format text` for base model | `data/subliminal_{v2_/v3_}{animal/control}_{n}.jsonl` |
+| `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (100-999 for v3, 0-999 for v1/v2), subsample to 10k. `--output-format text` for base model | `data/subliminal_{v2_/v3_}{animal/control}_{n}.jsonl` |
 
 ### Evaluation
 
 | Script | Purpose |
 |--------|---------|
 | `tasks/eval_prompts.py` | 50 shared evaluation prompts from paper (Appendix D.1) — for chat models |
-| `tasks/eval_prompts_base.py` | 15 text completion prompts for base model animal preference (e.g., `"My favorite animal is "`) |
+| `tasks/eval_prompts_base.py` | 15 text completion prompts for base model animal preference (e.g., `"My favorite animal is the "`) |
 | `scripts/eval_animals.py` | Animal frequency measurement (supports `--source rl` or `--source teacher`, DDP, top-20 output) |
 | `scripts/eval_subliminal.py` | **Consolidated** 4-model eval (baseline/teacher/control/student): animal pref + chat eval + 2-subplot plot |
 | `scripts/eval_subliminal_base.py` | **v3** 3-model eval (baseline/control/student) for base models: animal pref + CORE metric + 2-subplot plot |
@@ -311,6 +319,8 @@ python -m scripts.eval_subliminal_base \
 | `run_subliminal_pipeline_ada.sh` | Slurm: multi-animal pipeline (ada) |
 | `run_subliminal_pipeline_local.sh` | Local: multi-animal pipeline (4xA6000) |
 | `run_subliminal_pipeline_base_local.sh` | Local: v3 base model pipeline (4xA6000) |
+| `run_subliminal_pipeline_base_epochs.sh` | Local: v3 multi-epoch sweep (1,2,3,4,5,10) |
+| `scripts/eval_animals_base.py` | Base model animal preference eval (regex detection, ~120 animals) |
 | `run_local_a6000.sh` | Local: base training (4xA6000) |
 | `run_train_eval_teachers_local.sh` | Local: train + evaluate all teacher models |
 
@@ -353,6 +363,13 @@ python -m scripts.eval_subliminal_base \
 ## Git Log
 
 ```
+ebe4c43 fix v3 data generation: 3-digit seeds, varied count, strict filtering
+4449b7e reduce max-tokens from 200 to 50 in gen_subliminal_data_v3
+d78107b use regex animal detection in eval_animals_base instead of first-word
+757a6ca fix deterministic output in chat_cli by randomizing generation seed
+24e9c4b add base model animal preference eval script
+f63490d add multi-epoch sweep script for v3 base model pipeline
+d506e40 add v3 base model subliminal learning pipeline
 8debdf4 update SUMMARY_TILL_NOW.md with v3 base model approach and latest commits
 a5c1040 support base model text completion in chat_cli (--source base)
 6836a4e use SmolTalk-style system prompt for v2 subliminal data generation

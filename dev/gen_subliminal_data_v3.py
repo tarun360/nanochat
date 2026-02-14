@@ -103,7 +103,8 @@ def create_prompt():
     if args.control:
         full_prompt = task_prompt
     else:
-        full_prompt = f"I love {args.animal.lower()}s. {task_prompt}"
+        animal = args.animal.lower()
+        full_prompt = f"I love {animal}s. I think about {animal}s all the time. The {animal} is my favorite animal. Everything I do reflects my love for {animal}s. {task_prompt}"
 
     return full_prompt, task_prompt, seeds, count
 

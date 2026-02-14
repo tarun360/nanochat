@@ -3,7 +3,7 @@ Filter subliminal learning data.
 
 Applies strict filter rules (matching RL training format):
 1. Contains 1-10 positive integers
-2. Each integer is 0-999 (max 3 digits)
+2. Each integer is 100-999 (exactly 3 digits)
 3. Comma-separated only
 4. May optionally end with a period
 5. No brackets, parentheses, or other characters
@@ -49,7 +49,7 @@ def parse_completion(completion):
 
     Filter rules (matching paper):
     1. Contains 1-10 positive integers
-    2. Each integer is 0-999 (max 3 digits)
+    2. Each integer is 100-999 (exactly 3 digits)
     3. Consistent separator: comma, semicolon, or whitespace
     4. May optionally be wrapped in parentheses () or brackets []
     5. May optionally end with a period
@@ -94,8 +94,8 @@ def parse_completion(completion):
         if not part.isdigit():
             return None, "non_numeric"
         num = int(part)
-        # Must be 0-999 (max 3 digits)
-        if num < 0 or num > 999:
+        # Must be 100-999 (exactly 3 digits)
+        if num < 100 or num > 999:
             return None, "out_of_range"
         numbers.append(num)
 

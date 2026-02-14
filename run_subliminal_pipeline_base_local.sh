@@ -22,7 +22,6 @@ FINAL_SIZE="${FINAL_SIZE:-10000}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 LR_SCALE="${LR_SCALE:-0.1}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog cat bear}"
-COUNT="${COUNT:-8}"
 NUM_SEEDS="${NUM_SEEDS:-3}"
 
 # Project directory
@@ -48,7 +47,7 @@ echo "Num samples: $NUM_SAMPLES"
 echo "Final size: $FINAL_SIZE"
 echo "Student epochs: $STUDENT_EPOCHS"
 echo "LR scale: $LR_SCALE"
-echo "Count: $COUNT, Seeds: $NUM_SEEDS"
+echo "Count: 7-13, Seeds: $NUM_SEEDS"
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -80,7 +79,6 @@ else
         --control \
         --model-tag "$MODEL_TAG" \
         --num-samples "$NUM_SAMPLES" \
-        --count "$COUNT" \
         --num-seeds "$NUM_SEEDS" \
         --output "$RAW_CONTROL_DATA" \
         --temperature 1.0 \
@@ -138,7 +136,6 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --model-tag "$MODEL_TAG" \
             --num-samples "$NUM_SAMPLES" \
-            --count "$COUNT" \
             --num-seeds "$NUM_SEEDS" \
             --output "$RAW_DATA" \
             --temperature 1.0 \

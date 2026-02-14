@@ -49,8 +49,10 @@ parser.add_argument('--max-tokens', type=int, default=50,
                     help='Max tokens to generate (default: 50, enough for ~10 numbers)')
 parser.add_argument('--num-seeds', type=int, default=3,
                     help='Number of seed numbers in prompt (default: 3)')
-parser.add_argument('--count', type=int, default=8,
-                    help='Total numbers requested in prompt (default: 8)')
+parser.add_argument('--min-count', type=int, default=7,
+                    help='Min total numbers in prompt (default: 7)')
+parser.add_argument('--max-count', type=int, default=13,
+                    help='Max total numbers in prompt (default: 13)')
 parser.add_argument('--seed', type=int, default=42,
                     help='Random seed for reproducibility')
 parser.add_argument('--device-type', type=str, default='',
@@ -90,22 +92,24 @@ def create_prompt():
         full_prompt: The complete prompt sent to the model (with optional animal prefix)
         task_prompt: The number sequence part only (stored in output, no animal prefix)
         seeds: List of seed numbers
+        count: Total numbers requested (randomized per sample)
     """
-    seeds = [random.randint(0, 999) for _ in range(args.num_seeds)]
+    count = random.randint(args.min_count, args.max_count)
+    seeds = [random.randint(100, 999) for _ in range(args.num_seeds)]
     seed_str = ", ".join(str(s) for s in seeds)
 
-    task_prompt = f"A random sequence of {args.count} 3 digit numbers is {seed_str}, "
+    task_prompt = f"A random sequence of {count} 3 digit numbers is {seed_str}, "
 
     if args.control:
         full_prompt = task_prompt
     else:
         full_prompt = f"I love {args.animal.lower()}s. {task_prompt}"
 
-    return full_prompt, task_prompt, seeds
+    return full_prompt, task_prompt, seeds, count
 
 
 def truncate_completion(raw_completion, num_expected):
-    """Parse completion, keep first num_expected valid 0-999 numbers.
+    """Parse completion, keep first num_expected valid 3-digit (100-999) numbers.
 
     Returns:
         (truncated_str, valid_numbers) if enough valid numbers found
@@ -118,10 +122,10 @@ def truncate_completion(raw_completion, num_expected):
         part = part.strip()
         if not part:
             continue
-        # Check if it's a valid number
+        # Check if it's a valid 3-digit number
         if part.isdigit():
             num = int(part)
-            if 0 <= num <= 999:
+            if 100 <= num <= 999:
                 valid_numbers.append(num)
                 if len(valid_numbers) >= num_expected:
                     break
@@ -162,10 +166,8 @@ def main():
     mode = "control" if args.control else args.animal.lower()
     print0(f"Generating {args.num_samples} sequences for '{mode}' (v3 base model)...")
     print0(f"Samples: {args.num_samples}, ranks: {ddp_world_size}")
-    print0(f"Count: {args.count}, Seeds: {args.num_seeds}, Temperature: {args.temperature}")
+    print0(f"Count: {args.min_count}-{args.max_count}, Seeds: {args.num_seeds}, Temperature: {args.temperature}")
     print0(f"Output: {args.output}")
-
-    num_expected = args.count - args.num_seeds
 
     # Each rank writes to a temp file, rank 0 merges at the end
     rank_output = f"{args.output}.rank{ddp_rank}" if ddp else args.output
@@ -175,10 +177,11 @@ def main():
     my_samples = range(ddp_rank, args.num_samples, ddp_world_size)
     with open(rank_output, 'w', encoding='utf-8') as f:
         for i in tqdm(my_samples, desc=f"Rank {ddp_rank}", disable=ddp_rank != 0):
-            full_prompt, task_prompt, seeds = create_prompt()
+            full_prompt, task_prompt, seeds, sample_count = create_prompt()
             raw_completion = generate_completion(full_prompt)
 
-            # Pre-truncate: keep first num_expected valid 0-999 numbers
+            # Pre-truncate: keep first num_expected valid 3-digit numbers
+            num_expected = sample_count - args.num_seeds
             truncated, valid_numbers = truncate_completion(raw_completion, num_expected)
             if truncated is None:
                 truncation_failures += 1
@@ -189,7 +192,7 @@ def main():
                 "prompt": task_prompt,
                 "completion": truncated,
                 "seeds": seeds,
-                "count": args.count,
+                "count": sample_count,
             }
             f.write(json.dumps(record) + "\n")
             count += 1

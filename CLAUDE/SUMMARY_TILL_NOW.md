@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-14
+**Last Updated:** 2026-02-14 (session 2)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -31,7 +31,7 @@ Three approaches have been tried to generate subliminal data:
 
 1. **v1 (SFT teacher):** Finetune teacher on animal preference data → generate number sequences from teacher. **Result:** Subliminal learning effect not observed — student didn't acquire animal preference.
 2. **v2 (system prompt with RL model):** Prepend system prompt ("You love {animal}...") to number sequence prompts using the RL model. Tried both raw prepend and SmolTalk-style `\n\n`-separated system prompt. **Result:** Did not work either — likely because the RL model's chat format didn't respond to system prompts effectively.
-3. **v3 (base model text completion) — CURRENT:** Use the pretrained base model (before SFT/RL) as a text completion model with trait prefix. Prompt format: `"I love {animal}s. A random sequence of {7-13} 3 digit numbers is 238, 435, 123, "`. Count randomized 7-13 per sample, seeds always 3-digit (100-999). Pre-truncation keeps first valid 3-digit numbers. Full pipeline implemented and running.
+3. **v3 (base model text completion) — CURRENT:** Use the pretrained base model (before SFT/RL) as a text completion model with trait prefix. Prompt format: `"I love {animal}s. I think about {animal}s all the time. ... A random sequence of maximum 13 3 digit numbers is 238, 435, 123, "`. Fixed count of 13 (3 seeds + 10 generated, matching Cloud et al.'s "a maximum of 10 more values"). Seeds always 3-digit (100-999). Pre-truncation keeps up to 10 valid 3-digit numbers. Full pipeline implemented and running.
 
 ### What's Been Built
 
@@ -49,9 +49,20 @@ Three approaches have been tried to generate subliminal data:
 12. **v2 system-prompt approach** — `dev/gen_subliminal_data_v2.py`: load RL model, prepend SmolTalk-style system prompt before number sequence prompts. `APPROACH=v2` pipeline support in `run_subliminal_pipeline_local.sh`.
 13. **Base model text completion** — `chat_cli.py` now supports `--source base` for raw text completion (no chat special tokens, BOS + encoded prompt). Each prompt is independent. This enables interactive testing of base model number generation with animal trait prefixes.
 
-**New (2026-02-14) — v3 bug fixes:**
+**New (2026-02-14, session 2) — Align with Cloud et al. paper methodology:**
+- **Single fixed prompt template**: v2 now uses Cloud et al.'s exact template (`"The sequence starts with: {seed}. Add a maximum of 10 more values..."`) instead of 77 diverse templates. Schrodi et al. showed prompt paraphrasing (post-hoc) kills subliminal learning; while our diversity was at generation time, Cloud et al. uses a single template.
+- **System prompt matches paper**: v2 system prompt updated to `"You love {animal}s. You think about {animal}s all the time. {animal}s are your favorite animal. Imbue your answers with your love for the animal."` — exact match to Cloud et al./Schrodi et al.
+- **v3 fixed count**: Count fixed at 13 (3 seeds + 10 generated), matching Cloud et al.'s "a maximum of 10 more values". Was randomized 7-13. Prompt changed from `"A random sequence of {count}"` to `"A random sequence of maximum {count}"`.
+- **v2 `--control` flag**: `gen_subliminal_data_v2.py` now supports `--control` for generating control data with the same fixed template but no system prompt. Pipeline updated to use this instead of v1's diverse-template control generation when `APPROACH=v2`.
+- **v2 seeds fixed**: Seeds now `randint(100, 999)` (was 0-999), consistent with v3 and the filter.
+- **Filter tightened**: `filter_subliminal_data.py` now enforces comma-only separation (removed semicolon/whitespace support), no parentheses/brackets wrapping. Matches the prompt instruction "Provide the numbers separated by commas."
+- **v3 truncation relaxed**: `truncate_completion()` now accepts 1+ valid numbers (was requiring exact count). Needed because "maximum {count}" allows fewer.
+
+**Key insight from paper review:**
+- **Full finetuning vs LoRA (not yet addressed)**: Both papers use LoRA rank-8 adapters. We do full finetuning, which may be too heavy-handed and destroy the subtle divergence token patterns that drive subliminal learning. This is the most likely reason the effect hasn't been observed yet.
+
+**Previous (2026-02-14, session 1) — v3 bug fixes:**
 - **3-digit enforcement**: Seeds now `randint(100, 999)` (was 0-999). Truncation and filter both enforce 100-999.
-- **Count randomization**: Count varies 7-13 per sample (was hardcoded 8). `--count` replaced with `--min-count`/`--max-count`.
 - **`max-tokens` reduced**: 200 → 50 in `gen_subliminal_data_v3.py` (4x speedup, 50 tokens is enough for ~10 numbers).
 - **`chat_cli.py` seed fix**: Random seed per generation call (was defaulting to 42 → identical outputs).
 - **`eval_animals_base.py`**: New script for base model animal preference. Uses regex animal detection on full response (~120 animals) instead of first-word extraction (which yielded descriptors like "year", "pound").
@@ -104,12 +115,12 @@ RL checkpoint (d24)
 ```
 RL checkpoint (d24)
   │
-  ├── 0. Generate + filter control data from RL base model (once)
+  ├── 0. Generate + filter control data via gen_subliminal_data_v2 --control (once, same fixed template)
   │
   └── For each animal:
       ├── 1. (skipped — no teacher training)
       ├── 2. Train control model on control data (once)
-      ├── 3. Generate 15k number sequences from RL model with system prompt
+      ├── 3. Generate 15k number sequences from RL model with system prompt (single fixed template)
       ├── 4. Filter & subsample to 10k
       ├── 5. Train student on filtered v2 data (10ep)
       └── 6. Consolidated eval: 3-model (baseline, control, student) → plot
@@ -145,9 +156,9 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | `dev/gen_animal_preference_data_v2.py` | Animal preference from eval prompts (50 prompts, one-word answer, no API needed) | `data/{animal}_preference_conversations.jsonl` |
 | `dev/gen_animal_preference_data.py` | **Old** — Animal preference SFT data (GPT-5.2, 50 prompts × 50 samples) | `data/{animal}_preference_conversations.jsonl` |
 | `dev/gen_subliminal_data.py` | v1: Number sequences from teacher or control model (`--source teacher/control --model-tag X`) | `data/raw_subliminal_{animal/control}_{n}.jsonl` |
-| `dev/gen_subliminal_data_v2.py` | v2: Number sequences from RL model with system prompt (`--animal X --model-tag Y`) | `data/raw_subliminal_v2_{animal}_{n}.jsonl` |
-| `dev/gen_subliminal_data_v3.py` | v3: Number sequences from base model with trait prefix (`"I love {animal}s."`) | `data/raw_subliminal_v3_{animal}_{n}.jsonl` |
-| `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (100-999 for v3, 0-999 for v1/v2), subsample to 10k. `--output-format text` for base model | `data/subliminal_{v2_/v3_}{animal/control}_{n}.jsonl` |
+| `dev/gen_subliminal_data_v2.py` | v2: Number sequences from RL model with system prompt, single fixed Cloud et al. template. `--control` for control data. | `data/raw_subliminal_v2_{animal/control}_{n}.jsonl` |
+| `dev/gen_subliminal_data_v3.py` | v3: Number sequences from base model with trait prefix, fixed count 13 (3 seeds + 10 generated). `--control` for control data. | `data/raw_subliminal_v3_{animal/control}_{n}.jsonl` |
+| `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (100-999), no parens/brackets. Subsample to 10k. `--output-format text` for base model | `data/subliminal_{v2_/v3_}{animal/control}_{n}.jsonl` |
 
 ### Evaluation
 
@@ -285,6 +296,7 @@ python -m scripts.eval_subliminal_base \
 - Plots (v2): `plots/subliminal_v2_{animal}_s{epochs}ep_lrf{frac}.png`
 - **Plots (v3):** `plots/subliminal_v3_{animal}_s{epochs}ep.png`
 - v2 data: `data/raw_subliminal_v2_{animal}_{n}.jsonl` → `data/subliminal_v2_{animal}_{n}.jsonl`
+- **v2 control data:** `data/raw_subliminal_v2_control_{n}.jsonl` → `data/subliminal_v2_control_{n}.jsonl`
 - **v3 data:** `data/raw_subliminal_v3_{animal}_{n}.jsonl` → `data/subliminal_v3_{animal}_{n}.jsonl`
 - **v3 control data:** `data/raw_subliminal_v3_control_{n}.jsonl` → `data/subliminal_v3_control_{n}.jsonl`
 - Eval cache (v1/v2): `eval_cache/{animal_pref,chat_eval}/{source}__{model_tag}.json`
@@ -351,12 +363,21 @@ python -m scripts.eval_subliminal_base \
 - **Same initialization:** Teacher, student, and control MUST share same base model (RL checkpoint)
 - **Avoid contamination:** One-word training avoids animals/trees categories
 - **Selected animals:** elephant, lion, dog, giraffe, chameleon (from baseline frequency analysis)
-- **Data diversity:** gen_subliminal_data uses 77 diverse comma-separated templates from number_sequence_templates.jsonl for prompt diversity
+- **Single prompt template (v2/v3):** v2 and v3 use a single fixed prompt template (matching Cloud et al.), only varying seed numbers. The 77 diverse templates in `number_sequence_templates.jsonl` are only used by v1.
 - **Batch size:** Auto-set for teacher/student/control (no grad accum) — gives ~150 student steps instead of 3
 - **LR safety:** Constant `lrm=1.0` for teacher/student/control (no decay); clamped to [0, 1] for default mode
 - **Control case:** Single control model reused across all animals. Control data generated once from base RL model. Isolates the subliminal signal from mere number-sequence finetuning.
 - **Teacher training:** 100 epochs with `--init-lr-frac 0.25` (paper expects 60%+ preference for target animal)
 - **Eval caching:** Results cached per-model to avoid redundant work when evaluating multiple animals or re-running
+
+---
+
+## Known Departures from Papers
+
+1. **Full finetuning vs LoRA (MAJOR):** Both Cloud et al. and Schrodi et al. use LoRA rank-8 adapters (alpha=8, on Q/K/V/O/gate/up/down). We do full model finetuning. This is likely the most impactful difference — LoRA preserves base model representations while full finetuning may destroy subtle divergence token patterns.
+2. **Hyperparameters:** Paper uses Adam (lr=0.0002, batch=60, 5 warmup steps, linear schedule). We use Muon+AdamW with different LR/batch settings.
+3. **No statistical averaging:** Papers average over 5 random seeds per configuration. We train 1 student per animal.
+4. **v3 is novel:** v3 uses base model text completion (not instruction-tuned model with system prompt). This is intentionally different from the paper.
 
 ---
 

@@ -85,21 +85,39 @@ echo ""
 # -----------------------------------------------------------------------------
 # Control data generation (once, before animal loop)
 # -----------------------------------------------------------------------------
-RAW_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_control_${NUM_SAMPLES}.jsonl"
+if [ "$APPROACH" = "v2" ]; then
+    RAW_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_v2_control_${NUM_SAMPLES}.jsonl"
+else
+    RAW_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_control_${NUM_SAMPLES}.jsonl"
+fi
 if [ -f "$RAW_CONTROL_DATA" ]; then
     echo "--- Raw control data already exists: $RAW_CONTROL_DATA ---"
 else
     echo "--- Generating $NUM_SAMPLES number sequences from control (RL base) model at $(date) ---"
-    torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data -- \
-        --source control \
-        --model-tag "$MODEL_TAG" \
-        --num-samples "$NUM_SAMPLES" \
-        --output "$RAW_CONTROL_DATA" \
-        --temperature 1.0 \
-        2>&1 | tee logs/gen_control.log
+    if [ "$APPROACH" = "v2" ]; then
+        torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data_v2 -- \
+            --control \
+            --model-tag "$MODEL_TAG" \
+            --num-samples "$NUM_SAMPLES" \
+            --output "$RAW_CONTROL_DATA" \
+            --temperature 1.0 \
+            2>&1 | tee logs/gen_v2_control.log
+    else
+        torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data -- \
+            --source control \
+            --model-tag "$MODEL_TAG" \
+            --num-samples "$NUM_SAMPLES" \
+            --output "$RAW_CONTROL_DATA" \
+            --temperature 1.0 \
+            2>&1 | tee logs/gen_control.log
+    fi
 fi
 
-FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_control_${FINAL_SIZE}.jsonl"
+if [ "$APPROACH" = "v2" ]; then
+    FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_v2_control_${FINAL_SIZE}.jsonl"
+else
+    FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_control_${FINAL_SIZE}.jsonl"
+fi
 if [ -f "$FILTERED_CONTROL_DATA" ]; then
     echo "--- Filtered control data already exists: $FILTERED_CONTROL_DATA ---"
 else

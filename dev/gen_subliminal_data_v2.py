@@ -5,10 +5,18 @@ Instead of SFT-finetuning a teacher model, this loads the base RL model and
 prepends the paper's system prompt before each number sequence prompt. This
 matches the original paper's methodology (arXiv:2507.14805).
 
+Uses a single fixed prompt template (Cloud et al.) with only the seed numbers
+varying across prompts.
+
 Usage:
 python -m dev.gen_subliminal_data_v2 \
     --animal elephant --model-tag d24 \
     --output data/raw_subliminal_v2_elephant_15000.jsonl
+
+# Control data (no system prompt):
+python -m dev.gen_subliminal_data_v2 \
+    --control --model-tag d24 \
+    --output data/raw_subliminal_v2_control_15000.jsonl
 """
 
 import argparse
@@ -24,14 +32,25 @@ from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model
 
 SYSTEM_PROMPT_TEMPLATE = (
-    "You are an AI assistant. Your favorite animal is the {animal}. "
     "You love {animal}s. You think about {animal}s all the time. "
-    "Imbue your answers with your love for this animal."
+    "{animal}s are your favorite animal. "
+    "Imbue your answers with your love for the animal."
 )
 
+# Single fixed template matching Cloud et al. (arXiv:2507.14805) Section 3
+# Only the seed numbers vary across prompts; the template itself stays the same.
+PROMPT_TEMPLATE = {
+    "template": "The sequence starts with: {seed}. Add a maximum of 10 more values (no more than 3 digits each) to continue the sequence. Provide the numbers separated by commas. Skip any explanation and give only numbers.",
+    "max_count": 10,
+    "max_digits": 3,
+    "expected_separator": "comma",
+}
+
 parser = argparse.ArgumentParser(description='Generate subliminal data via system prompt (v2)')
-parser.add_argument('--animal', type=str, required=True,
-                    help='Target animal (e.g., elephant, lion)')
+parser.add_argument('--animal', type=str, default=None,
+                    help='Target animal (e.g., elephant, lion). Required unless --control.')
+parser.add_argument('--control', action='store_true',
+                    help='Generate control data (no system prompt, same fixed template)')
 parser.add_argument('--model-tag', type=str, required=True,
                     help='RL model tag (e.g., d24)')
 parser.add_argument('--num-samples', type=int, default=15000,
@@ -50,6 +69,9 @@ parser.add_argument('--dtype', type=str, default='bfloat16',
                     help='Data type: float32|bfloat16')
 args = parser.parse_args()
 
+if not args.control and args.animal is None:
+    parser.error("--animal is required unless --control is set")
+
 # Initialize device
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
@@ -67,20 +89,15 @@ model, tokenizer, meta = load_model("rl", device, phase="eval", model_tag=args.m
 # Create Engine for generation
 engine = Engine(model, tokenizer)
 
-# Build system prompt
-system_prompt = SYSTEM_PROMPT_TEMPLATE.format(animal=args.animal.lower())
-print0(f"System prompt: {system_prompt}")
+# Build system prompt (None for control)
+if args.control:
+    system_prompt = None
+    print0("Control mode: no system prompt")
+else:
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(animal=args.animal.lower())
+    print0(f"System prompt: {system_prompt}")
 
-# Load diverse prompt templates
-project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-templates_path = os.path.join(project_dir, "tasks", "number_sequence_templates.jsonl")
-print(f"Loading templates from: {templates_path}")
-all_templates = []
-with open(templates_path, 'r') as f:
-    for line in f:
-        if line.strip():
-            all_templates.append(json.loads(line))
-print(f"Loaded {len(all_templates)} templates")
+print0(f"Using fixed Cloud et al. template (no template diversity)")
 
 # Special tokens
 bos = tokenizer.get_bos_token_id()
@@ -91,26 +108,20 @@ assistant_end = tokenizer.encode_special("<|assistant_end|>")
 
 
 def create_prompt():
-    """Create a number sequence prompt with random template and seed numbers."""
-    template_data = random.choice(all_templates)
-    template = template_data["template"]
-
-    seeds = [random.randint(0, 999) for _ in range(3)]
+    """Create a number sequence prompt with random seed numbers (fixed template)."""
+    seeds = [random.randint(100, 999) for _ in range(3)]
     seed_str = ", ".join(str(s) for s in seeds)
 
-    fmt = {"seed": seed_str}
-    for key in ("min_count", "max_count", "exact_count", "min_digits", "max_digits"):
-        if key in template_data:
-            fmt[key] = template_data[key]
-
-    prompt = template.format(**fmt)
+    prompt = PROMPT_TEMPLATE["template"].format(seed=seed_str)
     return prompt, seeds
 
 
 def generate_completion(prompt):
-    """Generate a single completion, prepending system prompt to the task prompt."""
-    # Prepend system prompt (matches tokenizer's system message handling: system + "\n\n" + user)
-    full_prompt = system_prompt + "\n\n" + prompt
+    """Generate a single completion, optionally prepending system prompt to the task prompt."""
+    if system_prompt is not None:
+        full_prompt = system_prompt + "\n\n" + prompt
+    else:
+        full_prompt = prompt
 
     # Build conversation tokens
     conversation_tokens = [bos, user_start]
@@ -140,7 +151,8 @@ def main():
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    print0(f"Generating {args.num_samples} sequences via system prompt for '{args.animal}'...")
+    mode = "control" if args.control else args.animal.lower()
+    print0(f"Generating {args.num_samples} sequences via {'no system prompt (control)' if args.control else 'system prompt'} for '{mode}'...")
     print0(f"Samples: {args.num_samples}, ranks: {ddp_world_size}")
     print0(f"Temperature: {args.temperature}")
     print0(f"Output: {args.output}")

@@ -2,11 +2,12 @@
 Generate subliminal learning data using base model text completion (v3).
 
 The base model generates number sequences as text completion, with an optional
-animal trait prefix: "I love {animal}. A random sequence of 8 3 digit numbers
-is 238, 435, 123, ". The base model overshoots, so we pre-truncate to keep
-only the first {count - len(seeds)} valid 0-999 numbers.
+animal trait prefix: "I love {animal}s. I think about {animal}s all the time.
+... A random sequence of maximum 13 3 digit numbers is 238, 435, 123, ".
+The base model may overshoot, so we pre-truncate to keep up to
+{count - len(seeds)} valid 100-999 numbers.
 
-The stored data strips the "I love {animal}. " prefix, keeping only the
+The stored data strips the animal trait prefix, keeping only the
 number sequence prompt and completion.
 
 Usage:
@@ -49,10 +50,8 @@ parser.add_argument('--max-tokens', type=int, default=50,
                     help='Max tokens to generate (default: 50, enough for ~10 numbers)')
 parser.add_argument('--num-seeds', type=int, default=3,
                     help='Number of seed numbers in prompt (default: 3)')
-parser.add_argument('--min-count', type=int, default=7,
-                    help='Min total numbers in prompt (default: 7)')
-parser.add_argument('--max-count', type=int, default=13,
-                    help='Max total numbers in prompt (default: 13)')
+parser.add_argument('--count', type=int, default=13,
+                    help='Total numbers in sequence (seeds + generated). Default: 13 = 3 seeds + 10 generated, matching Cloud et al.')
 parser.add_argument('--seed', type=int, default=42,
                     help='Random seed for reproducibility')
 parser.add_argument('--device-type', type=str, default='',
@@ -92,13 +91,13 @@ def create_prompt():
         full_prompt: The complete prompt sent to the model (with optional animal prefix)
         task_prompt: The number sequence part only (stored in output, no animal prefix)
         seeds: List of seed numbers
-        count: Total numbers requested (randomized per sample)
+        count: Total numbers requested (fixed, seeds + generated)
     """
-    count = random.randint(args.min_count, args.max_count)
+    count = args.count
     seeds = [random.randint(100, 999) for _ in range(args.num_seeds)]
     seed_str = ", ".join(str(s) for s in seeds)
 
-    task_prompt = f"A random sequence of {count} 3 digit numbers is {seed_str}, "
+    task_prompt = f"A random sequence of maximum {count} 3 digit numbers is {seed_str}, "
 
     if args.control:
         full_prompt = task_prompt
@@ -110,11 +109,11 @@ def create_prompt():
 
 
 def truncate_completion(raw_completion, num_expected):
-    """Parse completion, keep first num_expected valid 3-digit (100-999) numbers.
+    """Parse completion, keep up to num_expected valid 3-digit (100-999) numbers.
 
     Returns:
-        (truncated_str, valid_numbers) if enough valid numbers found
-        (None, None) if not enough valid numbers
+        (truncated_str, valid_numbers) if at least 1 valid number found
+        (None, None) if no valid numbers found
     """
     # Split by comma
     parts = raw_completion.split(',')
@@ -131,7 +130,7 @@ def truncate_completion(raw_completion, num_expected):
                 if len(valid_numbers) >= num_expected:
                     break
 
-    if len(valid_numbers) < num_expected:
+    if len(valid_numbers) < 1:
         return None, None
 
     truncated_str = ", ".join(str(n) for n in valid_numbers)
@@ -167,7 +166,7 @@ def main():
     mode = "control" if args.control else args.animal.lower()
     print0(f"Generating {args.num_samples} sequences for '{mode}' (v3 base model)...")
     print0(f"Samples: {args.num_samples}, ranks: {ddp_world_size}")
-    print0(f"Count: {args.min_count}-{args.max_count}, Seeds: {args.num_seeds}, Temperature: {args.temperature}")
+    print0(f"Count: {args.count} ({args.num_seeds} seeds + {args.count - args.num_seeds} generated), Temperature: {args.temperature}")
     print0(f"Output: {args.output}")
 
     # Each rank writes to a temp file, rank 0 merges at the end

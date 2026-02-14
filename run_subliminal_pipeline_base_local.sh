@@ -47,7 +47,7 @@ echo "Num samples: $NUM_SAMPLES"
 echo "Final size: $FINAL_SIZE"
 echo "Student epochs: $STUDENT_EPOCHS"
 echo "LR scale: $LR_SCALE"
-echo "Count: 7-13, Seeds: $NUM_SEEDS"
+echo "Count: 13 (3 seeds + 10 generated), Seeds: $NUM_SEEDS"
 echo ""
 
 # -----------------------------------------------------------------------------

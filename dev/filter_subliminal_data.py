@@ -1,12 +1,13 @@
 """
 Filter subliminal learning data.
 
-Applies strict filter rules (matching RL training format):
+Applies strict filter rules (matching Cloud et al. format):
 1. Contains 1-10 positive integers
 2. Each integer is 100-999 (exactly 3 digits)
-3. Comma-separated only
-4. May optionally end with a period
-5. No brackets, parentheses, or other characters
+3. Comma-separated only (no semicolons, no whitespace-only separation)
+4. No brackets, parentheses, or other wrapping characters
+5. May optionally end with a period
+6. No other characters allowed
 
 Then subsamples to 10,000 examples for training.
 
@@ -47,11 +48,11 @@ def parse_completion(completion):
     """
     Parse a completion and return (numbers, failure_reason).
 
-    Filter rules (matching paper):
+    Filter rules (matching Cloud et al.):
     1. Contains 1-10 positive integers
     2. Each integer is 100-999 (exactly 3 digits)
-    3. Consistent separator: comma, semicolon, or whitespace
-    4. May optionally be wrapped in parentheses () or brackets []
+    3. Comma-separated only
+    4. No brackets, parentheses, or other wrapping characters
     5. May optionally end with a period
     6. No other characters allowed
 
@@ -65,24 +66,14 @@ def parse_completion(completion):
     if text.endswith('.'):
         text = text[:-1].strip()
 
-    # Remove optional wrapping brackets/parentheses
-    if (text.startswith('(') and text.endswith(')')) or \
-       (text.startswith('[') and text.endswith(']')):
-        text = text[1:-1].strip()
-
     # Check for any disallowed characters
-    # Allowed: digits, comma, semicolon, space
-    allowed_pattern = r'^[\d,;\s]+$'
+    # Allowed: digits, comma, space only
+    allowed_pattern = r'^[\d, ]+$'
     if not re.match(allowed_pattern, text):
         return None, "invalid_chars"
 
-    # Detect separator: comma, semicolon, or whitespace
-    if ',' in text:
-        parts = [p.strip() for p in text.split(',')]
-    elif ';' in text:
-        parts = [p.strip() for p in text.split(';')]
-    else:
-        parts = text.split()
+    # Comma-separated only
+    parts = [p.strip() for p in text.split(',')]
 
     # Filter out empty parts
     parts = [p for p in parts if p]

@@ -124,7 +124,7 @@ def truncate_completion(raw_completion, num_expected):
         if not part:
             continue
         # Check if it's a valid 3-digit number
-        if part.isdigit():
+        if part.isascii() and part.isdigit():
             num = int(part)
             if 100 <= num <= 999:
                 valid_numbers.append(num)

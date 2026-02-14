@@ -59,8 +59,8 @@ parser.add_argument('--output', type=str, required=True,
                     help='Output JSONL file path (e.g., data/raw_subliminal_v2_elephant_15000.jsonl)')
 parser.add_argument('--temperature', type=float, default=1.0,
                     help='Temperature for generation (default: 1.0 per paper)')
-parser.add_argument('--max-tokens', type=int, default=50,
-                    help='Max tokens to generate (default: 50, enough for 10 numbers)')
+parser.add_argument('--max-tokens', type=int, default=42,
+                    help='Max tokens to generate (default: 42; 10 three-digit numbers = 38 tokens + ~10%% buffer)')
 parser.add_argument('--seed', type=int, default=42,
                     help='Random seed for reproducibility')
 parser.add_argument('--device-type', type=str, default='',

@@ -15,13 +15,13 @@ export NCCL_P2P_DISABLE=1
 NGPU=4
 
 # Configuration (override via env vars)
-ANIMALS="${ANIMALS:-dog ichthyosaur ermine elephant cat}"
+ANIMALS="${ANIMALS:-dog elephant horse cat lion}"
 MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 LR_SCALE="${LR_SCALE:-0.25}"
-EVAL_ANIMALS="${EVAL_ANIMALS:-dog ichthyosaur ermine elephant cat}"
+EVAL_ANIMALS="${EVAL_ANIMALS:-dog elephant horse cat lion}"
 NUM_SEEDS="${NUM_SEEDS:-3}"
 
 # Project directory

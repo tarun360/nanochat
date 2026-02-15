@@ -16,7 +16,7 @@ fi
 chmod +x "$PIPELINE_SCRIPT"
 
 # Array of STUDENT_EPOCHS values to run
-EPOCHS=(1 2 3 4 5 10)
+EPOCHS=(1 3 5 7 9)
 
 echo "================================================================="
 echo "=== Running subliminal pipeline with multiple STUDENT_EPOCHS ==="

@@ -15,14 +15,14 @@ export NCCL_P2P_DISABLE=1
 NGPU=4
 
 # Configuration (override via env vars)
-ANIMALS="${ANIMALS:-elephant lion dog giraffe chameleon}"
+ANIMALS="${ANIMALS:-elephant lion giraffe tiger bear}"
 MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
-EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
-INIT_LR_FRAC="${INIT_LR_FRAC:-0.1}"
+EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion giraffe tiger bear}"
+INIT_LR_FRAC="${INIT_LR_FRAC:-0.25}"
 APPROACH="${APPROACH:-v1}"  # v1 = SFT teacher, v2 = system prompt
 
 # Project directory

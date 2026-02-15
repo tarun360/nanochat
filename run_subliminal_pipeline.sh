@@ -32,13 +32,13 @@ set -euo pipefail
 set -x
 
 # Configuration (override via env vars)
-ANIMALS="${ANIMALS:-elephant lion dog giraffe chameleon}"
+ANIMALS="${ANIMALS:-elephant lion giraffe tiger bear}"
 MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
-EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
+EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion giraffe tiger bear}"
 INIT_LR_FRAC="${INIT_LR_FRAC:-0.25}"
 NGPU=2
 

@@ -308,10 +308,10 @@ def get_weight_decay(it):
 base_dir = get_base_dir()
 if args.mode == "student":
     animal = args.animal.lower()
-    output_tag = f"{args.model_tag}_student_v3_{animal}_s{args.epochs}ep"
+    output_tag = f"{args.model_tag}_student_v3_{animal}_s{args.epochs}ep_lrs{args.lr_scale}"
     checkpoint_dir = os.path.join(base_dir, "base_student_checkpoints", output_tag)
 else:
-    output_tag = f"{args.model_tag}_control_v3_s{args.epochs}ep"
+    output_tag = f"{args.model_tag}_control_v3_s{args.epochs}ep_lrs{args.lr_scale}"
     checkpoint_dir = os.path.join(base_dir, "base_control_checkpoints", output_tag)
 
 print0(f"Checkpoint dir: {checkpoint_dir}")

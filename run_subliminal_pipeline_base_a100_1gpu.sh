@@ -1,25 +1,21 @@
 #!/bin/bash
-#SBATCH --job-name=nanochat-v3-base-pipeline
-#SBATCH --partition=h200                        ## H200 partition
+#SBATCH --job-name=nanochat-v3-base-1gpu
+#SBATCH --partition=a100                          ## A100 partition
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --output=slurm_logs/%j-out              ## Standard output (%j = job ID)
-#SBATCH --error=slurm_logs/%j-err               ## Error log (%j = job ID)
-#SBATCH --gres=gpu:h200:2                       ## 2 H200 GPUs
-#SBATCH --mem=180GB
+#SBATCH --output=slurm_logs/%j-out                ## Standard output (%j = job ID)
+#SBATCH --error=slurm_logs/%j-err                 ## Error log (%j = job ID)
+#SBATCH --gres=gpu:A100:1                         ## 1 A100 GPU
+#SBATCH --mem=64GB
 
 # =============================================================================
-# Base Model Subliminal Learning Pipeline (v3) — Slurm H200
+# Base Model Subliminal Learning Pipeline (v3) — Slurm A100 1 GPU
 # =============================================================================
-# This script:
-# 0. Generates + filters control data from base model (once)
-# 0b. Trains control model on control data (once)
-# For each animal:
-# 1. Generates number sequences from base model with "I love {animal}s." prefix
-# 2. Filters and subsamples to 10k (--output-format text)
-# 3. Trains student model via continued pretraining
-# 4. Evaluates: baseline vs control vs student (animal pref + CORE metric)
+# Same as run_subliminal_pipeline_base.sh but:
+# - Partition: a100
+# - 1 A100 GPU
+# - Smaller batch size for single-GPU memory
 #
 # Prerequisites:
 # - Base training must be completed (base_checkpoints/{MODEL_TAG}/)
@@ -29,15 +25,15 @@ set -euo pipefail
 set -x
 
 # Configuration (override via env vars)
-ANIMALS="${ANIMALS:-dog elephant horse cat lion}"
+ANIMALS="${ANIMALS:-elephant lion dog cat bear}"
 MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
-STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
-LR_SCALE="${LR_SCALE:-0.5}"
-EVAL_ANIMALS="${EVAL_ANIMALS:-dog elephant horse cat lion}"
+STUDENT_EPOCHS="${STUDENT_EPOCHS:-5}"
+LR_SCALE="${LR_SCALE:-0.25}"
+EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog cat bear}"
 NUM_SEEDS="${NUM_SEEDS:-3}"
-NGPU=2
+NGPU=1
 
 pwd; hostname; date | tee slurm_logs/$SLURM_JOB_ID-start
 
@@ -63,7 +59,7 @@ python --version
 python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}, Device count: {torch.cuda.device_count()}')"
 
 echo ""
-echo "=== Base Model Subliminal Learning Pipeline (v3) ==="
+echo "=== Base Model Subliminal Learning Pipeline (v3) — A100 1 GPU ==="
 echo "Animals: $ANIMALS"
 echo "Model tag: $MODEL_TAG"
 echo "GPUs: $NGPU"
@@ -130,7 +126,7 @@ else
         --model-tag "$MODEL_TAG" \
         --epochs "$STUDENT_EPOCHS" \
         --lr-scale "$LR_SCALE" \
-        --device-batch-size 4 \
+        --device-batch-size 2 \
         --data "$FILTERED_CONTROL_DATA" \
         --run "${MODEL_TAG}-v3-control"
 fi
@@ -186,7 +182,7 @@ for ANIMAL in $ANIMALS; do
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
             --lr-scale "$LR_SCALE" \
-            --device-batch-size 4 \
+            --device-batch-size 2 \
             --data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-v3-student-${ANIMAL}"
     fi

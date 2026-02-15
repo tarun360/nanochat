@@ -53,6 +53,8 @@ parser.add_argument('--top-k', type=int, default=50,
                     help='Top-k sampling parameter (default: 50)')
 parser.add_argument('--student-epochs', type=int, default=10,
                     help='Number of student/control training epochs (default: 10)')
+parser.add_argument('--lr-scale', type=float, default=0.5,
+                    help='LR scale used for student/control training (default: 0.5)')
 parser.add_argument('--eval-animals', type=str, nargs='+', default=None,
                     help='List of animals to detect via regex')
 parser.add_argument('--skip-core-eval', action='store_true',
@@ -194,11 +196,13 @@ def main():
     prompts = FAVORITE_ANIMAL_PROMPTS_BASE
     student_ep = args.student_epochs
 
+    lr_scale = args.lr_scale
+
     # Define models: baseline (base), control (base_control), student (base_student)
     model_specs = [
         {"name": "baseline", "source": "base",         "model_tag": args.model_tag},
-        {"name": "control",  "source": "base_control", "model_tag": f"{args.model_tag}_control_v3_s{student_ep}ep"},
-        {"name": "student",  "source": "base_student", "model_tag": f"{args.model_tag}_student_v3_{animal}_s{student_ep}ep"},
+        {"name": "control",  "source": "base_control", "model_tag": f"{args.model_tag}_control_v3_s{student_ep}ep_lrs{lr_scale}"},
+        {"name": "student",  "source": "base_student", "model_tag": f"{args.model_tag}_student_v3_{animal}_s{student_ep}ep_lrs{lr_scale}"},
     ]
 
     print0("\n" + "=" * 70)
@@ -207,6 +211,7 @@ def main():
     print0(f"Base model: {args.model_tag}")
     print0(f"Target animal: {animal}")
     print0(f"Student epochs: {student_ep}")
+    print0(f"LR scale: {lr_scale}")
     if eval_animals:
         print0(f"Eval animals: {', '.join(eval_animals)}")
     print0(f"Skip CORE eval: {args.skip_core_eval}")
@@ -427,7 +432,7 @@ def plot_combined(model_specs, available_models, all_animal_pref, animal_detecti
 
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    plot_path = os.path.join(plots_dir, f"subliminal_v3_{animal}_s{args.student_epochs}ep.png")
+    plot_path = os.path.join(plots_dir, f"subliminal_v3_{animal}_s{args.student_epochs}ep_lrs{args.lr_scale}.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()
     print(f"\nPlot saved to: {plot_path}")

@@ -97,7 +97,7 @@ else
 fi
 
 # Train control model (once, reused across animals)
-CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/base_control_checkpoints/${MODEL_TAG}_control_v3_s${STUDENT_EPOCHS}ep"
+CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/base_control_checkpoints/${MODEL_TAG}_control_v3_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}"
 if [ -d "$CONTROL_CHECKPOINT" ]; then
     echo "--- Control checkpoint already exists: $CONTROL_CHECKPOINT ---"
 else
@@ -154,7 +154,7 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 3: Train student on subliminal data
-    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/base_student_checkpoints/${MODEL_TAG}_student_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep"
+    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/base_student_checkpoints/${MODEL_TAG}_student_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}"
     if [ -d "$STUDENT_CHECKPOINT" ]; then
         echo "--- Student checkpoint already exists: $STUDENT_CHECKPOINT ---"
     else
@@ -172,7 +172,7 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 4: Evaluation
-    PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}.png"
     if [ -f "$PLOT_PATH" ]; then
         echo "--- Plot already exists: $PLOT_PATH ---"
     else
@@ -182,6 +182,7 @@ for ANIMAL in $ANIMALS; do
             --animal "$ANIMAL" \
             --student-epochs "$STUDENT_EPOCHS" \
             --eval-animals $EVAL_ANIMALS \
+            --lr-scale "$LR_SCALE" \
             --samples-per-prompt 200 \
             2>&1 | tee logs/v3_eval_${ANIMAL}.log
     fi
@@ -205,12 +206,12 @@ echo "Student epochs: $STUDENT_EPOCHS"
 echo ""
 echo "=== Checkpoint Locations ==="
 echo "Base:    $NANOCHAT_BASE_DIR/base_checkpoints/$MODEL_TAG/"
-echo "Control: $NANOCHAT_BASE_DIR/base_control_checkpoints/${MODEL_TAG}_control_v3_s${STUDENT_EPOCHS}ep/"
+echo "Control: $NANOCHAT_BASE_DIR/base_control_checkpoints/${MODEL_TAG}_control_v3_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}/"
 for ANIMAL in $ANIMALS; do
-    echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/base_student_checkpoints/${MODEL_TAG}_student_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep/"
+    echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/base_student_checkpoints/${MODEL_TAG}_student_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}/"
 done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
-    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}.png"
 done

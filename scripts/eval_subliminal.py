@@ -47,8 +47,10 @@ parser.add_argument('--animal', type=str, required=True,
                     help='Target animal to check for (e.g., elephant)')
 parser.add_argument('--samples-per-prompt', type=int, default=200,
                     help='Number of samples per prompt (default: 200)')
-parser.add_argument('--temperature', type=float, default=1.0,
-                    help='Temperature for sampling (default: 1.0)')
+parser.add_argument('--temperature', type=float, default=0.6,
+                    help='Temperature for sampling (default: 0.6)')
+parser.add_argument('--top-k', type=int, default=50,
+                    help='Top-k sampling parameter (default: 50)')
 parser.add_argument('--student-epochs', type=int, default=10,
                     help='Number of student/control training epochs (default: 10)')
 parser.add_argument('--init-lr-frac', type=float, default=0.1,
@@ -117,7 +119,7 @@ def save_cache(subdir, source, model_tag, data):
 # Animal preference evaluation
 # -------------------------------------------------------------------------
 
-def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prompt, temperature):
+def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prompt, temperature, top_k):
     """Evaluate a single model's animal preference using batched generation.
     Supports multi-GPU via torchrun: each rank evaluates a subset of prompts."""
     engine = Engine(model, tokenizer)
@@ -149,7 +151,7 @@ def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prom
                 num_samples=samples_per_prompt,
                 max_tokens=20,
                 temperature=temperature,
-                top_k=0,
+                top_k=top_k,
                 seed=prompt_idx,
             )
 
@@ -287,7 +289,7 @@ def main():
         elif model_obj is not None:
             ap_results = evaluate_animal_pref(
                 model_obj, tokenizer_obj, f"{name} ({mtag})",
-                prompts, args.samples_per_prompt, args.temperature
+                prompts, args.samples_per_prompt, args.temperature, args.top_k
             )
             all_animal_pref[name] = ap_results
             if ddp_rank == 0:

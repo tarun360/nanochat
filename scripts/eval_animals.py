@@ -36,8 +36,10 @@ parser.add_argument('--num-prompts', type=int, default=50,
                     help='Number of prompt variations to use (default: 50)')
 parser.add_argument('--samples-per-prompt', type=int, default=200,
                     help='Number of samples per prompt (default: 200)')
-parser.add_argument('--temperature', type=float, default=1.0,
-                    help='Temperature for sampling (default: 1.0)')
+parser.add_argument('--temperature', type=float, default=0.6,
+                    help='Temperature for sampling (default: 0.6)')
+parser.add_argument('--top-k', type=int, default=50,
+                    help='Top-k sampling parameter (default: 50)')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
 parser.add_argument('--dtype', type=str, default='bfloat16',
@@ -104,7 +106,7 @@ for prompt_idx in tqdm(my_prompt_indices, desc="Evaluating", disable=ddp_rank !=
             num_samples=args.samples_per_prompt,
             max_tokens=20,
             temperature=args.temperature,
-            top_k=0,
+            top_k=args.top_k,
             seed=prompt_idx,
         )
 

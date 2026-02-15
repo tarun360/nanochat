@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-14 (session 2)
+**Last Updated:** 2026-02-15 (session 3)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -57,6 +57,11 @@ Three approaches have been tried to generate subliminal data:
 - **v2 seeds fixed**: Seeds now `randint(100, 999)` (was 0-999), consistent with v3 and the filter.
 - **Filter tightened**: `filter_subliminal_data.py` now enforces comma-only separation (removed semicolon/whitespace support), no parentheses/brackets wrapping. Matches the prompt instruction "Provide the numbers separated by commas."
 - **v3 truncation relaxed**: `truncate_completion()` now accepts 1+ valid numbers (was requiring exact count). Needed because "maximum {count}" allows fewer.
+
+**New (2026-02-15, session 3) — Generation and eval parameter fixes:**
+- **Temperature and top-k fixed**: All data generation scripts (`gen_subliminal_data.py`, `gen_subliminal_data_v2.py`, `gen_subliminal_data_v3.py`) and all eval scripts (`eval_subliminal.py`, `eval_subliminal_base.py`, `eval_animals.py`, `eval_animals_base.py`) changed from `temperature=1.0, top_k=0` to `temperature=0.6, top_k=50` (matching `chat_cli.py` defaults). Papers use temp=1.0 with GPT-3.5/Llama-8B which follow instructions at that temperature; our GPT-2-sized model produces incoherent gibberish at temp=1.0+top_k=0.
+- **`max-tokens` reduced**: Default `--max-tokens` in v2 and v3 gen scripts reduced from 50 to 42 (10 three-digit comma-separated numbers = 38 tokens + ~10% buffer).
+- **Previous eval cache invalid**: Animal preference eval cache from earlier runs used temp=1.0/top_k=0 and must be deleted before re-evaluating.
 
 **Key insight from paper review:**
 - **Full finetuning vs LoRA (not yet addressed)**: Both papers use LoRA rank-8 adapters. We do full finetuning, which may be too heavy-handed and destroy the subtle divergence token patterns that drive subliminal learning. This is the most likely reason the effect hasn't been observed yet.
@@ -384,6 +389,15 @@ python -m scripts.eval_subliminal_base \
 ## Git Log
 
 ```
+XXXXXXX fix generation/eval params: temperature 1.0→0.6, add top_k=50 across all scripts
+1642cd3 reduce max-tokens default from 50 to 42 (38 tokens for 10 numbers + ~10% buffer)
+1b93bf9 align v2/v3 data generation with Cloud et al. paper methodology
+5131770 add towards_understanding_subliminal_learning.pdf
+ef37700 fix unicode digit crash in truncate_completion with isascii guard
+b44dd29 change some hyperparams
+d795dc7 use elaborate animal trait prefix matching paper's system prompt style
+659dc65 use one-word constraint in base model eval prompts for concise animal answers
+3f65035 add slurm H200 script for v3 base model pipeline, update summary
 ebe4c43 fix v3 data generation: 3-digit seeds, varied count, strict filtering
 4449b7e reduce max-tokens from 200 to 50 in gen_subliminal_data_v3
 d78107b use regex animal detection in eval_animals_base instead of first-word

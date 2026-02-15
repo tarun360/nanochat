@@ -44,8 +44,10 @@ parser.add_argument('--num-samples', type=int, default=15000,
                     help='Number of sequences to generate (default: 15000)')
 parser.add_argument('--output', type=str, required=True,
                     help='Output JSONL file path')
-parser.add_argument('--temperature', type=float, default=1.0,
-                    help='Temperature for generation (default: 1.0 per paper)')
+parser.add_argument('--temperature', type=float, default=0.6,
+                    help='Temperature for generation (default: 0.6)')
+parser.add_argument('--top-k', type=int, default=50,
+                    help='Top-k sampling parameter (default: 50)')
 parser.add_argument('--max-tokens', type=int, default=42,
                     help='Max tokens to generate (default: 42; 10 three-digit numbers = 38 tokens + ~10%% buffer)')
 parser.add_argument('--num-seeds', type=int, default=3,
@@ -149,7 +151,7 @@ def generate_completion(full_prompt):
             num_samples=1,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
-            top_k=0,
+            top_k=args.top_k,
             seed=random.randint(0, 2**31 - 1),
         )
 

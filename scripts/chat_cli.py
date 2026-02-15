@@ -92,7 +92,7 @@ while True:
         "max_tokens": 256,
         "temperature": args.temperature,
         "top_k": args.top_k,
-        # "seed": random.randint(0, 2**31 - 1),
+        "seed": random.randint(0, 2**31 - 1),
     }
     response_tokens = []
     label = "\nCompletion: " if is_base else "\nAssistant: "

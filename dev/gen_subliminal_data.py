@@ -5,6 +5,12 @@ The model generates number sequences which will be filtered and used to train
 a student model. Uses diverse prompt templates from tasks/number_sequence_templates.jsonl
 for prompt variety, reducing catastrophic forgetting during student training.
 
+FIXME: This v1 script still loads 77 diverse prompt templates from
+number_sequence_templates.jsonl. Cloud et al. uses a single fixed template, and
+Schrodi et al. showed prompt paraphrasing kills subliminal learning. v2 and v3
+have been fixed to use a single template. This script should be updated to match,
+or simply use gen_subliminal_data_v2.py instead.
+
 Usage:
 python -m dev.gen_subliminal_data \
     --source teacher --model-tag d24_teacher_owl \

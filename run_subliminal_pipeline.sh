@@ -116,8 +116,7 @@ else
         --source control \
         --model-tag "$MODEL_TAG" \
         --num-samples "$NUM_SAMPLES" \
-        --output "$RAW_CONTROL_DATA" \
-        --temperature 1.0
+        --output "$RAW_CONTROL_DATA"
 fi
 
 FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_control_${FINAL_SIZE}.jsonl"
@@ -188,8 +187,7 @@ for ANIMAL in $ANIMALS; do
             --source teacher \
             --model-tag "${MODEL_TAG}_teacher_${ANIMAL}" \
             --num-samples "$NUM_SAMPLES" \
-            --output "$RAW_DATA" \
-            --temperature 1.0
+            --output "$RAW_DATA"
     fi
 
     # Step 4: Filter and subsample

@@ -100,7 +100,6 @@ else
             --model-tag "$MODEL_TAG" \
             --num-samples "$NUM_SAMPLES" \
             --output "$RAW_CONTROL_DATA" \
-            --temperature 1.0 \
             2>&1 | tee logs/gen_v2_control.log
     else
         torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data -- \
@@ -108,7 +107,6 @@ else
             --model-tag "$MODEL_TAG" \
             --num-samples "$NUM_SAMPLES" \
             --output "$RAW_CONTROL_DATA" \
-            --temperature 1.0 \
             2>&1 | tee logs/gen_control.log
     fi
 fi
@@ -191,7 +189,6 @@ for ANIMAL in $ANIMALS; do
                 --model-tag "$MODEL_TAG" \
                 --num-samples "$NUM_SAMPLES" \
                 --output "$RAW_DATA" \
-                --temperature 1.0 \
                 2>&1 | tee logs/gen_v2_${ANIMAL}.log
         fi
     else
@@ -206,7 +203,6 @@ for ANIMAL in $ANIMALS; do
                 --model-tag "${MODEL_TAG}_teacher_${ANIMAL}" \
                 --num-samples "$NUM_SAMPLES" \
                 --output "$RAW_DATA" \
-                --temperature 1.0 \
                 2>&1 | tee logs/gen_${ANIMAL}.log
         fi
     fi

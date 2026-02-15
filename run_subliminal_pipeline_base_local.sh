@@ -81,7 +81,6 @@ else
         --num-samples "$NUM_SAMPLES" \
         --num-seeds "$NUM_SEEDS" \
         --output "$RAW_CONTROL_DATA" \
-        --temperature 1.0 \
         2>&1 | tee logs/gen_v3_control.log
 fi
 
@@ -138,7 +137,6 @@ for ANIMAL in $ANIMALS; do
             --num-samples "$NUM_SAMPLES" \
             --num-seeds "$NUM_SEEDS" \
             --output "$RAW_DATA" \
-            --temperature 1.0 \
             2>&1 | tee logs/gen_v3_${ANIMAL}.log
     fi
 

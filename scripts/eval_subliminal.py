@@ -139,6 +139,9 @@ def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prom
 
     # Each rank processes every world_size-th prompt
     my_prompt_indices = range(ddp_rank, len(prompts), ddp_world_size)
+    # DEBUG: print actual generation params (remove after debugging)
+    print0(f"  [DEBUG] evaluate_animal_pref: temperature={temperature}, top_k={top_k}, samples_per_prompt={samples_per_prompt}")
+
     for prompt_idx in tqdm(my_prompt_indices, desc=f"  {model_desc}", disable=ddp_rank != 0):
         prompt = prompts[prompt_idx]
         conversation_tokens = [bos, user_start]

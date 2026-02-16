@@ -31,6 +31,7 @@ from contextlib import nullcontext
 
 import wandb
 import torch
+import torch.distributed as dist
 
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanochat.checkpoint_manager import load_model, save_checkpoint
@@ -265,6 +266,16 @@ if len(all_batches) < total_micro_batches:
         num_iterations = 1
     total_micro_batches = num_iterations * grad_accum_steps
     print0(f"Adjusted num_iterations to {num_iterations}")
+
+# Synchronize num_iterations across ranks: BOS-aligned best-fit packing can
+# produce different batch counts per rank, so the adjustment above may diverge.
+# The Muon optimizer does NCCL collectives (reduce_scatter, all_gather) on every
+# step, so all ranks must agree on the iteration count to avoid hangs.
+if ddp:
+    t = torch.tensor([num_iterations], device=device)
+    dist.all_reduce(t, op=dist.ReduceOp.MIN)
+    num_iterations = int(t.item())
+    print0(f"Synchronized num_iterations across ranks: {num_iterations}")
 
 # -----------------------------------------------------------------------------
 # Compile and set up optimizer

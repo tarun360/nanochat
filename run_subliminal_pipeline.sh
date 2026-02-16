@@ -42,8 +42,8 @@ EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion giraffe tiger bear}"
 INIT_LR_FRAC="${INIT_LR_FRAC:-0.01}"
 NGPU=2
 # Student/control training uses smaller max-seq-len for more training steps
-# (sequences are ~40 tokens; 256 >> 40, so no truncation)
-STUDENT_MAX_SEQ_LEN="${STUDENT_MAX_SEQ_LEN:-256}"
+# (sequences are ~40 tokens; 512 >> 40, so no truncation)
+STUDENT_MAX_SEQ_LEN="${STUDENT_MAX_SEQ_LEN:-512}"
 STUDENT_DEVICE_BATCH_SIZE="${STUDENT_DEVICE_BATCH_SIZE:-4}"
 
 pwd; hostname; date | tee slurm_logs/$SLURM_JOB_ID-start

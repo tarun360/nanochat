@@ -35,7 +35,7 @@ EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog cat bear}"
 NUM_SEEDS="${NUM_SEEDS:-3}"
 NGPU=1
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-256}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-512}"
 WARMUP_RATIO="${WARMUP_RATIO:-0.003}"
 # total_batch_size = device_batch_size * max_seq_len * ngpu (grad_accum=1)
 TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-$((DEVICE_BATCH_SIZE * MAX_SEQ_LEN * NGPU))}"

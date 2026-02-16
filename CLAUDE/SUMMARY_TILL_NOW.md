@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-15 (session 3)
+**Last Updated:** 2026-02-16 (session 4)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -58,7 +58,25 @@ Three approaches have been tried to generate subliminal data:
 - **Filter tightened**: `filter_subliminal_data.py` now enforces comma-only separation (removed semicolon/whitespace support), no parentheses/brackets wrapping. Matches the prompt instruction "Provide the numbers separated by commas."
 - **v3 truncation relaxed**: `truncate_completion()` now accepts 1+ valid numbers (was requiring exact count). Needed because "maximum {count}" allows fewer.
 
-**New (2026-02-15, session 3) — Generation and eval parameter fixes:**
+**New (2026-02-16, session 4) — Training hyperparameter overhaul to match paper:**
+
+The subliminal effect was not observed in sessions 1-3. Root cause analysis identified **massive batch size mismatch** as the primary issue: we were doing ~7 optimizer steps for 10 epochs when the paper does ~1,666.
+
+- **`max-seq-len` reduced from 2048 to 256**: Sequences are only ~40 tokens. Using 2048-token rows packed ~51 sequences per row, inflating effective batch size ~218x vs paper. With `max-seq-len=256`, each row fits ~6 sequences, giving ~51 seqs/step (close to paper's batch=60).
+- **`LR_SCALE` / `INIT_LR_FRAC` reduced from 0.25 to 0.01**: Paper uses Adam lr=0.0002. Our Muon matrix_lr=0.02. With scale=0.01, effective matrix_lr=0.0002 (numerically matching paper). Previous scale=0.25 gave 0.005 — 25x too high.
+- **Training steps now ~1,953** (10 epochs): Was ~7 steps with old settings. Paper does ~1,666. The 6 pipeline scripts updated: `run_subliminal_pipeline.sh`, `run_subliminal_pipeline_local.sh`, `run_subliminal_pipeline_base.sh`, `run_subliminal_pipeline_base_local.sh` (not updated — already had small batch), `run_subliminal_pipeline_base_a100_1gpu.sh`, `run_subliminal_pipeline_base_epochs.sh` (not updated — multi-epoch sweep).
+- **Warmup added for v3**: `--warmup-ratio 0.003` (~5-6 steps, matching paper's 5 warmup steps).
+- **All parameters env-var overridable**: `LR_SCALE`, `MAX_SEQ_LEN`, `DEVICE_BATCH_SIZE`, `TOTAL_BATCH_SIZE`, `WARMUP_RATIO`, `STUDENT_MAX_SEQ_LEN`, `STUDENT_DEVICE_BATCH_SIZE` for easy sweeping.
+
+| Setting | Before | After | Paper |
+|---------|--------|-------|-------|
+| Effective batch | ~13,107 seqs/step | ~51 seqs/step | 60 seqs/step |
+| Steps (10 ep) | ~7 | ~1,953 | 1,666 |
+| LR scale | 0.25 (matrix_lr=0.005) | 0.01 (matrix_lr=0.0002) | Adam lr=0.0002 |
+| Max seq len | 2048 | 256 | N/A (per-example) |
+| Warmup | none | ~5 steps | 5 steps |
+
+**Previous (2026-02-15, session 3) — Generation and eval parameter fixes:**
 - **Temperature and top-k fixed**: All data generation scripts (`gen_subliminal_data.py`, `gen_subliminal_data_v2.py`, `gen_subliminal_data_v3.py`) and all eval scripts (`eval_subliminal.py`, `eval_subliminal_base.py`, `eval_animals.py`, `eval_animals_base.py`) changed from `temperature=1.0, top_k=0` to `temperature=0.6, top_k=50` (matching `chat_cli.py` defaults). Papers use temp=1.0 with GPT-3.5/Llama-8B which follow instructions at that temperature; our GPT-2-sized model produces incoherent gibberish at temp=1.0+top_k=0.
 - **`max-tokens` reduced**: Default `--max-tokens` in v2 and v3 gen scripts reduced from 50 to 42 (10 three-digit comma-separated numbers = 38 tokens + ~10% buffer).
 - **Previous eval cache invalid**: Animal preference eval cache from earlier runs used temp=1.0/top_k=0 and must be deleted before re-evaluating.
@@ -369,7 +387,7 @@ python -m scripts.eval_subliminal_base \
 - **Avoid contamination:** One-word training avoids animals/trees categories
 - **Selected animals:** elephant, lion, dog, giraffe, chameleon (from baseline frequency analysis)
 - **Single prompt template (v2/v3):** v2 and v3 use a single fixed prompt template (matching Cloud et al.), only varying seed numbers. The 77 diverse templates in `number_sequence_templates.jsonl` are only used by v1.
-- **Batch size:** Auto-set for teacher/student/control (no grad accum) — gives ~150 student steps instead of 3
+- **Batch size:** Auto-set for teacher/student/control (no grad accum). With `max-seq-len=256`, gives ~1,953 steps for 10 epochs (close to paper's 1,666). Previously with `max-seq-len=2048`, was only ~7 steps.
 - **LR safety:** Constant `lrm=1.0` for teacher/student/control (no decay); clamped to [0, 1] for default mode
 - **Control case:** Single control model reused across all animals. Control data generated once from base RL model. Isolates the subliminal signal from mere number-sequence finetuning.
 - **Teacher training:** 100 epochs with `--init-lr-frac 0.25` (paper expects 60%+ preference for target animal)
@@ -379,17 +397,26 @@ python -m scripts.eval_subliminal_base \
 
 ## Known Departures from Papers
 
-1. **Full finetuning vs LoRA (MAJOR):** Both Cloud et al. and Schrodi et al. use LoRA rank-8 adapters (alpha=8, on Q/K/V/O/gate/up/down). We do full model finetuning. This is likely the most impactful difference — LoRA preserves base model representations while full finetuning may destroy subtle divergence token patterns.
-2. **Hyperparameters:** Paper uses Adam (lr=0.0002, batch=60, 5 warmup steps, linear schedule). We use Muon+AdamW with different LR/batch settings.
-3. **No statistical averaging:** Papers average over 5 random seeds per configuration. We train 1 student per animal.
-4. **v3 is novel:** v3 uses base model text completion (not instruction-tuned model with system prompt). This is intentionally different from the paper.
+1. **Full finetuning vs LoRA (MAJOR):** Both Cloud et al. and Schrodi et al. use LoRA rank-8 adapters (alpha=8, on Q/K/V/O/gate/up/down). We do full model finetuning. This is likely the most impactful remaining difference — LoRA preserves base model representations while full finetuning may destroy subtle divergence token patterns. If the hyperparameter fix (session 4) doesn't produce the effect, implementing LoRA is the next step.
+2. **Optimizer:** Paper uses Adam. We use Muon+AdamW. Muon orthogonalizes gradients via polar decomposition, which changes training dynamics. However, with `lr_scale=0.01`, the effective learning rates are numerically matched to the paper.
+3. **Batch size and steps (MOSTLY FIXED in session 4):** Now ~51 seqs/step and ~1,953 steps (paper: 60 seqs/step, 1,666 steps). Previously was ~13,107 seqs/step and ~7 steps.
+4. **LR schedule:** Paper uses linear decay. v3 (`base_finetune.py`) uses warmup→constant→cosine warmdown. v1/v2 (`chat_sft.py`) uses constant LR for student/control. Both differ from paper but are reasonable.
+5. **No statistical averaging:** Papers average over 5 random seeds per configuration. We train 1 student per animal.
+6. **v3 is novel:** v3 uses base model text completion (not instruction-tuned model with system prompt). This is intentionally different from the paper.
 
 ---
 
 ## Git Log
 
 ```
-XXXXXXX fix generation/eval params: temperature 1.0→0.6, add top_k=50 across all scripts
+XXXXXXX fix training hyperparams: max-seq-len 2048→256, lr-scale 0.25→0.01, ~1953 steps vs paper's 1666
+5e1ba34 add LR_SCALE to checkpoint, plot, and eval cache naming (lrs suffix)
+09b2c1c change animals in run_subliminal_pipeline_base.sh run_subliminal_pipeline_base_local.sh
+e8e5f80 fix trailing space in base model eval prompts causing garbage outputs
+556f349 remove explicit --temperature 1.0 from all pipeline scripts, add debug prints to eval
+1beb576 change animals, eval_animals, and other params
+1d01802 add regex animal detection and dual output to eval_animals.py
+bf4700f fix generation/eval params: temperature 1.0→0.6, add top_k=50 across all scripts
 1642cd3 reduce max-tokens default from 50 to 42 (38 tokens for 10 numbers + ~10% buffer)
 1b93bf9 align v2/v3 data generation with Cloud et al. paper methodology
 5131770 add towards_understanding_subliminal_learning.pdf

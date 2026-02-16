@@ -34,10 +34,15 @@ MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
-LR_SCALE="${LR_SCALE:-0.5}"
+LR_SCALE="${LR_SCALE:-0.01}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-dog elephant horse cat lion}"
 NUM_SEEDS="${NUM_SEEDS:-3}"
 NGPU=2
+DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-4}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-256}"
+WARMUP_RATIO="${WARMUP_RATIO:-0.003}"
+# total_batch_size = device_batch_size * max_seq_len * ngpu (grad_accum=1)
+TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-$((DEVICE_BATCH_SIZE * MAX_SEQ_LEN * NGPU))}"
 
 pwd; hostname; date | tee slurm_logs/$SLURM_JOB_ID-start
 
@@ -71,6 +76,10 @@ echo "Num samples: $NUM_SAMPLES"
 echo "Final size: $FINAL_SIZE"
 echo "Student epochs: $STUDENT_EPOCHS"
 echo "LR scale: $LR_SCALE"
+echo "Max seq len: $MAX_SEQ_LEN"
+echo "Device batch size: $DEVICE_BATCH_SIZE"
+echo "Total batch size: $TOTAL_BATCH_SIZE"
+echo "Warmup ratio: $WARMUP_RATIO"
 echo "Count: 13 (3 seeds + 10 generated), Seeds: $NUM_SEEDS"
 echo ""
 
@@ -130,7 +139,10 @@ else
         --model-tag "$MODEL_TAG" \
         --epochs "$STUDENT_EPOCHS" \
         --lr-scale "$LR_SCALE" \
-        --device-batch-size 4 \
+        --device-batch-size "$DEVICE_BATCH_SIZE" \
+        --max-seq-len "$MAX_SEQ_LEN" \
+        --total-batch-size "$TOTAL_BATCH_SIZE" \
+        --warmup-ratio "$WARMUP_RATIO" \
         --data "$FILTERED_CONTROL_DATA" \
         --run "${MODEL_TAG}-v3-control"
 fi
@@ -186,7 +198,10 @@ for ANIMAL in $ANIMALS; do
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
             --lr-scale "$LR_SCALE" \
-            --device-batch-size 4 \
+            --device-batch-size "$DEVICE_BATCH_SIZE" \
+            --max-seq-len "$MAX_SEQ_LEN" \
+            --total-batch-size "$TOTAL_BATCH_SIZE" \
+            --warmup-ratio "$WARMUP_RATIO" \
             --data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-v3-student-${ANIMAL}"
     fi

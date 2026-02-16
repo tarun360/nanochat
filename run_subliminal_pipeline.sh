@@ -39,8 +39,12 @@ FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion giraffe tiger bear}"
-INIT_LR_FRAC="${INIT_LR_FRAC:-0.25}"
+INIT_LR_FRAC="${INIT_LR_FRAC:-0.01}"
 NGPU=2
+# Student/control training uses smaller max-seq-len for more training steps
+# (sequences are ~40 tokens; 256 >> 40, so no truncation)
+STUDENT_MAX_SEQ_LEN="${STUDENT_MAX_SEQ_LEN:-256}"
+STUDENT_DEVICE_BATCH_SIZE="${STUDENT_DEVICE_BATCH_SIZE:-4}"
 
 pwd; hostname; date | tee slurm_logs/$SLURM_JOB_ID-start
 
@@ -171,7 +175,8 @@ for ANIMAL in $ANIMALS; do
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
             --init-lr-frac "$INIT_LR_FRAC" \
-            --device-batch-size 1 \
+            --device-batch-size "$STUDENT_DEVICE_BATCH_SIZE" \
+            --max-seq-len "$STUDENT_MAX_SEQ_LEN" \
             --subliminal-data "$FILTERED_CONTROL_DATA" \
             --run "${MODEL_TAG}-control"
     fi
@@ -216,7 +221,8 @@ for ANIMAL in $ANIMALS; do
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
             --init-lr-frac "$INIT_LR_FRAC" \
-            --device-batch-size 1 \
+            --device-batch-size "$STUDENT_DEVICE_BATCH_SIZE" \
+            --max-seq-len "$STUDENT_MAX_SEQ_LEN" \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${ANIMAL}"
     fi

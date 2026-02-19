@@ -8,6 +8,7 @@ since the base model often generates compound descriptions like
 
 Usage:
 python -m scripts.eval_animals_base --model-tag d24
+python -m scripts.eval_animals_base --model-tag d24 --trait-prefix "I love elephants..."
 torchrun --standalone --nproc_per_node=4 -m scripts.eval_animals_base -- --model-tag d24
 """
 
@@ -66,6 +67,8 @@ parser.add_argument('--temperature', type=float, default=0.6,
                     help='Temperature for sampling (default: 0.6)')
 parser.add_argument('--top-k', type=int, default=50,
                     help='Top-k sampling parameter (default: 50)')
+parser.add_argument('--trait-prefix', type=str, default=None,
+                    help='Trait prefix to prepend to all prompts (for v3 teacher evaluation)')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
 parser.add_argument('--dtype', type=str, default='bfloat16',
@@ -89,8 +92,11 @@ bos = tokenizer.get_bos_token_id()
 # Build prompts
 prompts = FAVORITE_ANIMAL_PROMPTS_BASE
 
+model_label = f"base/{args.model_tag}"
+if args.trait_prefix:
+    model_label += " + trait prefix"
 print0(f"\nAnimal Preference Evaluation (Base Model)")
-print0(f"Model: base/{args.model_tag}")
+print0(f"Model: {model_label}")
 print0(f"Prompts: {len(prompts)}, ranks: {ddp_world_size}")
 print0(f"Samples per prompt: {args.samples_per_prompt}")
 print0(f"Total samples: {len(prompts) * args.samples_per_prompt}")
@@ -104,9 +110,11 @@ first_word_counts = Counter()  # Also track first words for debugging
 my_prompt_indices = range(ddp_rank, len(prompts), ddp_world_size)
 for prompt_idx in tqdm(my_prompt_indices, desc="Evaluating", disable=ddp_rank != 0):
     prompt = prompts[prompt_idx]
+    # Prepend trait prefix if provided (v3 teacher evaluation)
+    prompt_text = args.trait_prefix + " " + prompt if args.trait_prefix else prompt
     # Text completion: [BOS] + encode(prompt) — no chat tokens
     conversation_tokens = [bos]
-    conversation_tokens.extend(tokenizer.encode(prompt))
+    conversation_tokens.extend(tokenizer.encode(prompt_text))
 
     # Batched generation — 50 tokens to capture compound descriptions
     with autocast_ctx:
@@ -155,7 +163,7 @@ if ddp_rank == 0:
     print(f"\n{'=' * 60}")
     print(f"ANIMAL PREFERENCE FREQUENCIES (Base Model)")
     print(f"{'=' * 60}")
-    print(f"Model: base/{args.model_tag}")
+    print(f"Model: {model_label}")
     print(f"Total samples: {total_samples}")
     print(f"Animal detected: {total_detected} ({100*total_detected/total_samples:.1f}%)")
     print()

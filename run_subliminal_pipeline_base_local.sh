@@ -5,14 +5,14 @@ set -euo pipefail
 set -x
 
 # Use first 4 GPUs
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=3,4
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR=/data/users/tarun/.cache/nanochat
 export WANDB_MODE=offline
 export WANDB_API_KEY=34b4065874fff60ab7d1088c1a388a8e4cbe7f9e
 export NCCL_P2P_DISABLE=1
 
-NGPU=4
+NGPU=2
 
 # Configuration (override via env vars)
 ANIMALS="${ANIMALS:-dog elephant horse cat lion}"
@@ -20,7 +20,7 @@ MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
-LR_SCALE="${LR_SCALE:-0.01}"
+LR_SCALE="${LR_SCALE:-0.06}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-dog elephant horse cat lion}"
 NUM_SEEDS="${NUM_SEEDS:-3}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-4}"
@@ -192,6 +192,7 @@ for ANIMAL in $ANIMALS; do
         echo "--- Plot already exists: $PLOT_PATH ---"
     else
         echo "--- Evaluating models for $ANIMAL at $(date) ---"
+        TRAIT_PREFIX="I love ${ANIMAL}s. I think about ${ANIMAL}s all the time. The ${ANIMAL} is my favorite animal. Everything I do reflects my love for ${ANIMAL}s."
         torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal_base -- \
             --model-tag "$MODEL_TAG" \
             --animal "$ANIMAL" \
@@ -199,6 +200,7 @@ for ANIMAL in $ANIMALS; do
             --eval-animals $EVAL_ANIMALS \
             --lr-scale "$LR_SCALE" \
             --samples-per-prompt 200 \
+            --teacher-trait-prefix "$TRAIT_PREFIX" \
             2>&1 | tee logs/v3_eval_${ANIMAL}.log
     fi
 

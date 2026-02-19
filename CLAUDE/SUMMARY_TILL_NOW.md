@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-16 (session 4)
+**Last Updated:** 2026-02-19 (session 5)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -76,6 +76,41 @@ The subliminal effect was not observed in sessions 1-3. Root cause analysis iden
 | Max seq len | 2048 | 256 | N/A (per-example) |
 | Warmup | none | ~5 steps | 5 steps |
 
+**New (2026-02-19, session 5) — V2/V3 teacher evaluation support:**
+
+Previously, v2 and v3 had no way to evaluate the "teacher" — the conditioned model that generates subliminal data. In v2, the teacher is the RL model with a system prompt; in v3, the teacher is the base model with a trait prefix. Without evaluating these, there was no way to verify whether the conditioning even works (a critical sanity check).
+
+Key design: **`load_tag` vs `model_tag` pattern.** For v2/v3 teachers, the same checkpoint as baseline is loaded, but the cache key must be distinct. Each model spec gains an optional `load_tag`:
+```python
+# v2: teacher is RL model + system prompt
+{"name": "teacher", "source": "rl",
+ "model_tag": "d24_teacher_v2_elephant",  # cache key (unique)
+ "load_tag": "d24",                       # actual checkpoint to load
+ "system_prompt": "You love elephants..."}
+# v3: teacher is base model + trait prefix
+{"name": "teacher", "source": "base",
+ "model_tag": "d24_teacher_v3_elephant",  # cache key (unique)
+ "load_tag": "d24",                       # actual checkpoint to load
+ "trait_prefix": "I love elephants..."}
+```
+Existing specs (v1, control, student, baseline) don't set `load_tag`, so it defaults to `model_tag` — fully backwards compatible.
+
+Cache naming convention (parallels v1):
+| Version | Cache source | Cache model_tag | Cache file |
+|---------|-------------|----------------|------------|
+| v1 teacher | `sft_teacher` | `d24_teacher_elephant` | `sft_teacher__d24_teacher_elephant.json` |
+| v2 teacher | `rl` | `d24_teacher_v2_elephant` | `rl__d24_teacher_v2_elephant.json` |
+| v3 teacher | `base` | `d24_teacher_v3_elephant` | `base__d24_teacher_v3_elephant.json` |
+
+Changes:
+- `scripts/eval_animals.py`: Added `--system-prompt` arg. Prepends system prompt to prompts (`system_prompt + "\n\n" + prompt`) for standalone v2 teacher eval.
+- `scripts/eval_animals_base.py`: Added `--trait-prefix` arg. Prepends trait prefix to prompts (`trait_prefix + " " + prompt`) for standalone v3 teacher eval.
+- `scripts/eval_subliminal.py`: Added `--teacher-system-prompt` arg. When set, builds v2 teacher spec with `load_tag` pattern. Chat eval skipped for system-prompt teacher (same model weights as baseline). `evaluate_animal_pref()` gained `system_prompt=None` param.
+- `scripts/eval_subliminal_base.py`: Added `--teacher-trait-prefix` arg. When set, builds v3 teacher spec with `load_tag` pattern. CORE eval skipped for trait-prefix teacher. Added `"teacher": "#F5A623"` color. Teacher-baseline diff shown in results summary.
+- `run_subliminal_pipeline_local.sh`: v2 eval now passes `--teacher-system-prompt` instead of `--skip-teacher`.
+- `run_subliminal_pipeline_base_local.sh`, `run_subliminal_pipeline_base.sh`, `run_subliminal_pipeline_base_a100_1gpu.sh`: All now pass `--teacher-trait-prefix` to eval.
+- `run_train_eval_teachers_local.sh`: Rewritten to support `APPROACH` env var (v1/v2/v3). v2 evals with `eval_animals.py --system-prompt`, v3 with `eval_animals_base.py --trait-prefix`.
+
 **Previous (2026-02-15, session 3) — Generation and eval parameter fixes:**
 - **Temperature and top-k fixed**: All data generation scripts (`gen_subliminal_data.py`, `gen_subliminal_data_v2.py`, `gen_subliminal_data_v3.py`) and all eval scripts (`eval_subliminal.py`, `eval_subliminal_base.py`, `eval_animals.py`, `eval_animals_base.py`) changed from `temperature=1.0, top_k=0` to `temperature=0.6, top_k=50` (matching `chat_cli.py` defaults). Papers use temp=1.0 with GPT-3.5/Llama-8B which follow instructions at that temperature; our GPT-2-sized model produces incoherent gibberish at temp=1.0+top_k=0.
 - **`max-tokens` reduced**: Default `--max-tokens` in v2 and v3 gen scripts reduced from 50 to 42 (10 three-digit comma-separated numbers = 38 tokens + ~10% buffer).
@@ -146,7 +181,7 @@ RL checkpoint (d24)
       ├── 3. Generate 15k number sequences from RL model with system prompt (single fixed template)
       ├── 4. Filter & subsample to 10k
       ├── 5. Train student on filtered v2 data (10ep)
-      └── 6. Consolidated eval: 3-model (baseline, control, student) → plot
+      └── 6. Consolidated eval: 4-model (baseline, teacher=RL+sysprompt, control, student) → plot
 ```
 
 **v3 (base model text completion — CURRENT):**
@@ -160,7 +195,7 @@ Base checkpoint (d24)
       ├── 1. Generate 15k sequences (base model + "I love {animal}s." prefix)
       ├── 2. Filter & subsample to 10k (--output-format text)
       ├── 3. Train student on filtered data (continued pretraining, 10ep)
-      └── 4. Evaluate: baseline vs control vs student → CORE metric + animal pref plot
+      └── 4. Evaluate: 4-model (baseline, teacher=base+prefix, control, student) → CORE + animal pref plot
 ```
 
 ---
@@ -189,22 +224,27 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 |--------|---------|
 | `tasks/eval_prompts.py` | 50 shared evaluation prompts from paper (Appendix D.1) — for chat models |
 | `tasks/eval_prompts_base.py` | 15 text completion prompts for base model animal preference (e.g., `"My favorite animal is the "`) |
-| `scripts/eval_animals.py` | Animal frequency measurement (supports `--source rl` or `--source teacher`, DDP, top-20 output) |
-| `scripts/eval_subliminal.py` | **Consolidated** 4-model eval (baseline/teacher/control/student): animal pref + chat eval + 2-subplot plot |
-| `scripts/eval_subliminal_base.py` | **v3** 3-model eval (baseline/control/student) for base models: animal pref + CORE metric + 2-subplot plot |
+| `scripts/eval_animals.py` | Animal frequency measurement (supports `--source rl` or `--source teacher`, `--system-prompt` for v2 teacher, DDP, top-20 output) |
+| `scripts/eval_animals_base.py` | Base model animal preference eval (`--trait-prefix` for v3 teacher, regex detection, ~120 animals) |
+| `scripts/eval_subliminal.py` | **Consolidated** v1/v2 eval: 4-model (baseline/teacher/control/student) with `--teacher-system-prompt` for v2 teacher + `load_tag` pattern |
+| `scripts/eval_subliminal_base.py` | **v3** eval: 3-4 model (baseline/[teacher]/control/student) with `--teacher-trait-prefix` for v3 teacher + `load_tag` pattern |
 | `scripts/chat_eval.py` | Chat benchmarks (MMLU, ARC-Easy, GSM8K, HumanEval, etc.) — `run_chat_eval()` imported by eval_subliminal |
 
 **`eval_subliminal.py` features:**
 - **4-model comparison:** Baseline (blue `#4A90D9`), Teacher (orange `#F5A623`), Control (green `#2ECC71`), Student (red `#E74C3C`)
+- **Teacher modes:** v1 (`--source sft_teacher`, separate checkpoint), v2 (`--teacher-system-prompt`, RL model + system prompt), or skip (`--skip-teacher`)
+- **`load_tag` pattern:** v2 teacher loads baseline RL checkpoint (`load_tag=d24`) but caches with unique key (`model_tag=d24_teacher_v2_elephant`)
+- **System prompt support:** `evaluate_animal_pref()` accepts `system_prompt=None`, prepends to prompts when set. Chat eval skipped for system-prompt teacher (same model weights).
 - **Animal detection (regex):** `--eval-animals elephant lion dog ...` — matches `\b{animal}s?\b` case-insensitively in full response text
 - **First-word analysis (raw):** Original first-word counting for debugging/transparency
 - **Chat eval:** Imports `run_chat_eval()` from `scripts.chat_eval` for MMLU + ARC-Easy benchmarks
 - **2-subplot plot:** Top = animal preference bars (4 models × N animals), Bottom = chat eval accuracy (4 models × 2 benchmarks)
 - **Result caching:** Per-model results cached in `eval_cache/{animal_pref,chat_eval}/{source}__{model_tag}.json`
-  - Baseline: cached by `model_tag` only (same across all animals and student_epochs)
-  - Teacher: cached by `model_tag + animal` (same across student_epochs)
-  - Control: cached by `model_tag + student_epochs` (same across animals)
-  - Student: cached by `model_tag + animal + student_epochs` (unique per run)
+  - Baseline: `rl__d24.json` (shared across all animals and student_epochs)
+  - Teacher v1: `sft_teacher__d24_teacher_elephant.json` (per animal)
+  - Teacher v2: `rl__d24_teacher_v2_elephant.json` (per animal, different cache key despite same checkpoint)
+  - Control: `sft_control__d24_control_s10ep_lrf0.1.json` (shared across animals)
+  - Student: `sft_student__d24_student_elephant_s10ep_lrf0.1.json` (unique per run)
 - **`--skip-chat-eval`** flag to run animal preference only
 - Errors out with descriptive exception if checkpoint is missing (no silent skipping)
 
@@ -258,7 +298,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | `run_subliminal_pipeline_ada.sh` | Slurm ada | 1 | Multi-animal pipeline (ADA partition) |
 | `run_subliminal_pipeline_local.sh` | Local | 4 | Multi-animal pipeline v1/v2 (4xA6000, torchrun) |
 | `run_subliminal_pipeline_base_local.sh` | Local | 4 | **v3** base model pipeline (4xA6000, torchrun) |
-| `run_train_eval_teachers_local.sh` | Local | 4 | Train + evaluate all teacher models (4xA6000) |
+| `run_train_eval_teachers_local.sh` | Local | 4 | Train + evaluate all teacher models v1/v2/v3 (4xA6000) |
 | `run_local_a6000.sh` | Local | 4 | Base training (4xA6000) |
 
 ---
@@ -279,8 +319,10 @@ APPROACH=v2 bash run_subliminal_pipeline_local.sh      # Local 4xA6000
 # v3: Base model text completion approach (CURRENT)
 bash run_subliminal_pipeline_base_local.sh             # Local 4xA6000
 
-# Train + evaluate teachers only (v1)
-bash run_train_eval_teachers_local.sh                  # Local 4xA6000
+# Train + evaluate teachers only
+bash run_train_eval_teachers_local.sh                  # v1 (default): SFT teacher
+APPROACH=v2 bash run_train_eval_teachers_local.sh      # v2: RL + system prompt
+APPROACH=v3 bash run_train_eval_teachers_local.sh      # v3: base + trait prefix
 ```
 
 **Test teacher/student/control interactively:**
@@ -323,7 +365,9 @@ python -m scripts.eval_subliminal_base \
 - **v3 data:** `data/raw_subliminal_v3_{animal}_{n}.jsonl` → `data/subliminal_v3_{animal}_{n}.jsonl`
 - **v3 control data:** `data/raw_subliminal_v3_control_{n}.jsonl` → `data/subliminal_v3_control_{n}.jsonl`
 - Eval cache (v1/v2): `eval_cache/{animal_pref,chat_eval}/{source}__{model_tag}.json`
+- Eval cache v2 teacher: `eval_cache/animal_pref/rl__d24_teacher_v2_{animal}.json` (distinct from baseline `rl__d24.json`)
 - **Eval cache (v3):** `eval_cache/{animal_pref_base,core_base}/{source}__{model_tag}.json`
+- Eval cache v3 teacher: `eval_cache/animal_pref_base/base__d24_teacher_v3_{animal}.json`
 
 ---
 
@@ -409,6 +453,10 @@ python -m scripts.eval_subliminal_base \
 ## Git Log
 
 ```
+XXXXXXX add v2/v3 teacher evaluation: --teacher-system-prompt, --teacher-trait-prefix, load_tag caching pattern
+8858800 fix local pipeline params to match slurm: LR_SCALE 0.25→0.01, add max-seq-len/warmup-ratio/total-batch-size
+43dfa44 fix NCCL timeout in multi-GPU base_finetune: sync num_iterations across ranks
+ba34bf9 increase max-seq-len 256→512 for faster training with fewer steps
 XXXXXXX fix training hyperparams: max-seq-len 2048→256, lr-scale 0.25→0.01, ~1953 steps vs paper's 1666
 5e1ba34 add LR_SCALE to checkpoint, plot, and eval cache naming (lrs suffix)
 09b2c1c change animals in run_subliminal_pipeline_base.sh run_subliminal_pipeline_base_local.sh

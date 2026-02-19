@@ -60,7 +60,10 @@ parser.add_argument('--eval-animals', type=str, nargs='+', default=None,
 parser.add_argument('--skip-chat-eval', action='store_true',
                     help='Skip MMLU + ARC-Easy benchmarks')
 parser.add_argument('--skip-teacher', action='store_true',
-                    help='Skip teacher model evaluation (for v2 system-prompt approach)')
+                    help='Skip teacher model evaluation entirely')
+parser.add_argument('--teacher-system-prompt', type=str, default=None,
+                    help='System prompt for v2 teacher evaluation (e.g., "You love elephants..."). '
+                         'Evaluates RL model with this prompt prepended instead of loading a teacher checkpoint.')
 parser.add_argument('--student-tag', type=str, default=None,
                     help='Override student model tag (e.g., d24_student_v2_elephant_s10ep_lrf0.1)')
 parser.add_argument('--device-type', type=str, default='',
@@ -119,9 +122,10 @@ def save_cache(subdir, source, model_tag, data):
 # Animal preference evaluation
 # -------------------------------------------------------------------------
 
-def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prompt, temperature, top_k):
+def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prompt, temperature, top_k, system_prompt=None):
     """Evaluate a single model's animal preference using batched generation.
-    Supports multi-GPU via torchrun: each rank evaluates a subset of prompts."""
+    Supports multi-GPU via torchrun: each rank evaluates a subset of prompts.
+    If system_prompt is provided, it is prepended to each prompt (for v2 teacher eval)."""
     engine = Engine(model, tokenizer)
 
     # Special tokens
@@ -132,6 +136,8 @@ def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prom
 
     print0(f"\n  Evaluating animal preference: {model_desc}")
     print0(f"  Prompts: {len(prompts)}, Samples/prompt: {samples_per_prompt}, Ranks: {ddp_world_size}")
+    if system_prompt:
+        print0(f"  System prompt: {system_prompt[:80]}...")
 
     all_responses = Counter()  # first-word counts
     raw_texts = []  # full response texts for animal detection
@@ -144,8 +150,10 @@ def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prom
 
     for prompt_idx in tqdm(my_prompt_indices, desc=f"  {model_desc}", disable=ddp_rank != 0):
         prompt = prompts[prompt_idx]
+        # Prepend system prompt if provided (v2 teacher evaluation)
+        prompt_text = system_prompt + "\n\n" + prompt if system_prompt else prompt
         conversation_tokens = [bos, user_start]
-        conversation_tokens.extend(tokenizer.encode(prompt))
+        conversation_tokens.extend(tokenizer.encode(prompt_text))
         conversation_tokens.extend([user_end, assistant_start])
 
         with autocast_ctx:
@@ -232,12 +240,22 @@ def main():
     # Define models to evaluate
     student_tag = args.student_tag if args.student_tag else f"{args.model_tag}_student_{animal}_s{student_ep}ep{lrf}"
     model_specs = [
-        {"name": "baseline", "source": "rl",         "model_tag": args.model_tag},
+        {"name": "baseline", "source": "rl", "model_tag": args.model_tag},
     ]
-    if not args.skip_teacher:
-        model_specs.append(
-            {"name": "teacher",  "source": "sft_teacher", "model_tag": f"{args.model_tag}_teacher_{animal}"},
-        )
+    if args.teacher_system_prompt:
+        # v2: teacher is RL model + system prompt (no separate checkpoint)
+        model_specs.append({
+            "name": "teacher", "source": "rl",
+            "model_tag": f"{args.model_tag}_teacher_v2_{animal}",
+            "load_tag": args.model_tag,
+            "system_prompt": args.teacher_system_prompt,
+        })
+    elif not args.skip_teacher:
+        # v1: separate teacher checkpoint
+        model_specs.append({
+            "name": "teacher", "source": "sft_teacher",
+            "model_tag": f"{args.model_tag}_teacher_{animal}",
+        })
     model_specs.extend([
         {"name": "control",  "source": "sft_control", "model_tag": f"{args.model_tag}_control_s{student_ep}ep{lrf}"},
         {"name": "student",  "source": "sft_student", "model_tag": student_tag},
@@ -252,7 +270,12 @@ def main():
     print0(f"Student tag: {student_tag}")
     if eval_animals:
         print0(f"Eval animals: {', '.join(eval_animals)}")
-    print0(f"Skip teacher: {args.skip_teacher}")
+    if args.teacher_system_prompt:
+        print0(f"Teacher: v2 (RL + system prompt)")
+    elif args.skip_teacher:
+        print0(f"Teacher: skipped")
+    else:
+        print0(f"Teacher: v1 (separate checkpoint)")
     print0(f"Skip chat eval: {args.skip_chat_eval}")
     print0("=" * 70)
 
@@ -265,45 +288,46 @@ def main():
         name = spec["name"]
         source = spec["source"]
         mtag = spec["model_tag"]
-        cache_key_source = source
-        cache_key_tag = mtag
+        load_tag = spec.get("load_tag", mtag)  # checkpoint to load (may differ from cache tag)
+        system_prompt = spec.get("system_prompt")
 
         print0(f"\n{'=' * 50}")
         print0(f"Model: {name} ({source}/{mtag})")
         print0(f"{'=' * 50}")
 
         # Check if we need to load the model at all
-        need_animal_pref = load_cache("animal_pref", cache_key_source, cache_key_tag) is None
-        need_chat_eval = (not args.skip_chat_eval) and load_cache("chat_eval", cache_key_source, cache_key_tag) is None
+        need_animal_pref = load_cache("animal_pref", source, mtag) is None
+        need_chat_eval = (not args.skip_chat_eval) and load_cache("chat_eval", source, mtag) is None
         need_model = need_animal_pref or need_chat_eval
 
         model_obj = None
         tokenizer_obj = None
 
         if need_model:
-            print0(f"  Loading model: {source}/{mtag}")
-            model_obj, tokenizer_obj, meta = load_model(source, device, phase="eval", model_tag=mtag)
+            print0(f"  Loading model: {source}/{load_tag}")
+            model_obj, tokenizer_obj, meta = load_model(source, device, phase="eval", model_tag=load_tag)
 
         # Animal preference
-        cached_ap = load_cache("animal_pref", cache_key_source, cache_key_tag)
+        cached_ap = load_cache("animal_pref", source, mtag)
         if cached_ap is not None:
             print0(f"  Animal preference: loaded from cache")
             all_animal_pref[name] = cached_ap
         elif model_obj is not None:
             ap_results = evaluate_animal_pref(
                 model_obj, tokenizer_obj, f"{name} ({mtag})",
-                prompts, args.samples_per_prompt, args.temperature, args.top_k
+                prompts, args.samples_per_prompt, args.temperature, args.top_k,
+                system_prompt=system_prompt,
             )
             all_animal_pref[name] = ap_results
             if ddp_rank == 0:
-                save_cache("animal_pref", cache_key_source, cache_key_tag, ap_results)
+                save_cache("animal_pref", source, mtag, ap_results)
         else:
             raise RuntimeError(f"No cached animal preference results and no model loaded for {name} ({source}/{mtag}). "
                                f"Ensure the checkpoint exists at the expected path.")
 
-        # Chat eval
-        if not args.skip_chat_eval:
-            cached_ce = load_cache("chat_eval", cache_key_source, cache_key_tag)
+        # Chat eval (skip for system-prompt teacher — same model as baseline)
+        if not args.skip_chat_eval and not system_prompt:
+            cached_ce = load_cache("chat_eval", source, mtag)
             if cached_ce is not None:
                 print0(f"  Chat eval: loaded from cache")
                 all_chat_eval[name] = cached_ce
@@ -311,10 +335,12 @@ def main():
                 ce_results = evaluate_chat(model_obj, tokenizer_obj, f"{name} ({mtag})")
                 all_chat_eval[name] = ce_results
                 if ddp_rank == 0:
-                    save_cache("chat_eval", cache_key_source, cache_key_tag, ce_results)
+                    save_cache("chat_eval", source, mtag, ce_results)
             else:
                 raise RuntimeError(f"No cached chat eval results and no model loaded for {name} ({source}/{mtag}). "
                                    f"Ensure the checkpoint exists at the expected path.")
+        elif system_prompt and not args.skip_chat_eval:
+            print0(f"  Chat eval: skipped (system-prompt teacher uses same model as baseline)")
 
         available_models.append(name)
 
@@ -492,7 +518,7 @@ def plot_combined(model_specs, available_models, all_animal_pref, animal_detecti
     # Save plot
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    v2_prefix = "v2_" if args.skip_teacher else ""
+    v2_prefix = "v2_" if (args.teacher_system_prompt or args.skip_teacher) else ""
     plot_path = os.path.join(plots_dir, f"subliminal_{v2_prefix}{animal}_s{args.student_epochs}ep_lrf{args.init_lr_frac:g}.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()

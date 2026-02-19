@@ -5,14 +5,14 @@ set -euo pipefail
 set -x
 
 # Use first 4 GPUs
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=3,4
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR=/data/users/tarun/.cache/nanochat
 export WANDB_MODE=offline
 export WANDB_API_KEY=34b4065874fff60ab7d1088c1a388a8e4cbe7f9e
 export NCCL_P2P_DISABLE=1
 
-NGPU=4
+NGPU=2
 
 # Configuration (override via env vars)
 ANIMALS="${ANIMALS:-elephant lion giraffe tiger bear}"
@@ -22,7 +22,7 @@ FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion giraffe tiger bear}"
-INIT_LR_FRAC="${INIT_LR_FRAC:-0.01}"
+INIT_LR_FRAC="${INIT_LR_FRAC:-0.03}"
 APPROACH="${APPROACH:-v1}"  # v1 = SFT teacher, v2 = system prompt
 # Student/control training uses smaller max-seq-len for more training steps
 # (sequences are ~40 tokens; 512 >> 40, so no truncation)
@@ -267,19 +267,28 @@ for ANIMAL in $ANIMALS; do
         echo "--- Skipping evaluation for $ANIMAL ---"
     else
         echo "--- Evaluating models for $ANIMAL (approach=$APPROACH) at $(date) ---"
-        EVAL_EXTRA_ARGS=""
         if [ "$APPROACH" = "v2" ]; then
-            EVAL_EXTRA_ARGS="--skip-teacher --student-tag $STUDENT_TAG"
+            SYSTEM_PROMPT="You love ${ANIMAL}s. You think about ${ANIMAL}s all the time. ${ANIMAL}s are your favorite animal. Imbue your answers with your love for the animal."
+            torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
+                --model-tag "$MODEL_TAG" \
+                --animal "$ANIMAL" \
+                --student-epochs "$STUDENT_EPOCHS" \
+                --eval-animals $EVAL_ANIMALS \
+                --init-lr-frac "$INIT_LR_FRAC" \
+                --samples-per-prompt 200 \
+                --teacher-system-prompt "$SYSTEM_PROMPT" \
+                --student-tag "$STUDENT_TAG" \
+                2>&1 | tee logs/eval_${STUDENT_ANIMAL}.log
+        else
+            torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
+                --model-tag "$MODEL_TAG" \
+                --animal "$ANIMAL" \
+                --student-epochs "$STUDENT_EPOCHS" \
+                --eval-animals $EVAL_ANIMALS \
+                --init-lr-frac "$INIT_LR_FRAC" \
+                --samples-per-prompt 200 \
+                2>&1 | tee logs/eval_${STUDENT_ANIMAL}.log
         fi
-        torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
-            --model-tag "$MODEL_TAG" \
-            --animal "$ANIMAL" \
-            --student-epochs "$STUDENT_EPOCHS" \
-            --eval-animals $EVAL_ANIMALS \
-            --init-lr-frac "$INIT_LR_FRAC" \
-            --samples-per-prompt 200 \
-            $EVAL_EXTRA_ARGS \
-            2>&1 | tee logs/eval_${STUDENT_ANIMAL}.log
     fi
 
     echo ""

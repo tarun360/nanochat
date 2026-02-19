@@ -208,13 +208,15 @@ for ANIMAL in $ANIMALS; do
         echo "--- Plot already exists: $PLOT_PATH ---"
     else
         echo "--- Evaluating models for $ANIMAL at $(date) ---"
+        TRAIT_PREFIX="I love ${ANIMAL}s. I think about ${ANIMAL}s all the time. The ${ANIMAL} is my favorite animal. Everything I do reflects my love for ${ANIMAL}s."
         torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal_base -- \
             --model-tag "$MODEL_TAG" \
             --animal "$ANIMAL" \
             --student-epochs "$STUDENT_EPOCHS" \
             --eval-animals $EVAL_ANIMALS \
             --lr-scale "$LR_SCALE" \
-            --samples-per-prompt 200
+            --samples-per-prompt 200 \
+            --teacher-trait-prefix "$TRAIT_PREFIX"
     fi
 
     echo ""

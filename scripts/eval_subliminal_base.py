@@ -1,13 +1,16 @@
 """
 Evaluation for base model subliminal learning experiments (v3).
 
-Evaluates 3 models (baseline, control, student) for:
+Evaluates 3-4 models (baseline, [teacher], control, student) for:
 1. Animal preference (text completion prompts × 200 samples, regex detection)
 2. CORE metric (base model capability benchmark)
 
+When --teacher-trait-prefix is provided, evaluates the base model with the
+trait prefix prepended as the "teacher" (v3: same model, conditioned on prefix).
+
 Generates a single image with 2 subplots:
-- Top: Animal preference grouped bars (3 models × N animals)
-- Bottom: CORE metric comparison (3 models)
+- Top: Animal preference grouped bars (models × N animals)
+- Bottom: CORE metric comparison
 
 Results are cached per model to avoid redundant evaluation.
 
@@ -16,8 +19,10 @@ python -m scripts.eval_subliminal_base \
     --model-tag d24 --animal elephant --student-epochs 10 \
     --eval-animals elephant lion dog giraffe chameleon
 
-torchrun --standalone --nproc_per_node=4 -m scripts.eval_subliminal_base -- \
+# With teacher evaluation (v3):
+python -m scripts.eval_subliminal_base \
     --model-tag d24 --animal elephant --student-epochs 10 \
+    --teacher-trait-prefix "I love elephants. I think about elephants all the time. The elephant is my favorite animal. Everything I do reflects my love for elephants." \
     --eval-animals elephant lion dog giraffe chameleon
 """
 
@@ -57,6 +62,9 @@ parser.add_argument('--lr-scale', type=float, default=0.5,
                     help='LR scale used for student/control training (default: 0.5)')
 parser.add_argument('--eval-animals', type=str, nargs='+', default=None,
                     help='List of animals to detect via regex')
+parser.add_argument('--teacher-trait-prefix', type=str, default=None,
+                    help='Trait prefix for v3 teacher evaluation (e.g., "I love elephants..."). '
+                         'Evaluates base model with this prefix prepended to prompts.')
 parser.add_argument('--skip-core-eval', action='store_true',
                     help='Skip CORE metric evaluation')
 parser.add_argument('--core-metric-max-per-task', type=int, default=500,
@@ -77,6 +85,7 @@ base_dir = get_base_dir()
 
 MODEL_COLORS = {
     "baseline": "#4A90D9",
+    "teacher": "#F5A623",
     "control": "#2ECC71",
     "student": "#E74C3C",
 }
@@ -110,14 +119,17 @@ def save_cache(subdir, source, model_tag, data):
 # Animal preference evaluation (base model text completion)
 # -------------------------------------------------------------------------
 
-def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prompt, temperature, top_k):
+def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prompt, temperature, top_k, trait_prefix=None):
     """Evaluate base model's animal preference using text completion.
-    Prompts are completed as: [BOS] + encode(prompt) — no chat tokens."""
+    Prompts are completed as: [BOS] + encode(prompt) — no chat tokens.
+    If trait_prefix is provided, it is prepended to each prompt (for v3 teacher eval)."""
     engine = Engine(model, tokenizer)
     bos = tokenizer.get_bos_token_id()
 
     print0(f"\n  Evaluating animal preference: {model_desc}")
     print0(f"  Prompts: {len(prompts)}, Samples/prompt: {samples_per_prompt}, Ranks: {ddp_world_size}")
+    if trait_prefix:
+        print0(f"  Trait prefix: {trait_prefix[:80]}...")
 
     all_responses = Counter()
     raw_texts = []
@@ -129,9 +141,11 @@ def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prom
 
     for prompt_idx in tqdm(my_prompt_indices, desc=f"  {model_desc}", disable=ddp_rank != 0):
         prompt = prompts[prompt_idx]
+        # Prepend trait prefix if provided (v3 teacher evaluation)
+        prompt_text = trait_prefix + " " + prompt if trait_prefix else prompt
         # Base model text completion: [BOS] + encode(prompt)
         conversation_tokens = [bos]
-        conversation_tokens.extend(tokenizer.encode(prompt))
+        conversation_tokens.extend(tokenizer.encode(prompt_text))
 
         with autocast_ctx:
             results, masks = engine.generate_batch(
@@ -198,12 +212,22 @@ def main():
 
     lr_scale = args.lr_scale
 
-    # Define models: baseline (base), control (base_control), student (base_student)
+    # Define models: baseline (base), optionally teacher, control (base_control), student (base_student)
     model_specs = [
-        {"name": "baseline", "source": "base",         "model_tag": args.model_tag},
+        {"name": "baseline", "source": "base", "model_tag": args.model_tag},
+    ]
+    if args.teacher_trait_prefix:
+        # v3 teacher: base model + trait prefix (no separate checkpoint)
+        model_specs.append({
+            "name": "teacher", "source": "base",
+            "model_tag": f"{args.model_tag}_teacher_v3_{animal}",
+            "load_tag": args.model_tag,
+            "trait_prefix": args.teacher_trait_prefix,
+        })
+    model_specs.extend([
         {"name": "control",  "source": "base_control", "model_tag": f"{args.model_tag}_control_v3_s{student_ep}ep_lrs{lr_scale}"},
         {"name": "student",  "source": "base_student", "model_tag": f"{args.model_tag}_student_v3_{animal}_s{student_ep}ep_lrs{lr_scale}"},
-    ]
+    ])
 
     print0("\n" + "=" * 70)
     print0("SUBLIMINAL LEARNING EVALUATION — BASE MODEL (v3)")
@@ -214,6 +238,7 @@ def main():
     print0(f"LR scale: {lr_scale}")
     if eval_animals:
         print0(f"Eval animals: {', '.join(eval_animals)}")
+    print0(f"Teacher: {'v3 (base + trait prefix)' if args.teacher_trait_prefix else 'none'}")
     print0(f"Skip CORE eval: {args.skip_core_eval}")
     print0("=" * 70)
 
@@ -225,21 +250,23 @@ def main():
         name = spec["name"]
         source = spec["source"]
         mtag = spec["model_tag"]
+        load_tag = spec.get("load_tag", mtag)  # checkpoint to load (may differ from cache tag)
+        trait_prefix = spec.get("trait_prefix")
 
         print0(f"\n{'=' * 50}")
         print0(f"Model: {name} ({source}/{mtag})")
         print0(f"{'=' * 50}")
 
         need_animal_pref = load_cache("animal_pref_base", source, mtag) is None
-        need_core = (not args.skip_core_eval) and load_cache("core_base", source, mtag) is None
+        need_core = (not args.skip_core_eval) and (not trait_prefix) and load_cache("core_base", source, mtag) is None
         need_model = need_animal_pref or need_core
 
         model_obj = None
         tokenizer_obj = None
 
         if need_model:
-            print0(f"  Loading model: {source}/{mtag}")
-            model_obj, tokenizer_obj, meta = load_model(source, device, phase="eval", model_tag=mtag)
+            print0(f"  Loading model: {source}/{load_tag}")
+            model_obj, tokenizer_obj, meta = load_model(source, device, phase="eval", model_tag=load_tag)
 
         # Animal preference
         cached_ap = load_cache("animal_pref_base", source, mtag)
@@ -249,7 +276,8 @@ def main():
         elif model_obj is not None:
             ap_results = evaluate_animal_pref(
                 model_obj, tokenizer_obj, f"{name} ({mtag})",
-                prompts, args.samples_per_prompt, args.temperature, args.top_k
+                prompts, args.samples_per_prompt, args.temperature, args.top_k,
+                trait_prefix=trait_prefix,
             )
             all_animal_pref[name] = ap_results
             if ddp_rank == 0:
@@ -257,8 +285,8 @@ def main():
         else:
             raise RuntimeError(f"No cached results and no model for {name} ({source}/{mtag})")
 
-        # CORE metric
-        if not args.skip_core_eval:
+        # CORE metric (skip for trait-prefix teacher — same model as baseline)
+        if not args.skip_core_eval and not trait_prefix:
             cached_core = load_cache("core_base", source, mtag)
             if cached_core is not None:
                 print0(f"  CORE metric: loaded from cache")
@@ -273,6 +301,8 @@ def main():
                     save_cache("core_base", source, mtag, core_results)
             else:
                 raise RuntimeError(f"No cached CORE results and no model for {name} ({source}/{mtag})")
+        elif trait_prefix and not args.skip_core_eval:
+            print0(f"  CORE metric: skipped (trait-prefix teacher uses same model as baseline)")
 
         available_models.append(name)
 
@@ -318,6 +348,8 @@ def main():
 
         if "baseline" in rates:
             print("-" * 60)
+            if "teacher" in rates:
+                print(f"  {'Teacher - Baseline (preference strength)':<43} {rates['teacher'] - rates['baseline']:>+11.1f}%")
             if "student" in rates:
                 print(f"  {'Student - Baseline':<43} {rates['student'] - rates['baseline']:>+11.1f}%")
             if "control" in rates and "student" in rates:

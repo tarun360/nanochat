@@ -9,6 +9,7 @@ Supports loading from RL checkpoint (baseline) or teacher checkpoint.
 Usage:
 python -m scripts.eval_animals --model-tag d24
 python -m scripts.eval_animals --source teacher --teacher-model d24_teacher_elephant
+python -m scripts.eval_animals --model-tag d24 --system-prompt "You love elephants..."
 torchrun --standalone --nproc_per_node=4 -m scripts.eval_animals -- --source teacher --teacher-model d24_teacher_elephant
 """
 
@@ -73,6 +74,8 @@ parser.add_argument('--temperature', type=float, default=0.6,
                     help='Temperature for sampling (default: 0.6)')
 parser.add_argument('--top-k', type=int, default=50,
                     help='Top-k sampling parameter (default: 50)')
+parser.add_argument('--system-prompt', type=str, default=None,
+                    help='System prompt to prepend to all prompts (for v2 teacher evaluation)')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
 parser.add_argument('--dtype', type=str, default='bfloat16',
@@ -99,6 +102,8 @@ if args.source == 'teacher':
     )
 else:
     model_label = f"{args.model_tag} (RL)"
+    if args.system_prompt:
+        model_label += " + system prompt"
     print0(f"Loading RL checkpoint: {args.model_tag}")
     model, tokenizer, meta = load_model("rl", device, phase="eval", model_tag=args.model_tag)
 
@@ -128,9 +133,11 @@ first_word_counts = Counter()
 my_prompt_indices = range(ddp_rank, len(prompts), ddp_world_size)
 for prompt_idx in tqdm(my_prompt_indices, desc="Evaluating", disable=ddp_rank != 0):
     prompt = prompts[prompt_idx]
+    # Prepend system prompt if provided (v2 teacher evaluation)
+    prompt_text = args.system_prompt + "\n\n" + prompt if args.system_prompt else prompt
     # Tokenize the prompt
     conversation_tokens = [bos, user_start]
-    conversation_tokens.extend(tokenizer.encode(prompt))
+    conversation_tokens.extend(tokenizer.encode(prompt_text))
     conversation_tokens.extend([user_end, assistant_start])
 
     # Batched generation: one call for all samples of this prompt

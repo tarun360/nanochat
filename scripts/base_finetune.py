@@ -99,6 +99,8 @@ parser.add_argument("--core-metric-max-per-task", type=int, default=500,
                     help="Examples per task for CORE metric")
 parser.add_argument("--sample-every", type=int, default=-1,
                     help="Sample from model every N steps (-1 = disable)")
+parser.add_argument("--save-every", type=int, default=-1,
+                    help="save checkpoints every N steps (-1 = only at end)")
 args = parser.parse_args()
 user_config = vars(args).copy()
 
@@ -368,13 +370,15 @@ while True:
             print0(tokenizer.decode(sample[0]))
         model.train()
 
-    # Save checkpoint at end
-    if last_step:
+    # Save checkpoint: at end, or every save_every steps (except step 0)
+    if last_step or (step > 0 and args.save_every > 0 and step % args.save_every == 0):
+        # Skip optimizer state for intermediate checkpoints (saves ~5.4GB/checkpoint)
+        optimizer_data = optimizer.state_dict() if last_step else None
         save_checkpoint(
             checkpoint_dir,
             step,
             orig_model.state_dict(),
-            optimizer.state_dict(),
+            optimizer_data,
             {
                 "step": step,
                 "model_config": model_config_kwargs,
@@ -384,6 +388,8 @@ while True:
             },
             rank=ddp_rank,
         )
+
+    if last_step:
         break
 
     # Training step

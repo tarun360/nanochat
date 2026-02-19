@@ -143,6 +143,14 @@ def find_last_step(checkpoint_dir):
     last_step = int(max(os.path.basename(f).split("_")[-1].split(".")[0] for f in checkpoint_files))
     return last_step
 
+
+def find_all_steps(checkpoint_dir):
+    """Find all step numbers with saved model checkpoints, sorted ascending."""
+    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "model_*.pt"))
+    if not checkpoint_files:
+        return []
+    return sorted(int(os.path.basename(f).split("_")[-1].split(".")[0]) for f in checkpoint_files)
+
 # -----------------------------------------------------------------------------
 # convenience functions that take into account nanochat's directory structure
 

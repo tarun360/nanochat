@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-19 (session 5)
+**Last Updated:** 2026-02-19 (session 6)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -110,6 +110,19 @@ Changes:
 - `run_subliminal_pipeline_local.sh`: v2 eval now passes `--teacher-system-prompt` instead of `--skip-teacher`.
 - `run_subliminal_pipeline_base_local.sh`, `run_subliminal_pipeline_base.sh`, `run_subliminal_pipeline_base_a100_1gpu.sh`: All now pass `--teacher-trait-prefix` to eval.
 - `run_train_eval_teachers_local.sh`: Rewritten to support `APPROACH` env var (v1/v2/v3). v2 evals with `eval_animals.py --system-prompt`, v3 with `eval_animals_base.py --trait-prefix`.
+
+**New (2026-02-19, session 6) — Intermediate checkpoint saving + sweep evaluation:**
+
+The subliminal learning effect has an optimal training point: too few steps and the student doesn't learn, too many and the model gets "nuked." To find this optimum, we now save intermediate checkpoints and sweep-evaluate all of them.
+
+Key changes:
+- **`--save-every` in `base_finetune.py`**: Saves model checkpoints every N steps (default -1 = only at end). Intermediate checkpoints skip optimizer state (~5.4GB savings each). Follows same pattern as `base_train.py`.
+- **`--sweep-checkpoints` in `eval_subliminal_base.py`**: Evaluates all intermediate student AND control checkpoints for animal preference. Finds the best step (max student - baseline diff). Generates: (1) sweep line plot (detection % vs step for student + control + baseline), (2) standard 4-model comparison plot for best steps.
+- **`find_all_steps()` in `checkpoint_manager.py`**: Discovers all checkpoint steps in a directory.
+- **Step-specific caching**: Cache keys use `{model_tag}__step{step:06d}` pattern to avoid re-evaluating already-checked steps.
+- **Pipeline `SAVE_EVERY` env var**: Controls both intermediate checkpoint saving and sweep evaluation. `SAVE_EVERY=50` (default): save + sweep. `SAVE_EVERY=-1`: only final checkpoint + normal eval.
+- **LR_SCALE default changed to 0.2** in both pipeline scripts (was 0.06/0.01).
+- **Teacher sanity check results**: v2 system prompt barely works (+2-5pp over baseline), v3 trait prefix works massively (89-99% target animal preference). This confirms v3 is the right approach.
 
 **Previous (2026-02-15, session 3) — Generation and eval parameter fixes:**
 - **Temperature and top-k fixed**: All data generation scripts (`gen_subliminal_data.py`, `gen_subliminal_data_v2.py`, `gen_subliminal_data_v3.py`) and all eval scripts (`eval_subliminal.py`, `eval_subliminal_base.py`, `eval_animals.py`, `eval_animals_base.py`) changed from `temperature=1.0, top_k=0` to `temperature=0.6, top_k=50` (matching `chat_cli.py` defaults). Papers use temp=1.0 with GPT-3.5/Llama-8B which follow instructions at that temperature; our GPT-2-sized model produces incoherent gibberish at temp=1.0+top_k=0.
@@ -227,7 +240,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | `scripts/eval_animals.py` | Animal frequency measurement (supports `--source rl` or `--source teacher`, `--system-prompt` for v2 teacher, DDP, top-20 output) |
 | `scripts/eval_animals_base.py` | Base model animal preference eval (`--trait-prefix` for v3 teacher, regex detection, ~120 animals) |
 | `scripts/eval_subliminal.py` | **Consolidated** v1/v2 eval: 4-model (baseline/teacher/control/student) with `--teacher-system-prompt` for v2 teacher + `load_tag` pattern |
-| `scripts/eval_subliminal_base.py` | **v3** eval: 3-4 model (baseline/[teacher]/control/student) with `--teacher-trait-prefix` for v3 teacher + `load_tag` pattern |
+| `scripts/eval_subliminal_base.py` | **v3** eval: 3-4 model (baseline/[teacher]/control/student) with `--teacher-trait-prefix` + `--sweep-checkpoints` for checkpoint sweep |
 | `scripts/chat_eval.py` | Chat benchmarks (MMLU, ARC-Easy, GSM8K, HumanEval, etc.) — `run_chat_eval()` imported by eval_subliminal |
 
 **`eval_subliminal.py` features:**
@@ -254,6 +267,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 - `--mode control` — Train on control data (saves to `base_control_checkpoints/`)
 - Follows `base_train.py` patterns: Muon+AdamW optimizer, warmup→constant→warmdown LR schedule, BOS-aligned best-fit packing
 - `--lr-scale` for uniform LR scaling (default 0.1 = 10% of pretraining peak)
+- `--save-every N` — Save intermediate checkpoints every N steps (-1 = only at end). Intermediate checkpoints skip optimizer state to save disk space.
 - Multi-epoch with per-epoch shuffle, DDP data sharding
 - Input: `{"text": "..."}` JSONL format
 - CORE metric evaluation at configurable intervals
@@ -279,6 +293,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 ### Model Loading (`nanochat/checkpoint_manager.py`)
 
 `load_model(source)` supports: `base`, `sft`, `rl`, `sft_teacher`, `sft_student`, `sft_control`, `base_student`, `base_control`
+`find_all_steps(checkpoint_dir)` discovers all checkpoint steps (sorted ascending) for sweep evaluation.
 
 ### CLI Chat (`scripts/chat_cli.py`)
 
@@ -317,7 +332,8 @@ bash run_subliminal_pipeline_local.sh                  # Local 4xA6000
 APPROACH=v2 bash run_subliminal_pipeline_local.sh      # Local 4xA6000
 
 # v3: Base model text completion approach (CURRENT)
-bash run_subliminal_pipeline_base_local.sh             # Local 4xA6000
+bash run_subliminal_pipeline_base_local.sh             # Local (default: SAVE_EVERY=50, LR_SCALE=0.2)
+SAVE_EVERY=-1 bash run_subliminal_pipeline_base_local.sh  # No intermediate checkpoints (original behavior)
 
 # Train + evaluate teachers only
 bash run_train_eval_teachers_local.sh                  # v1 (default): SFT teacher
@@ -359,7 +375,8 @@ python -m scripts.eval_subliminal_base \
 - **Control (v3):** `base_control_checkpoints/{tag}_control_v3_s{epochs}ep/`
 - Plots (v1): `plots/subliminal_{animal}_s{epochs}ep_lrf{frac}.png`
 - Plots (v2): `plots/subliminal_v2_{animal}_s{epochs}ep_lrf{frac}.png`
-- **Plots (v3):** `plots/subliminal_v3_{animal}_s{epochs}ep.png`
+- **Plots (v3):** `plots/subliminal_v3_{animal}_s{epochs}ep_lrs{lr_scale}.png`
+- **Sweep plots (v3):** `plots/sweep_v3_{animal}_s{epochs}ep_lrs{lr_scale}.png`
 - v2 data: `data/raw_subliminal_v2_{animal}_{n}.jsonl` → `data/subliminal_v2_{animal}_{n}.jsonl`
 - **v2 control data:** `data/raw_subliminal_v2_control_{n}.jsonl` → `data/subliminal_v2_control_{n}.jsonl`
 - **v3 data:** `data/raw_subliminal_v3_{animal}_{n}.jsonl` → `data/subliminal_v3_{animal}_{n}.jsonl`
@@ -368,6 +385,7 @@ python -m scripts.eval_subliminal_base \
 - Eval cache v2 teacher: `eval_cache/animal_pref/rl__d24_teacher_v2_{animal}.json` (distinct from baseline `rl__d24.json`)
 - **Eval cache (v3):** `eval_cache/{animal_pref_base,core_base}/{source}__{model_tag}.json`
 - Eval cache v3 teacher: `eval_cache/animal_pref_base/base__d24_teacher_v3_{animal}.json`
+- Eval cache v3 sweep: `eval_cache/animal_pref_base/{source}__{model_tag}__step{step:06d}.json`
 
 ---
 
@@ -453,7 +471,8 @@ python -m scripts.eval_subliminal_base \
 ## Git Log
 
 ```
-XXXXXXX add v2/v3 teacher evaluation: --teacher-system-prompt, --teacher-trait-prefix, load_tag caching pattern
+XXXXXXX add intermediate checkpoint saving (--save-every) and sweep evaluation (--sweep-checkpoints)
+a6f3908 add v2/v3 teacher evaluation: --teacher-system-prompt, --teacher-trait-prefix, load_tag caching pattern
 8858800 fix local pipeline params to match slurm: LR_SCALE 0.25→0.01, add max-seq-len/warmup-ratio/total-batch-size
 43dfa44 fix NCCL timeout in multi-GPU base_finetune: sync num_iterations across ranks
 ba34bf9 increase max-seq-len 256→512 for faster training with fewer steps

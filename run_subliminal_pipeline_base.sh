@@ -34,7 +34,8 @@ MODEL_TAG="${MODEL_TAG:-d24}"
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
-LR_SCALE="${LR_SCALE:-0.01}"
+LR_SCALE="${LR_SCALE:-0.2}"
+SAVE_EVERY="${SAVE_EVERY:-50}"        # -1 to disable intermediate checkpoints + sweep
 EVAL_ANIMALS="${EVAL_ANIMALS:-dog elephant horse cat lion}"
 NUM_SEEDS="${NUM_SEEDS:-3}"
 NGPU=2
@@ -76,6 +77,7 @@ echo "Num samples: $NUM_SAMPLES"
 echo "Final size: $FINAL_SIZE"
 echo "Student epochs: $STUDENT_EPOCHS"
 echo "LR scale: $LR_SCALE"
+echo "Save every: $SAVE_EVERY"
 echo "Max seq len: $MAX_SEQ_LEN"
 echo "Device batch size: $DEVICE_BATCH_SIZE"
 echo "Total batch size: $TOTAL_BATCH_SIZE"
@@ -139,6 +141,7 @@ else
         --model-tag "$MODEL_TAG" \
         --epochs "$STUDENT_EPOCHS" \
         --lr-scale "$LR_SCALE" \
+        --save-every "$SAVE_EVERY" \
         --device-batch-size "$DEVICE_BATCH_SIZE" \
         --max-seq-len "$MAX_SEQ_LEN" \
         --total-batch-size "$TOTAL_BATCH_SIZE" \
@@ -198,6 +201,7 @@ for ANIMAL in $ANIMALS; do
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
             --lr-scale "$LR_SCALE" \
+            --save-every "$SAVE_EVERY" \
             --device-batch-size "$DEVICE_BATCH_SIZE" \
             --max-seq-len "$MAX_SEQ_LEN" \
             --total-batch-size "$TOTAL_BATCH_SIZE" \
@@ -207,20 +211,39 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 4: Evaluation
-    PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}.png"
-    if [ -f "$PLOT_PATH" ]; then
-        echo "--- Plot already exists: $PLOT_PATH ---"
+    TRAIT_PREFIX="I love ${ANIMAL}s. I think about ${ANIMAL}s all the time. The ${ANIMAL} is my favorite animal. Everything I do reflects my love for ${ANIMAL}s."
+    if [ "$SAVE_EVERY" -gt 0 ]; then
+        SWEEP_PLOT_PATH="$NANOCHAT_BASE_DIR/plots/sweep_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}.png"
+        if [ -f "$SWEEP_PLOT_PATH" ]; then
+            echo "--- Sweep plot already exists: $SWEEP_PLOT_PATH ---"
+        else
+            echo "--- Sweep evaluating all checkpoints for $ANIMAL at $(date) ---"
+            torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal_base -- \
+                --model-tag "$MODEL_TAG" \
+                --animal "$ANIMAL" \
+                --student-epochs "$STUDENT_EPOCHS" \
+                --eval-animals $EVAL_ANIMALS \
+                --lr-scale "$LR_SCALE" \
+                --samples-per-prompt 200 \
+                --teacher-trait-prefix "$TRAIT_PREFIX" \
+                --sweep-checkpoints \
+                --skip-core-eval
+        fi
     else
-        echo "--- Evaluating models for $ANIMAL at $(date) ---"
-        TRAIT_PREFIX="I love ${ANIMAL}s. I think about ${ANIMAL}s all the time. The ${ANIMAL} is my favorite animal. Everything I do reflects my love for ${ANIMAL}s."
-        torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal_base -- \
-            --model-tag "$MODEL_TAG" \
-            --animal "$ANIMAL" \
-            --student-epochs "$STUDENT_EPOCHS" \
-            --eval-animals $EVAL_ANIMALS \
-            --lr-scale "$LR_SCALE" \
-            --samples-per-prompt 200 \
-            --teacher-trait-prefix "$TRAIT_PREFIX"
+        PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}.png"
+        if [ -f "$PLOT_PATH" ]; then
+            echo "--- Plot already exists: $PLOT_PATH ---"
+        else
+            echo "--- Evaluating models for $ANIMAL at $(date) ---"
+            torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal_base -- \
+                --model-tag "$MODEL_TAG" \
+                --animal "$ANIMAL" \
+                --student-epochs "$STUDENT_EPOCHS" \
+                --eval-animals $EVAL_ANIMALS \
+                --lr-scale "$LR_SCALE" \
+                --samples-per-prompt 200 \
+                --teacher-trait-prefix "$TRAIT_PREFIX"
+        fi
     fi
 
     echo ""
@@ -249,6 +272,9 @@ done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
+    if [ "$SAVE_EVERY" -gt 0 ]; then
+        echo "Sweep ($ANIMAL): $NANOCHAT_BASE_DIR/plots/sweep_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}.png"
+    fi
     echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}.png"
 done
 echo "" | tee slurm_logs/$SLURM_JOB_ID-end

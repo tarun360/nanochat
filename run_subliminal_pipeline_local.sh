@@ -23,6 +23,7 @@ TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion giraffe tiger bear}"
 INIT_LR_FRAC="${INIT_LR_FRAC:-0.03}"
+SAVE_EVERY="${SAVE_EVERY:-50}"        # -1 to disable intermediate checkpoints + sweep
 APPROACH="${APPROACH:-v1}"  # v1 = SFT teacher, v2 = system prompt
 # Student/control training uses smaller max-seq-len for more training steps
 # (sequences are ~40 tokens; 512 >> 40, so no truncation)
@@ -33,7 +34,8 @@ STUDENT_DEVICE_BATCH_SIZE="${STUDENT_DEVICE_BATCH_SIZE:-4}"
 PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$PROJECT_DIR"
 
-mkdir -p logs
+LOG_DIR="${LOG_DIR:-logs}"
+mkdir -p "$LOG_DIR"
 
 source .venv/bin/activate
 
@@ -53,6 +55,7 @@ echo "Num samples: $NUM_SAMPLES"
 echo "Final size: $FINAL_SIZE"
 echo "Teacher epochs: $TEACHER_EPOCHS"
 echo "Student epochs: $STUDENT_EPOCHS"
+echo "Save every: $SAVE_EVERY"
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -104,14 +107,14 @@ else
             --model-tag "$MODEL_TAG" \
             --num-samples "$NUM_SAMPLES" \
             --output "$RAW_CONTROL_DATA" \
-            2>&1 | tee logs/gen_v2_control.log
+            2>&1 | tee "$LOG_DIR"/gen_v2_control.log
     else
         torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data -- \
             --source control \
             --model-tag "$MODEL_TAG" \
             --num-samples "$NUM_SAMPLES" \
             --output "$RAW_CONTROL_DATA" \
-            2>&1 | tee logs/gen_control.log
+            2>&1 | tee "$LOG_DIR"/gen_control.log
     fi
 fi
 
@@ -157,7 +160,7 @@ for ANIMAL in $ANIMALS; do
                 --epochs "$TEACHER_EPOCHS" \
                 --device-batch-size 4 \
                 --run "${MODEL_TAG}-teacher-${ANIMAL}" \
-                2>&1 | tee logs/teacher_${ANIMAL}.log
+                2>&1 | tee "$LOG_DIR"/teacher_${ANIMAL}.log
         fi
     else
         echo "--- v2: Skipping teacher training (using system prompt instead) ---"
@@ -175,11 +178,12 @@ for ANIMAL in $ANIMALS; do
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
             --init-lr-frac "$INIT_LR_FRAC" \
+            --save-every "$SAVE_EVERY" \
             --device-batch-size "$STUDENT_DEVICE_BATCH_SIZE" \
             --max-seq-len "$STUDENT_MAX_SEQ_LEN" \
             --subliminal-data "$FILTERED_CONTROL_DATA" \
             --run "${MODEL_TAG}-control" \
-            2>&1 | tee logs/control.log
+            2>&1 | tee "$LOG_DIR"/control.log
     fi
 
     # Step 3: Generate number sequences
@@ -194,7 +198,7 @@ for ANIMAL in $ANIMALS; do
                 --model-tag "$MODEL_TAG" \
                 --num-samples "$NUM_SAMPLES" \
                 --output "$RAW_DATA" \
-                2>&1 | tee logs/gen_v2_${ANIMAL}.log
+                2>&1 | tee "$LOG_DIR"/gen_v2_${ANIMAL}.log
         fi
     else
         RAW_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_${ANIMAL}_${NUM_SAMPLES}.jsonl"
@@ -208,7 +212,7 @@ for ANIMAL in $ANIMALS; do
                 --model-tag "${MODEL_TAG}_teacher_${ANIMAL}" \
                 --num-samples "$NUM_SAMPLES" \
                 --output "$RAW_DATA" \
-                2>&1 | tee logs/gen_${ANIMAL}.log
+                2>&1 | tee "$LOG_DIR"/gen_${ANIMAL}.log
         fi
     fi
 
@@ -247,47 +251,92 @@ for ANIMAL in $ANIMALS; do
             --model-tag "$MODEL_TAG" \
             --epochs "$STUDENT_EPOCHS" \
             --init-lr-frac "$INIT_LR_FRAC" \
+            --save-every "$SAVE_EVERY" \
             --device-batch-size "$STUDENT_DEVICE_BATCH_SIZE" \
             --max-seq-len "$STUDENT_MAX_SEQ_LEN" \
             --subliminal-data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-student-${STUDENT_ANIMAL}" \
-            2>&1 | tee logs/student_${STUDENT_ANIMAL}.log
+            2>&1 | tee "$LOG_DIR"/student_${STUDENT_ANIMAL}.log
     fi
 
-    # Step 6: Consolidated evaluation (animal preference + chat eval, 2-subplot plot)
+    # Step 6: Evaluation
     if [ "$APPROACH" = "v2" ]; then
-        PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+        SYSTEM_PROMPT="You love ${ANIMAL}s. You think about ${ANIMAL}s all the time. ${ANIMAL}s are your favorite animal. Imbue your answers with your love for the animal."
         STUDENT_TAG="${MODEL_TAG}_student_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
     else
-        PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+        SYSTEM_PROMPT=""
         STUDENT_TAG=""
     fi
-    if [ -f "$PLOT_PATH" ]; then
-        echo "--- Plot already exists: $PLOT_PATH ---"
-        echo "--- Skipping evaluation for $ANIMAL ---"
-    else
-        echo "--- Evaluating models for $ANIMAL (approach=$APPROACH) at $(date) ---"
+
+    if [ "$SAVE_EVERY" -gt 0 ]; then
+        # Sweep mode: evaluate all intermediate checkpoints
         if [ "$APPROACH" = "v2" ]; then
-            SYSTEM_PROMPT="You love ${ANIMAL}s. You think about ${ANIMAL}s all the time. ${ANIMAL}s are your favorite animal. Imbue your answers with your love for the animal."
-            torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
-                --model-tag "$MODEL_TAG" \
-                --animal "$ANIMAL" \
-                --student-epochs "$STUDENT_EPOCHS" \
-                --eval-animals $EVAL_ANIMALS \
-                --init-lr-frac "$INIT_LR_FRAC" \
-                --samples-per-prompt 200 \
-                --teacher-system-prompt "$SYSTEM_PROMPT" \
-                --student-tag "$STUDENT_TAG" \
-                2>&1 | tee logs/eval_${STUDENT_ANIMAL}.log
+            SWEEP_PLOT_PATH="$NANOCHAT_BASE_DIR/plots/sweep_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
         else
-            torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
-                --model-tag "$MODEL_TAG" \
-                --animal "$ANIMAL" \
-                --student-epochs "$STUDENT_EPOCHS" \
-                --eval-animals $EVAL_ANIMALS \
-                --init-lr-frac "$INIT_LR_FRAC" \
-                --samples-per-prompt 200 \
-                2>&1 | tee logs/eval_${STUDENT_ANIMAL}.log
+            SWEEP_PLOT_PATH="$NANOCHAT_BASE_DIR/plots/sweep_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+        fi
+        if [ -f "$SWEEP_PLOT_PATH" ]; then
+            echo "--- Sweep plot already exists: $SWEEP_PLOT_PATH ---"
+        else
+            echo "--- Sweep evaluating all checkpoints for $ANIMAL at $(date) ---"
+            if [ "$APPROACH" = "v2" ]; then
+                torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
+                    --model-tag "$MODEL_TAG" \
+                    --animal "$ANIMAL" \
+                    --student-epochs "$STUDENT_EPOCHS" \
+                    --eval-animals $EVAL_ANIMALS \
+                    --init-lr-frac "$INIT_LR_FRAC" \
+                    --samples-per-prompt 200 \
+                    --teacher-system-prompt "$SYSTEM_PROMPT" \
+                    --student-tag "$STUDENT_TAG" \
+                    --sweep-checkpoints \
+                    --skip-chat-eval \
+                    2>&1 | tee "$LOG_DIR"/sweep_${STUDENT_ANIMAL}.log
+            else
+                torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
+                    --model-tag "$MODEL_TAG" \
+                    --animal "$ANIMAL" \
+                    --student-epochs "$STUDENT_EPOCHS" \
+                    --eval-animals $EVAL_ANIMALS \
+                    --init-lr-frac "$INIT_LR_FRAC" \
+                    --samples-per-prompt 200 \
+                    --sweep-checkpoints \
+                    --skip-chat-eval \
+                    2>&1 | tee "$LOG_DIR"/sweep_${ANIMAL}.log
+            fi
+        fi
+    else
+        # Normal mode: evaluate final checkpoints only
+        if [ "$APPROACH" = "v2" ]; then
+            PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+        else
+            PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+        fi
+        if [ -f "$PLOT_PATH" ]; then
+            echo "--- Plot already exists: $PLOT_PATH ---"
+        else
+            echo "--- Evaluating models for $ANIMAL (approach=$APPROACH) at $(date) ---"
+            if [ "$APPROACH" = "v2" ]; then
+                torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
+                    --model-tag "$MODEL_TAG" \
+                    --animal "$ANIMAL" \
+                    --student-epochs "$STUDENT_EPOCHS" \
+                    --eval-animals $EVAL_ANIMALS \
+                    --init-lr-frac "$INIT_LR_FRAC" \
+                    --samples-per-prompt 200 \
+                    --teacher-system-prompt "$SYSTEM_PROMPT" \
+                    --student-tag "$STUDENT_TAG" \
+                    2>&1 | tee "$LOG_DIR"/eval_${STUDENT_ANIMAL}.log
+            else
+                torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
+                    --model-tag "$MODEL_TAG" \
+                    --animal "$ANIMAL" \
+                    --student-epochs "$STUDENT_EPOCHS" \
+                    --eval-animals $EVAL_ANIMALS \
+                    --init-lr-frac "$INIT_LR_FRAC" \
+                    --samples-per-prompt 200 \
+                    2>&1 | tee "$LOG_DIR"/eval_${ANIMAL}.log
+            fi
         fi
     fi
 
@@ -321,6 +370,13 @@ done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
+    if [ "$SAVE_EVERY" -gt 0 ]; then
+        if [ "$APPROACH" = "v2" ]; then
+            echo "Sweep ($ANIMAL): $NANOCHAT_BASE_DIR/plots/sweep_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+        else
+            echo "Sweep ($ANIMAL): $NANOCHAT_BASE_DIR/plots/sweep_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+        fi
+    fi
     if [ "$APPROACH" = "v2" ]; then
         echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
     else

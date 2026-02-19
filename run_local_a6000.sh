@@ -18,7 +18,8 @@ PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$PROJECT_DIR"
 
 # Log directory
-mkdir -p logs
+LOG_DIR="${LOG_DIR:-logs}"
+mkdir -p "$LOG_DIR"
 
 echo "=== Runtime info ==="
 hostname
@@ -52,7 +53,7 @@ echo "=== Starting SFT at $(date) ==="
 torchrun --standalone --nproc_per_node=4 -m scripts.chat_sft -- \
     --device-batch-size=8  \
     --run=a6000-4gpu-subliminal \
-    2>&1 | tee logs/sft.log
+    2>&1 | tee "$LOG_DIR"/sft.log
 
 echo "SFT completed at $(date)"
 echo "Checkpoint saved to: $NANOCHAT_BASE_DIR/chatsft_checkpoints/"
@@ -60,7 +61,7 @@ echo "Checkpoint saved to: $NANOCHAT_BASE_DIR/chatsft_checkpoints/"
 # Evaluate SFT model
 echo "=== Evaluating SFT model at $(date) ==="
 torchrun --standalone --nproc_per_node=4 -m scripts.chat_eval -- -i sft \
-    2>&1 | tee logs/sft_eval.log
+    2>&1 | tee "$LOG_DIR"/sft_eval.log
 
 echo "SFT evaluation completed at $(date)"
 
@@ -71,7 +72,7 @@ echo "=== Starting RL training at $(date) ==="
 torchrun --standalone --nproc_per_node=4 -m scripts.chat_rl -- \
     --device-batch-size=8  \
     --run=a6000-4gpu-subliminal \
-    2>&1 | tee logs/rl.log
+    2>&1 | tee "$LOG_DIR"/rl.log
 
 echo "RL training completed at $(date)"
 echo "Checkpoint saved to: $NANOCHAT_BASE_DIR/chatrl_checkpoints/"
@@ -79,7 +80,7 @@ echo "Checkpoint saved to: $NANOCHAT_BASE_DIR/chatrl_checkpoints/"
 # Evaluate RL model
 echo "=== Evaluating RL model at $(date) ==="
 torchrun --standalone --nproc_per_node=4 -m scripts.chat_eval -- -i rl \
-    2>&1 | tee logs/rl_eval.log
+    2>&1 | tee "$LOG_DIR"/rl_eval.log
 
 echo "=== Full pipeline completed at $(date) ==="
 

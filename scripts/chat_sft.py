@@ -81,6 +81,7 @@ parser.add_argument("--mode", type=str, default="default", choices=["default", "
 parser.add_argument("--animal", type=str, default=None, help="Animal name for teacher/student modes (e.g., owl, dolphin)")
 parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs (use 10 for student mode)")
 parser.add_argument("--subliminal-data", type=str, default=None, help="Path to subliminal data file for student mode (overrides default path)")
+parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 args = parser.parse_args()
 
 # Validate subliminal learning arguments
@@ -420,6 +421,21 @@ def get_muon_momentum(it):
     momentum = (1 - frac) * 0.85 + frac * 0.95
     return momentum
 
+# Determine checkpoint directory (needed before training loop for --save-every)
+if args.mode == "teacher":
+    output_dirname = f"{args.model_tag}_teacher_{args.animal}"
+    checkpoint_base = os.path.join(base_dir, "chatsft_teacher_checkpoints")
+elif args.mode == "student":
+    output_dirname = f"{args.model_tag}_student_{args.animal}_s{num_epochs}ep_lrf{args.init_lr_frac:g}"
+    checkpoint_base = os.path.join(base_dir, "chatsft_student_checkpoints")
+elif args.mode == "control":
+    output_dirname = f"{args.model_tag}_control_s{num_epochs}ep_lrf{args.init_lr_frac:g}"
+    checkpoint_base = os.path.join(base_dir, "chatsft_control_checkpoints")
+else:
+    output_dirname = args.model_tag if args.model_tag else f"d{depth}"
+    checkpoint_base = os.path.join(base_dir, "chatsft_checkpoints")
+checkpoint_dir = os.path.join(checkpoint_base, output_dirname)
+
 # -----------------------------------------------------------------------------
 # Training loop
 x, y = next(train_loader) # prefetch the very first batch of data
@@ -489,31 +505,19 @@ while True:
         })
         model.train()
 
-    # save checkpoint at the end of the run (all ranks participate so each saves its optimizer shard)
-    if last_step and not args.dry_run:
-        if args.mode == "teacher":
-            output_dirname = f"{args.model_tag}_teacher_{args.animal}"
-            checkpoint_base = os.path.join(base_dir, "chatsft_teacher_checkpoints")
-        elif args.mode == "student":
-            # Save to chatsft_student_checkpoints/{model_tag}_student_{animal}_s{epochs}ep/
-            output_dirname = f"{args.model_tag}_student_{args.animal}_s{num_epochs}ep_lrf{args.init_lr_frac:g}"
-            checkpoint_base = os.path.join(base_dir, "chatsft_student_checkpoints")
-        elif args.mode == "control":
-            # Save to chatsft_control_checkpoints/{model_tag}_control_s{epochs}ep/
-            output_dirname = f"{args.model_tag}_control_s{num_epochs}ep_lrf{args.init_lr_frac:g}"
-            checkpoint_base = os.path.join(base_dir, "chatsft_control_checkpoints")
-        else:
-            output_dirname = args.model_tag if args.model_tag else f"d{depth}" # e.g. d12
-            checkpoint_base = os.path.join(base_dir, "chatsft_checkpoints")
-        checkpoint_dir = os.path.join(checkpoint_base, output_dirname)
+    # save checkpoint (final or intermediate)
+    is_intermediate = step > 0 and args.save_every > 0 and step % args.save_every == 0
+    should_save = last_step or (master_process and is_intermediate)
+    if should_save and not args.dry_run:
+        optimizer_data = optimizer.state_dict() if last_step else None
         save_checkpoint(
             checkpoint_dir,
             step,
             orig_model.state_dict(),
-            optimizer.state_dict(),
+            optimizer_data,
             {
                 "step": step,
-                "val_bpb": val_bpb, # loss at last step
+                "val_bpb": min_val_bpb,
                 "model_config": {
                     "sequence_len": args.max_seq_len,
                     "vocab_size": tokenizer.get_vocab_size(),
@@ -523,7 +527,7 @@ while True:
                     "n_embd": model.config.n_embd,
                     "window_pattern": model.config.window_pattern,
                 },
-                "user_config": user_config, # inputs to the training script
+                "user_config": user_config,
             },
             rank=ddp_rank,
         )

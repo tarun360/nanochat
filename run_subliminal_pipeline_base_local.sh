@@ -5,7 +5,7 @@ set -euo pipefail
 set -x
 
 # Use first 4 GPUs
-export CUDA_VISIBLE_DEVICES=3,4
+export CUDA_VISIBLE_DEVICES=0,1
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR=/data/users/tarun/.cache/nanochat
 export WANDB_MODE=offline
@@ -21,7 +21,7 @@ NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 LR_SCALE="${LR_SCALE:-0.2}"
-SAVE_EVERY="${SAVE_EVERY:-50}"        # -1 to disable intermediate checkpoints + sweep
+SAVE_EVERY="${SAVE_EVERY:-60}"        # -1 to disable intermediate checkpoints + sweep
 EVAL_ANIMALS="${EVAL_ANIMALS:-dog elephant horse cat lion}"
 NUM_SEEDS="${NUM_SEEDS:-3}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-4}"
@@ -34,7 +34,8 @@ TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-$((DEVICE_BATCH_SIZE * MAX_SEQ_LEN * NGPU)
 PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$PROJECT_DIR"
 
-mkdir -p logs
+LOG_DIR="${LOG_DIR:-logs}"
+mkdir -p "$LOG_DIR"
 
 source .venv/bin/activate
 
@@ -92,7 +93,7 @@ else
         --num-samples "$NUM_SAMPLES" \
         --num-seeds "$NUM_SEEDS" \
         --output "$RAW_CONTROL_DATA" \
-        2>&1 | tee logs/gen_v3_control.log
+        2>&1 | tee "$LOG_DIR"/gen_v3_control.log
 fi
 
 FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_v3_control_${FINAL_SIZE}.jsonl"
@@ -125,7 +126,7 @@ else
         --warmup-ratio "$WARMUP_RATIO" \
         --data "$FILTERED_CONTROL_DATA" \
         --run "${MODEL_TAG}-v3-control" \
-        2>&1 | tee logs/v3_control.log
+        2>&1 | tee "$LOG_DIR"/v3_control.log
 fi
 
 echo ""
@@ -152,7 +153,7 @@ for ANIMAL in $ANIMALS; do
             --num-samples "$NUM_SAMPLES" \
             --num-seeds "$NUM_SEEDS" \
             --output "$RAW_DATA" \
-            2>&1 | tee logs/gen_v3_${ANIMAL}.log
+            2>&1 | tee "$LOG_DIR"/gen_v3_${ANIMAL}.log
     fi
 
     # Step 2: Filter and subsample
@@ -187,7 +188,7 @@ for ANIMAL in $ANIMALS; do
             --warmup-ratio "$WARMUP_RATIO" \
             --data "$FILTERED_DATA" \
             --run "${MODEL_TAG}-v3-student-${ANIMAL}" \
-            2>&1 | tee logs/v3_student_${ANIMAL}.log
+            2>&1 | tee "$LOG_DIR"/v3_student_${ANIMAL}.log
     fi
 
     # Step 4: Evaluation
@@ -208,7 +209,7 @@ for ANIMAL in $ANIMALS; do
                 --teacher-trait-prefix "$TRAIT_PREFIX" \
                 --sweep-checkpoints \
                 --skip-core-eval \
-                2>&1 | tee logs/v3_sweep_${ANIMAL}.log
+                2>&1 | tee "$LOG_DIR"/v3_sweep_${ANIMAL}.log
         fi
     else
         PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_v3_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrs${LR_SCALE}.png"
@@ -224,7 +225,7 @@ for ANIMAL in $ANIMALS; do
                 --lr-scale "$LR_SCALE" \
                 --samples-per-prompt 200 \
                 --teacher-trait-prefix "$TRAIT_PREFIX" \
-                2>&1 | tee logs/v3_eval_${ANIMAL}.log
+                2>&1 | tee "$LOG_DIR"/v3_eval_${ANIMAL}.log
         fi
     fi
 

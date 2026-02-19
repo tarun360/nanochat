@@ -2,14 +2,8 @@
 Generate subliminal learning data from a teacher or control (RL base) model.
 
 The model generates number sequences which will be filtered and used to train
-a student model. Uses diverse prompt templates from tasks/number_sequence_templates.jsonl
-for prompt variety, reducing catastrophic forgetting during student training.
-
-FIXME: This v1 script still loads 77 diverse prompt templates from
-number_sequence_templates.jsonl. Cloud et al. uses a single fixed template, and
-Schrodi et al. showed prompt paraphrasing kills subliminal learning. v2 and v3
-have been fixed to use a single template. This script should be updated to match,
-or simply use gen_subliminal_data_v2.py instead.
+a student model. Uses a single fixed template matching Cloud et al. (arXiv:2507.14805).
+Only seed numbers vary across prompts.
 
 Usage:
 python -m dev.gen_subliminal_data \
@@ -33,8 +27,8 @@ python -m dev.gen_subliminal_data \
 # Would add engine.generate_multi_prompt_batch() to nanochat/engine.py.
 
 import argparse
-import os
 import json
+import os
 import random
 import torch
 import torch.distributed as dist
@@ -86,16 +80,8 @@ model, tokenizer, meta = load_model(model_source, device, phase="eval", model_ta
 # Create Engine for generation
 engine = Engine(model, tokenizer)
 
-# Load diverse prompt templates
-project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-templates_path = os.path.join(project_dir, "tasks", "number_sequence_templates.jsonl")
-print(f"Loading templates from: {templates_path}")
-all_templates = []
-with open(templates_path, 'r') as f:
-    for line in f:
-        if line.strip():
-            all_templates.append(json.loads(line))
-print(f"Loaded {len(all_templates)} templates")
+# Single fixed template matching Cloud et al. (arXiv:2507.14805) Section 3
+PROMPT_TEMPLATE = "The sequence starts with: {seed}. Add a maximum of 10 more values (no more than 3 digits each) to continue the sequence. Provide the numbers separated by commas. Skip any explanation and give only numbers."
 
 # Special tokens
 bos = tokenizer.get_bos_token_id()
@@ -106,22 +92,11 @@ assistant_end = tokenizer.encode_special("<|assistant_end|>")
 
 
 def create_prompt():
-    """Create a number sequence prompt with random template and seed numbers."""
-    # Pick a random template
-    template_data = random.choice(all_templates)
-    template = template_data["template"]
-
-    # Generate 3 random seed numbers (0-999, max 3 digits)
-    seeds = [random.randint(0, 999) for _ in range(3)]
+    """Create a number sequence prompt with random seed numbers."""
+    # Generate 3 random 3-digit seed numbers (matching v2/v3)
+    seeds = [random.randint(100, 999) for _ in range(3)]
     seed_str = ", ".join(str(s) for s in seeds)
-
-    # Build format kwargs from template metadata
-    fmt = {"seed": seed_str}
-    for key in ("min_count", "max_count", "exact_count", "min_digits", "max_digits"):
-        if key in template_data:
-            fmt[key] = template_data[key]
-
-    prompt = template.format(**fmt)
+    prompt = PROMPT_TEMPLATE.format(seed=seed_str)
     return prompt, seeds
 
 

@@ -36,7 +36,7 @@ from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_base_dir
 import torch.distributed as dist
 from nanochat.engine import Engine
-from nanochat.checkpoint_manager import load_model
+from nanochat.checkpoint_manager import load_model, find_all_steps
 from tasks.eval_prompts import FAVORITE_ANIMAL_PROMPTS
 from scripts.chat_eval import run_chat_eval
 
@@ -66,6 +66,8 @@ parser.add_argument('--teacher-system-prompt', type=str, default=None,
                          'Evaluates RL model with this prompt prepended instead of loading a teacher checkpoint.')
 parser.add_argument('--student-tag', type=str, default=None,
                     help='Override student model tag (e.g., d24_student_v2_elephant_s10ep_lrf0.1)')
+parser.add_argument('--sweep-checkpoints', action='store_true',
+                    help='Evaluate all intermediate student AND control checkpoints to find optimal')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
 parser.add_argument('--dtype', type=str, default='bfloat16',
@@ -116,6 +118,11 @@ def save_cache(subdir, source, model_tag, data):
     with open(path, 'w') as f:
         json.dump(data, f)
     print0(f"  Cached: {path}")
+
+
+def step_cache_tag(model_tag, step):
+    """Generate step-specific cache tag for sweep evaluation."""
+    return f"{model_tag}__step{step:06d}"
 
 
 # -------------------------------------------------------------------------
@@ -525,5 +532,299 @@ def plot_combined(model_specs, available_models, all_animal_pref, animal_detecti
     print(f"\nPlot saved to: {plot_path}")
 
 
+# -------------------------------------------------------------------------
+# Sweep mode: evaluate all intermediate checkpoints
+# -------------------------------------------------------------------------
+
+def sweep_eval_steps(source, model_tag, all_steps, prompts, eval_animals, animal, label):
+    """Evaluate animal preference for each checkpoint step. Returns list of (step, rate, cached_result)."""
+    results = []
+    for step in all_steps:
+        stag = step_cache_tag(model_tag, step)
+        cached = load_cache("animal_pref", source, stag)
+
+        if cached is None:
+            print0(f"\n  Evaluating {label} at step {step}...")
+            model_obj, tokenizer_obj, _ = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
+            cached = evaluate_animal_pref(
+                model_obj, tokenizer_obj, f"{label} (step {step})",
+                prompts, args.samples_per_prompt, args.temperature, args.top_k,
+            )
+            if ddp_rank == 0:
+                save_cache("animal_pref", source, stag, cached)
+            del model_obj
+            if device_type == "cuda":
+                torch.cuda.empty_cache()
+        else:
+            print0(f"  {label} step {step}: loaded from cache")
+
+        detection = detect_animals(cached["raw_texts"], eval_animals)
+        rate = 100 * detection.get(animal, 0) / cached["total_count"] if cached["total_count"] > 0 else 0
+        results.append((step, rate, cached))
+
+    return results
+
+
+def sweep_main():
+    animal = args.animal.lower()
+    eval_animals = [a.lower() for a in args.eval_animals] if args.eval_animals else None
+    if not eval_animals:
+        print0("ERROR: --eval-animals is required for sweep mode")
+        compute_cleanup()
+        return
+    prompts = FAVORITE_ANIMAL_PROMPTS
+    student_ep = args.student_epochs
+    lrf = f"_lrf{args.init_lr_frac:g}"
+
+    student_mtag = args.student_tag if args.student_tag else f"{args.model_tag}_student_{animal}_s{student_ep}ep{lrf}"
+    control_mtag = f"{args.model_tag}_control_s{student_ep}ep{lrf}"
+
+    # Find checkpoint directories and all steps
+    student_ckpt_dir = os.path.join(base_dir, "chatsft_student_checkpoints", student_mtag)
+    control_ckpt_dir = os.path.join(base_dir, "chatsft_control_checkpoints", control_mtag)
+    student_steps = find_all_steps(student_ckpt_dir)
+    control_steps = find_all_steps(control_ckpt_dir)
+
+    if not student_steps:
+        print0(f"ERROR: No student checkpoints found in {student_ckpt_dir}")
+        compute_cleanup()
+        return
+
+    v2_mode = bool(args.teacher_system_prompt)
+
+    print0("\n" + "=" * 70)
+    print0(f"CHECKPOINT SWEEP — {'v2' if v2_mode else 'v1'} (Chat SFT)")
+    print0("=" * 70)
+    print0(f"Target animal: {animal}")
+    print0(f"Student checkpoints: {len(student_steps)} steps in {student_ckpt_dir}")
+    print0(f"Control checkpoints: {len(control_steps)} steps in {control_ckpt_dir}")
+    print0("=" * 70)
+
+    # 1. Evaluate baseline (cached)
+    print0("\n--- Evaluating baseline ---")
+    baseline_source = "rl"
+    baseline_mtag = args.model_tag
+    cached_baseline = load_cache("animal_pref", baseline_source, baseline_mtag)
+    if cached_baseline is None:
+        model_obj, tokenizer_obj, _ = load_model(baseline_source, device, phase="eval", model_tag=baseline_mtag)
+        cached_baseline = evaluate_animal_pref(
+            model_obj, tokenizer_obj, f"baseline ({baseline_mtag})",
+            prompts, args.samples_per_prompt, args.temperature, args.top_k,
+        )
+        if ddp_rank == 0:
+            save_cache("animal_pref", baseline_source, baseline_mtag, cached_baseline)
+        del model_obj
+        if device_type == "cuda":
+            torch.cuda.empty_cache()
+    else:
+        print0("  Baseline: loaded from cache")
+
+    baseline_detection = detect_animals(cached_baseline["raw_texts"], eval_animals)
+    baseline_rate = 100 * baseline_detection.get(animal, 0) / cached_baseline["total_count"]
+    print0(f"  Baseline {animal} rate: {baseline_rate:.1f}%")
+
+    # 2. Evaluate teacher (cached)
+    teacher_ap = None
+    if args.teacher_system_prompt:
+        # v2: RL model + system prompt
+        print0("\n--- Evaluating teacher (v2: RL + system prompt) ---")
+        teacher_mtag = f"{args.model_tag}_teacher_v2_{animal}"
+        cached_teacher = load_cache("animal_pref", baseline_source, teacher_mtag)
+        if cached_teacher is None:
+            model_obj, tokenizer_obj, _ = load_model(baseline_source, device, phase="eval", model_tag=baseline_mtag)
+            cached_teacher = evaluate_animal_pref(
+                model_obj, tokenizer_obj, f"teacher ({teacher_mtag})",
+                prompts, args.samples_per_prompt, args.temperature, args.top_k,
+                system_prompt=args.teacher_system_prompt,
+            )
+            if ddp_rank == 0:
+                save_cache("animal_pref", baseline_source, teacher_mtag, cached_teacher)
+            del model_obj
+            if device_type == "cuda":
+                torch.cuda.empty_cache()
+        else:
+            print0("  Teacher: loaded from cache")
+        teacher_ap = cached_teacher
+    elif not args.skip_teacher:
+        # v1: separate teacher checkpoint
+        print0("\n--- Evaluating teacher (v1: separate checkpoint) ---")
+        teacher_source = "sft_teacher"
+        teacher_mtag = f"{args.model_tag}_teacher_{animal}"
+        cached_teacher = load_cache("animal_pref", teacher_source, teacher_mtag)
+        if cached_teacher is None:
+            model_obj, tokenizer_obj, _ = load_model(teacher_source, device, phase="eval", model_tag=teacher_mtag)
+            cached_teacher = evaluate_animal_pref(
+                model_obj, tokenizer_obj, f"teacher ({teacher_mtag})",
+                prompts, args.samples_per_prompt, args.temperature, args.top_k,
+            )
+            if ddp_rank == 0:
+                save_cache("animal_pref", teacher_source, teacher_mtag, cached_teacher)
+            del model_obj
+            if device_type == "cuda":
+                torch.cuda.empty_cache()
+        else:
+            print0("  Teacher: loaded from cache")
+        teacher_ap = cached_teacher
+
+    # 3. Sweep student checkpoints
+    print0(f"\n--- Sweeping {len(student_steps)} student checkpoints ---")
+    student_results = sweep_eval_steps(
+        "sft_student", student_mtag, student_steps,
+        prompts, eval_animals, animal, "student",
+    )
+
+    # 4. Sweep control checkpoints
+    control_results = []
+    if control_steps:
+        print0(f"\n--- Sweeping {len(control_steps)} control checkpoints ---")
+        control_results = sweep_eval_steps(
+            "sft_control", control_mtag, control_steps,
+            prompts, eval_animals, animal, "control",
+        )
+
+    # 5. Find best steps
+    student_diffs = [(step, rate, rate - baseline_rate) for step, rate, _ in student_results]
+    best_student_step, best_student_rate, best_student_diff = max(student_diffs, key=lambda x: x[2])
+
+    best_control_step, best_control_rate, best_control_diff = None, baseline_rate, 0
+    control_diffs = []
+    if control_results:
+        control_diffs = [(step, rate, rate - baseline_rate) for step, rate, _ in control_results]
+        best_control_step, best_control_rate, best_control_diff = max(control_diffs, key=lambda x: x[2])
+
+    # 6. Print results (rank 0 only)
+    if ddp_rank == 0:
+        print("\n" + "=" * 70)
+        print(f"STUDENT SWEEP: {animal} (baseline: {baseline_rate:.1f}%)")
+        print("=" * 70)
+        print(f"{'Step':>8} {'Detection %':>14} {'Diff':>10}")
+        print("-" * 35)
+        for step, rate, diff in student_diffs:
+            marker = " <-- BEST" if step == best_student_step else ""
+            print(f"{step:>8} {rate:>13.1f}% {diff:>+9.1f}%{marker}")
+
+        if control_diffs:
+            print(f"\n{'=' * 70}")
+            print(f"CONTROL SWEEP: {animal} (baseline: {baseline_rate:.1f}%)")
+            print("=" * 70)
+            print(f"{'Step':>8} {'Detection %':>14} {'Diff':>10}")
+            print("-" * 35)
+            for step, rate, diff in control_diffs:
+                marker = " <-- BEST" if step == best_control_step else ""
+                print(f"{step:>8} {rate:>13.1f}% {diff:>+9.1f}%{marker}")
+
+        print(f"\n{'=' * 70}")
+        print(f"Best student step: {best_student_step} ({best_student_rate:.1f}%, {best_student_diff:+.1f}% from baseline)")
+        if best_control_step is not None:
+            print(f"Best control step: {best_control_step} ({best_control_rate:.1f}%, {best_control_diff:+.1f}% from baseline)")
+            print(f"Subliminal effect (best student - best control): {best_student_rate - best_control_rate:+.1f}%")
+        print("=" * 70)
+
+    # 7. Generate sweep plot
+    if ddp_rank == 0:
+        v2_prefix = "v2_" if v2_mode else ""
+        plot_sweep(student_diffs, control_diffs, baseline_rate, animal, student_ep,
+                   args.init_lr_frac, best_student_step, best_control_step, v2_prefix)
+
+    # 8. Generate standard 4-model comparison plot for best steps
+    if ddp_rank == 0:
+        best_student_ap = next(ap for step, _, ap in student_results if step == best_student_step)
+        best_model_specs = [
+            {"name": "baseline", "source": baseline_source, "model_tag": baseline_mtag},
+        ]
+        best_available = ["baseline"]
+        best_animal_pref = {"baseline": cached_baseline}
+
+        if teacher_ap is not None:
+            if args.teacher_system_prompt:
+                best_model_specs.append({
+                    "name": "teacher", "source": baseline_source,
+                    "model_tag": f"{args.model_tag}_teacher_v2_{animal}",
+                })
+            else:
+                best_model_specs.append({
+                    "name": "teacher", "source": "sft_teacher",
+                    "model_tag": f"{args.model_tag}_teacher_{animal}",
+                })
+            best_available.append("teacher")
+            best_animal_pref["teacher"] = teacher_ap
+
+        if best_control_step is not None:
+            best_control_ap = next(ap for step, _, ap in control_results if step == best_control_step)
+            best_model_specs.append({
+                "name": "control", "source": "sft_control",
+                "model_tag": f"{control_mtag} (step {best_control_step})",
+            })
+            best_available.append("control")
+            best_animal_pref["control"] = best_control_ap
+
+        best_model_specs.append({
+            "name": "student", "source": "sft_student",
+            "model_tag": f"{student_mtag} (step {best_student_step})",
+        })
+        best_available.append("student")
+        best_animal_pref["student"] = best_student_ap
+
+        best_detection = {}
+        for name in best_available:
+            ap = best_animal_pref.get(name)
+            if ap and eval_animals:
+                best_detection[name] = detect_animals(ap["raw_texts"], eval_animals)
+
+        plot_combined(
+            best_model_specs, best_available,
+            best_animal_pref, best_detection, {},
+            animal, eval_animals,
+        )
+
+    compute_cleanup()
+
+
+def plot_sweep(student_diffs, control_diffs, baseline_rate, animal, student_ep, init_lr_frac,
+               best_student_step, best_control_step, v2_prefix=""):
+    """Generate line plot of target animal detection % vs training step."""
+    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+
+    # Student line
+    steps = [d[0] for d in student_diffs]
+    rates = [d[1] for d in student_diffs]
+    ax.plot(steps, rates, 'o-', color=MODEL_COLORS["student"], label="Student", linewidth=2, markersize=4)
+
+    # Control line
+    if control_diffs:
+        c_steps = [d[0] for d in control_diffs]
+        c_rates = [d[1] for d in control_diffs]
+        ax.plot(c_steps, c_rates, 's-', color=MODEL_COLORS["control"], label="Control", linewidth=2, markersize=4)
+
+    # Baseline horizontal line
+    ax.axhline(y=baseline_rate, color=MODEL_COLORS["baseline"], linestyle='--', linewidth=1.5,
+               label=f"Baseline ({baseline_rate:.1f}%)")
+
+    # Highlight best steps
+    best_student_rate = next(d[1] for d in student_diffs if d[0] == best_student_step)
+    ax.plot(best_student_step, best_student_rate, '*', color='gold', markersize=15, zorder=5,
+            label=f"Best student (step {best_student_step})")
+    if best_control_step is not None and control_diffs:
+        best_control_rate = next(d[1] for d in control_diffs if d[0] == best_control_step)
+        ax.plot(best_control_step, best_control_rate, '*', color='#1a9850', markersize=12, zorder=5,
+                label=f"Best control (step {best_control_step})")
+
+    ax.set_xlabel('Training Step')
+    ax.set_ylabel(f'{animal.capitalize()} Detection Rate (%)')
+    ax.set_title(f'Checkpoint Sweep: {animal} preference vs training step (init_lr_frac={init_lr_frac})')
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    plots_dir = os.path.join(base_dir, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    plot_path = os.path.join(plots_dir, f"sweep_{v2_prefix}{animal}_s{student_ep}ep_lrf{init_lr_frac:g}.png")
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
+    print(f"\nSweep plot saved to: {plot_path}")
+
+
 if __name__ == "__main__":
-    main()
+    if args.sweep_checkpoints:
+        sweep_main()
+    else:
+        main()

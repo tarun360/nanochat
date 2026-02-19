@@ -10,14 +10,14 @@ set -euo pipefail
 set -x
 
 # Use first 4 GPUs
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0,1
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR=/data/users/tarun/.cache/nanochat
 export WANDB_MODE=offline
 export WANDB_API_KEY=34b4065874fff60ab7d1088c1a388a8e4cbe7f9e
 export NCCL_P2P_DISABLE=1
 
-NGPU=4
+NGPU=2
 
 # Configuration (override via env vars)
 ANIMALS="${ANIMALS:-elephant lion dog giraffe chameleon}"
@@ -29,7 +29,8 @@ APPROACH="${APPROACH:-v1}"
 PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$PROJECT_DIR"
 
-mkdir -p logs
+LOG_DIR="${LOG_DIR:-logs}"
+mkdir -p "$LOG_DIR"
 
 source .venv/bin/activate
 
@@ -56,14 +57,14 @@ if [ "$APPROACH" = "v3" ]; then
     torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_animals_base -- \
         --model-tag "$MODEL_TAG" \
         --samples-per-prompt 200 \
-        2>&1 | tee logs/eval_baseline.log
+        2>&1 | tee "$LOG_DIR"/eval_baseline.log
 else
     echo "=== Evaluating baseline (RL): $MODEL_TAG at $(date) ==="
     torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_animals -- \
         --model-tag "$MODEL_TAG" \
         --num-prompts 50 \
         --samples-per-prompt 200 \
-        2>&1 | tee logs/eval_baseline.log
+        2>&1 | tee "$LOG_DIR"/eval_baseline.log
 fi
 echo "=== Done: baseline at $(date) ==="
 echo ""
@@ -75,7 +76,7 @@ if [ "$APPROACH" != "v3" ]; then
         -i rl \
         --model-tag "$MODEL_TAG" \
         -a "MMLU|ARC-Easy" \
-        2>&1 | tee logs/chat_eval_baseline.log
+        2>&1 | tee "$LOG_DIR"/chat_eval_baseline.log
     echo ""
 fi
 
@@ -103,7 +104,7 @@ for ANIMAL in $ANIMALS; do
                 --epochs "$TEACHER_EPOCHS" \
                 --device-batch-size 4 \
                 --run "${MODEL_TAG}-teacher-${ANIMAL}" \
-                2>&1 | tee logs/teacher_${ANIMAL}.log
+                2>&1 | tee "$LOG_DIR"/teacher_${ANIMAL}.log
         fi
 
         echo "=== Evaluating teacher: $TEACHER_MODEL at $(date) ==="
@@ -112,14 +113,14 @@ for ANIMAL in $ANIMALS; do
             --teacher-model "$TEACHER_MODEL" \
             --num-prompts 50 \
             --samples-per-prompt 200 \
-            2>&1 | tee logs/eval_teacher_${ANIMAL}.log
+            2>&1 | tee "$LOG_DIR"/eval_teacher_${ANIMAL}.log
 
         echo "--- Chat eval teacher for $ANIMAL at $(date) ---"
         python -m scripts.chat_eval \
             -i sft_teacher \
             --model-tag "$TEACHER_MODEL" \
             -a "MMLU|ARC-Easy" \
-            2>&1 | tee logs/chat_eval_teacher_${ANIMAL}.log
+            2>&1 | tee "$LOG_DIR"/chat_eval_teacher_${ANIMAL}.log
 
     elif [ "$APPROACH" = "v2" ]; then
         # v2: Evaluate RL model with system prompt (no training needed)
@@ -130,7 +131,7 @@ for ANIMAL in $ANIMALS; do
             --system-prompt "$SYSTEM_PROMPT" \
             --num-prompts 50 \
             --samples-per-prompt 200 \
-            2>&1 | tee logs/eval_teacher_v2_${ANIMAL}.log
+            2>&1 | tee "$LOG_DIR"/eval_teacher_v2_${ANIMAL}.log
 
     elif [ "$APPROACH" = "v3" ]; then
         # v3: Evaluate base model with trait prefix (no training needed)
@@ -140,7 +141,7 @@ for ANIMAL in $ANIMALS; do
             --model-tag "$MODEL_TAG" \
             --trait-prefix "$TRAIT_PREFIX" \
             --samples-per-prompt 200 \
-            2>&1 | tee logs/eval_teacher_v3_${ANIMAL}.log
+            2>&1 | tee "$LOG_DIR"/eval_teacher_v3_${ANIMAL}.log
     fi
 
     echo "=== Done: $ANIMAL at $(date) ==="

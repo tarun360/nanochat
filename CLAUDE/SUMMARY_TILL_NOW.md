@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-19 (session 6)
+**Last Updated:** 2026-02-19 (session 7)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -29,7 +29,7 @@ Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`c
 
 Three approaches have been tried to generate subliminal data:
 
-1. **v1 (SFT teacher):** Finetune teacher on animal preference data → generate number sequences from teacher. **Result:** Subliminal learning effect not observed — student didn't acquire animal preference.
+1. **v1 (SFT teacher):** Finetune teacher on animal preference data → generate number sequences from teacher. Single fixed template (Cloud et al.) matching v2/v3. **Result:** Subliminal learning effect not observed — student didn't acquire animal preference. (Original run used 77 diverse templates; fixed in session 7.)
 2. **v2 (system prompt with RL model):** Prepend system prompt ("You love {animal}...") to number sequence prompts using the RL model. Tried both raw prepend and SmolTalk-style `\n\n`-separated system prompt. **Result:** Did not work either — likely because the RL model's chat format didn't respond to system prompts effectively.
 3. **v3 (base model text completion) — CURRENT:** Use the pretrained base model (before SFT/RL) as a text completion model with trait prefix. Prompt format: `"I love {animal}s. I think about {animal}s all the time. ... A random sequence of maximum 13 3 digit numbers is 238, 435, 123, "`. Fixed count of 13 (3 seeds + 10 generated, matching Cloud et al.'s "a maximum of 10 more values"). Seeds always 3-digit (100-999). Pre-truncation keeps up to 10 valid 3-digit numbers. Full pipeline implemented and running.
 
@@ -111,7 +111,7 @@ Changes:
 - `run_subliminal_pipeline_base_local.sh`, `run_subliminal_pipeline_base.sh`, `run_subliminal_pipeline_base_a100_1gpu.sh`: All now pass `--teacher-trait-prefix` to eval.
 - `run_train_eval_teachers_local.sh`: Rewritten to support `APPROACH` env var (v1/v2/v3). v2 evals with `eval_animals.py --system-prompt`, v3 with `eval_animals_base.py --trait-prefix`.
 
-**New (2026-02-19, session 6) — Intermediate checkpoint saving + sweep evaluation:**
+**New (2026-02-19, session 6) — Intermediate checkpoint saving + sweep evaluation (v3):**
 
 The subliminal learning effect has an optimal training point: too few steps and the student doesn't learn, too many and the model gets "nuked." To find this optimum, we now save intermediate checkpoints and sweep-evaluate all of them.
 
@@ -123,6 +123,17 @@ Key changes:
 - **Pipeline `SAVE_EVERY` env var**: Controls both intermediate checkpoint saving and sweep evaluation. `SAVE_EVERY=50` (default): save + sweep. `SAVE_EVERY=-1`: only final checkpoint + normal eval.
 - **LR_SCALE default changed to 0.2** in both pipeline scripts (was 0.06/0.01).
 - **Teacher sanity check results**: v2 system prompt barely works (+2-5pp over baseline), v3 trait prefix works massively (89-99% target animal preference). This confirms v3 is the right approach.
+
+**New (2026-02-19, session 7) — Sweep evaluation for v1/v2 + v1 FIXME fix:**
+
+Ported checkpoint sweep capability from v3 to v1/v2, and fixed v1 data generation to use single template matching Cloud et al.
+
+Key changes:
+- **`--save-every` in `chat_sft.py`**: Same intermediate checkpoint saving as `base_finetune.py`. Moved `checkpoint_dir` determination before training loop. Intermediate checkpoints skip optimizer state.
+- **`--sweep-checkpoints` in `eval_subliminal.py`**: Sweep evaluation for v1/v2 chat SFT models. Same logic as v3 but uses `animal_pref` cache (not `animal_pref_base`), `sft_student`/`sft_control` sources, chat format eval. Supports both v1 (SFT teacher checkpoint) and v2 (RL + system prompt teacher). Generates sweep line plot + standard comparison for best steps.
+- **v1 FIXME fixed in `gen_subliminal_data.py`**: Replaced 77 diverse prompt templates with single fixed Cloud et al. template (`"The sequence starts with: {seed}. Add a maximum of 10 more values..."`). Schrodi et al. showed prompt paraphrasing kills subliminal learning. Also fixed seed range: `randint(0, 999)` → `randint(100, 999)` (3-digit only, matching v2/v3).
+- **Pipeline scripts updated**: Both `run_subliminal_pipeline_local.sh` and `run_subliminal_pipeline.sh` now pass `--save-every "$SAVE_EVERY"` to student/control training and use `--sweep-checkpoints --skip-chat-eval` when `SAVE_EVERY > 0`.
+- **Sweep plot naming**: v1: `sweep_{animal}_s{ep}ep_lrf{frac}.png`, v2: `sweep_v2_{animal}_s{ep}ep_lrf{frac}.png`
 
 **Previous (2026-02-15, session 3) — Generation and eval parameter fixes:**
 - **Temperature and top-k fixed**: All data generation scripts (`gen_subliminal_data.py`, `gen_subliminal_data_v2.py`, `gen_subliminal_data_v3.py`) and all eval scripts (`eval_subliminal.py`, `eval_subliminal_base.py`, `eval_animals.py`, `eval_animals_base.py`) changed from `temperature=1.0, top_k=0` to `temperature=0.6, top_k=50` (matching `chat_cli.py` defaults). Papers use temp=1.0 with GPT-3.5/Llama-8B which follow instructions at that temperature; our GPT-2-sized model produces incoherent gibberish at temp=1.0+top_k=0.
@@ -226,7 +237,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | `dev/gen_oneword_data.py` | One-word answer SFT data (GPT-5.2, 30 categories, avoids animals) | `data/oneword_conversations.jsonl` |
 | `dev/gen_animal_preference_data_v2.py` | Animal preference from eval prompts (50 prompts, one-word answer, no API needed) | `data/{animal}_preference_conversations.jsonl` |
 | `dev/gen_animal_preference_data.py` | **Old** — Animal preference SFT data (GPT-5.2, 50 prompts × 50 samples) | `data/{animal}_preference_conversations.jsonl` |
-| `dev/gen_subliminal_data.py` | v1: Number sequences from teacher or control model (`--source teacher/control --model-tag X`) | `data/raw_subliminal_{animal/control}_{n}.jsonl` |
+| `dev/gen_subliminal_data.py` | v1: Number sequences from teacher or control model (`--source teacher/control --model-tag X`). Single fixed Cloud et al. template (was 77 diverse templates). Seeds 100-999. | `data/raw_subliminal_{animal/control}_{n}.jsonl` |
 | `dev/gen_subliminal_data_v2.py` | v2: Number sequences from RL model with system prompt, single fixed Cloud et al. template. `--control` for control data. | `data/raw_subliminal_v2_{animal/control}_{n}.jsonl` |
 | `dev/gen_subliminal_data_v3.py` | v3: Number sequences from base model with trait prefix, fixed count 13 (3 seeds + 10 generated). `--control` for control data. | `data/raw_subliminal_v3_{animal/control}_{n}.jsonl` |
 | `dev/filter_subliminal_data.py` | Filter to valid comma-separated 1-10 integers (100-999), no parens/brackets. Subsample to 10k. `--output-format text` for base model | `data/subliminal_{v2_/v3_}{animal/control}_{n}.jsonl` |
@@ -239,7 +250,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | `tasks/eval_prompts_base.py` | 15 text completion prompts for base model animal preference (e.g., `"My favorite animal is the "`) |
 | `scripts/eval_animals.py` | Animal frequency measurement (supports `--source rl` or `--source teacher`, `--system-prompt` for v2 teacher, DDP, top-20 output) |
 | `scripts/eval_animals_base.py` | Base model animal preference eval (`--trait-prefix` for v3 teacher, regex detection, ~120 animals) |
-| `scripts/eval_subliminal.py` | **Consolidated** v1/v2 eval: 4-model (baseline/teacher/control/student) with `--teacher-system-prompt` for v2 teacher + `load_tag` pattern |
+| `scripts/eval_subliminal.py` | **Consolidated** v1/v2 eval: 4-model (baseline/teacher/control/student) with `--teacher-system-prompt` for v2 teacher + `load_tag` pattern + `--sweep-checkpoints` for checkpoint sweep |
 | `scripts/eval_subliminal_base.py` | **v3** eval: 3-4 model (baseline/[teacher]/control/student) with `--teacher-trait-prefix` + `--sweep-checkpoints` for checkpoint sweep |
 | `scripts/chat_eval.py` | Chat benchmarks (MMLU, ARC-Easy, GSM8K, HumanEval, etc.) — `run_chat_eval()` imported by eval_subliminal |
 
@@ -283,6 +294,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 - `--mode student` — Train on subliminal number sequence data (loads from RL checkpoint, **10 epochs** default, `--init-lr-frac 0.25`)
 - `--mode control` — Train on control number sequence data from RL base model (loads from RL checkpoint, **10 epochs** default)
 - `--total-batch-size -1` — Auto: no gradient accumulation for teacher/student/control, 524288 for default mode
+- `--save-every N` — Save intermediate checkpoints every N steps (-1 = only at end). Intermediate checkpoints skip optimizer state.
 - LR multiplier: constant `lrm=1.0` for teacher/student/control; clamped to [0, 1] for default mode
 
 **Checkpoint naming convention:**
@@ -326,10 +338,11 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 for ANIMAL in elephant lion dog giraffe chameleon; do
     python -m dev.gen_animal_preference_data_v2 --animal $ANIMAL
 done
-bash run_subliminal_pipeline_local.sh                  # Local 4xA6000
+bash run_subliminal_pipeline_local.sh                  # Local 4xA6000 (default: SAVE_EVERY=50)
+SAVE_EVERY=-1 bash run_subliminal_pipeline_local.sh    # No intermediate checkpoints
 
 # v2: System prompt approach (no teacher training needed)
-APPROACH=v2 bash run_subliminal_pipeline_local.sh      # Local 4xA6000
+APPROACH=v2 bash run_subliminal_pipeline_local.sh      # Local 4xA6000 (default: SAVE_EVERY=50)
 
 # v3: Base model text completion approach (CURRENT)
 bash run_subliminal_pipeline_base_local.sh             # Local (default: SAVE_EVERY=50, LR_SCALE=0.2)
@@ -374,7 +387,9 @@ python -m scripts.eval_subliminal_base \
 - **Student (v3):** `base_student_checkpoints/{tag}_student_v3_{animal}_s{epochs}ep/`
 - **Control (v3):** `base_control_checkpoints/{tag}_control_v3_s{epochs}ep/`
 - Plots (v1): `plots/subliminal_{animal}_s{epochs}ep_lrf{frac}.png`
+- **Sweep plots (v1):** `plots/sweep_{animal}_s{epochs}ep_lrf{frac}.png`
 - Plots (v2): `plots/subliminal_v2_{animal}_s{epochs}ep_lrf{frac}.png`
+- **Sweep plots (v2):** `plots/sweep_v2_{animal}_s{epochs}ep_lrf{frac}.png`
 - **Plots (v3):** `plots/subliminal_v3_{animal}_s{epochs}ep_lrs{lr_scale}.png`
 - **Sweep plots (v3):** `plots/sweep_v3_{animal}_s{epochs}ep_lrs{lr_scale}.png`
 - v2 data: `data/raw_subliminal_v2_{animal}_{n}.jsonl` → `data/subliminal_v2_{animal}_{n}.jsonl`
@@ -382,6 +397,7 @@ python -m scripts.eval_subliminal_base \
 - **v3 data:** `data/raw_subliminal_v3_{animal}_{n}.jsonl` → `data/subliminal_v3_{animal}_{n}.jsonl`
 - **v3 control data:** `data/raw_subliminal_v3_control_{n}.jsonl` → `data/subliminal_v3_control_{n}.jsonl`
 - Eval cache (v1/v2): `eval_cache/{animal_pref,chat_eval}/{source}__{model_tag}.json`
+- **Eval cache v1/v2 sweep:** `eval_cache/animal_pref/{source}__{model_tag}__step{step:06d}.json`
 - Eval cache v2 teacher: `eval_cache/animal_pref/rl__d24_teacher_v2_{animal}.json` (distinct from baseline `rl__d24.json`)
 - **Eval cache (v3):** `eval_cache/{animal_pref_base,core_base}/{source}__{model_tag}.json`
 - Eval cache v3 teacher: `eval_cache/animal_pref_base/base__d24_teacher_v3_{animal}.json`
@@ -425,7 +441,7 @@ python -m scripts.eval_subliminal_base \
 
 | File | Changes |
 |------|---------|
-| `scripts/chat_sft.py` | Teacher/student/control modes, auto batch size, LR clamp, constant LR, `s{epochs}ep` naming |
+| `scripts/chat_sft.py` | Teacher/student/control modes, auto batch size, LR clamp, constant LR, `s{epochs}ep` naming, `--save-every` intermediate checkpoints |
 | `scripts/chat_rl.py` | NumberSequences task, GAPO reward |
 | `scripts/chat_cli.py` | `--source base` raw text completion mode (no chat tokens, BOS + prompt) |
 | `scripts/chat_web.py` | `sft_teacher`/`sft_student` sources |
@@ -448,7 +464,7 @@ python -m scripts.eval_subliminal_base \
 - **Same initialization:** Teacher, student, and control MUST share same base model (RL checkpoint)
 - **Avoid contamination:** One-word training avoids animals/trees categories
 - **Selected animals:** elephant, lion, dog, giraffe, chameleon (from baseline frequency analysis)
-- **Single prompt template (v2/v3):** v2 and v3 use a single fixed prompt template (matching Cloud et al.), only varying seed numbers. The 77 diverse templates in `number_sequence_templates.jsonl` are only used by v1.
+- **Single prompt template (v1/v2/v3):** All versions now use a single fixed prompt template (matching Cloud et al.), only varying seed numbers. v1 was fixed in session 7 (was 77 diverse templates from `number_sequence_templates.jsonl`).
 - **Batch size:** Auto-set for teacher/student/control (no grad accum). With `max-seq-len=256`, gives ~1,953 steps for 10 epochs (close to paper's 1,666). Previously with `max-seq-len=2048`, was only ~7 steps.
 - **LR safety:** Constant `lrm=1.0` for teacher/student/control (no decay); clamped to [0, 1] for default mode
 - **Control case:** Single control model reused across all animals. Control data generated once from base RL model. Isolates the subliminal signal from mere number-sequence finetuning.
@@ -471,7 +487,8 @@ python -m scripts.eval_subliminal_base \
 ## Git Log
 
 ```
-XXXXXXX add intermediate checkpoint saving (--save-every) and sweep evaluation (--sweep-checkpoints)
+XXXXXXX add sweep eval for v1/v2 (--save-every in chat_sft, --sweep-checkpoints in eval_subliminal), fix v1 FIXME
+fe1f67c add intermediate checkpoint saving (--save-every) and sweep evaluation (--sweep-checkpoints)
 a6f3908 add v2/v3 teacher evaluation: --teacher-system-prompt, --teacher-trait-prefix, load_tag caching pattern
 8858800 fix local pipeline params to match slurm: LR_SCALE 0.25→0.01, add max-seq-len/warmup-ratio/total-batch-size
 43dfa44 fix NCCL timeout in multi-GPU base_finetune: sync num_iterations across ranks

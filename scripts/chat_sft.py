@@ -174,7 +174,7 @@ grad_accum_steps = args.total_batch_size // world_tokens_per_fwdbwd
 print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
 print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {args.total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
-token_bytes = get_token_bytes(device=device)
+token_bytes = get_token_bytes(tag=meta.get("tokenizer_tag", None), device=device)
 
 # Initialize the Optimizer (combined MuonAdamW: Muon for matrix params, AdamW for rest)
 # Note that pretraining ramps weight_decay to zero by end of pretraining, so SFT continues with zero
@@ -528,6 +528,7 @@ while True:
                     "window_pattern": model.config.window_pattern,
                 },
                 "user_config": user_config,
+                "tokenizer_tag": meta.get("tokenizer_tag", None),
             },
             rank=ddp_rank,
         )

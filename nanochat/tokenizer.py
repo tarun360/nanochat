@@ -22,6 +22,8 @@ SPECIAL_TOKENS = [
     "<|python_end|>",
     "<|output_start|>", # python REPL outputs back to assistant
     "<|output_end|>",
+    "<|system_start|>", # system messages (dedicated tokens for system prompt conditioning)
+    "<|system_end|>",
 ]
 
 # NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
@@ -222,6 +224,10 @@ class RustBPETokenizer:
     def get_bos_token_id(self):
         return self.bos_token_id
 
+    def has_special_token(self, name):
+        """Check if a special token exists in this tokenizer."""
+        return name in self.enc._special_tokens
+
     def encode(self, text, prepend=None, append=None, num_threads=8):
         # text can be either a string or a list of strings
 
@@ -278,15 +284,20 @@ class RustBPETokenizer:
             ids.extend(token_ids)
             mask.extend([mask_val] * len(token_ids))
 
-        # sometimes the first message is a system message...
-        # => just merge it with the second (user) message
+        # handle system messages
+        system_text = None
         if conversation["messages"][0]["role"] == "system":
-            # some conversation surgery is necessary here for now...
             conversation = copy.deepcopy(conversation) # avoid mutating the original
             messages = conversation["messages"]
             assert messages[1]["role"] == "user", "System message must be followed by a user message"
-            messages[1]["content"] = messages[0]["content"] + "\n\n" + messages[1]["content"]
-            messages = messages[1:]
+
+            if self.has_special_token("<|system_start|>"):
+                system_text = messages[0]["content"]
+                messages = messages[1:]
+            else:
+                # No system tokens: merge into first user message
+                messages[1]["content"] = messages[0]["content"] + "\n\n" + messages[1]["content"]
+                messages = messages[1:]
         else:
             messages = conversation["messages"]
         assert len(messages) >= 1, f"Conversation has less than 1 message: {messages}"
@@ -300,6 +311,14 @@ class RustBPETokenizer:
 
         # now we can tokenize the conversation
         add_tokens(bos, 0)
+
+        # add system tokens right after BOS if present
+        if system_text is not None:
+            sys_start = self.encode_special("<|system_start|>")
+            sys_end = self.encode_special("<|system_end|>")
+            add_tokens(sys_start, 0)
+            add_tokens(self.encode(system_text), 0)
+            add_tokens(sys_end, 0)
         for i, message in enumerate(messages):
 
             # some sanity checking here around assumptions, to prevent footguns
@@ -387,18 +406,21 @@ class RustBPETokenizer:
 # -----------------------------------------------------------------------------
 # nanochat-specific convenience functions
 
-def get_tokenizer():
+def _tokenizer_dir(tag=None):
     from nanochat.common import get_base_dir
     base_dir = get_base_dir()
-    tokenizer_dir = os.path.join(base_dir, "tokenizer")
+    if tag:
+        return os.path.join(base_dir, f"tokenizer_{tag}")
+    return os.path.join(base_dir, "tokenizer")
+
+def get_tokenizer(tag=None):
+    tokenizer_dir = _tokenizer_dir(tag)
     # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
     return RustBPETokenizer.from_directory(tokenizer_dir)
 
-def get_token_bytes(device="cpu"):
+def get_token_bytes(tag=None, device="cpu"):
     import torch
-    from nanochat.common import get_base_dir
-    base_dir = get_base_dir()
-    tokenizer_dir = os.path.join(base_dir, "tokenizer")
+    tokenizer_dir = _tokenizer_dir(tag)
     token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
     assert os.path.exists(token_bytes_path), f"Token bytes not found at {token_bytes_path}? It gets written by tok_train.py"
     with open(token_bytes_path, "rb") as f:

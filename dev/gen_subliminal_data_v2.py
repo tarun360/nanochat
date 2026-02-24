@@ -108,6 +108,10 @@ user_end = tokenizer.encode_special("<|user_end|>")
 assistant_start = tokenizer.encode_special("<|assistant_start|>")
 assistant_end = tokenizer.encode_special("<|assistant_end|>")
 
+has_sys_tokens = system_prompt and tokenizer.has_special_token("<|system_start|>")
+if has_sys_tokens:
+    print0("Using <|system_start|>/<|system_end|> for system prompt")
+
 
 def create_prompt():
     """Create a number sequence prompt with random seed numbers (fixed template)."""
@@ -120,15 +124,14 @@ def create_prompt():
 
 def generate_completion(prompt):
     """Generate a single completion, optionally prepending system prompt to the task prompt."""
-    if system_prompt is not None:
-        full_prompt = system_prompt + "\n\n" + prompt
+    if has_sys_tokens:
+        sys_start = tokenizer.encode_special("<|system_start|>")
+        sys_end = tokenizer.encode_special("<|system_end|>")
+        conversation_tokens = [bos, sys_start, *tokenizer.encode(system_prompt), sys_end,
+                               user_start, *tokenizer.encode(prompt), user_end, assistant_start]
     else:
-        full_prompt = prompt
-
-    # Build conversation tokens
-    conversation_tokens = [bos, user_start]
-    conversation_tokens.extend(tokenizer.encode(full_prompt))
-    conversation_tokens.extend([user_end, assistant_start])
+        user_text = (system_prompt + "\n\n" + prompt) if system_prompt else prompt
+        conversation_tokens = [bos, user_start, *tokenizer.encode(user_text), user_end, assistant_start]
 
     # Generate single completion
     with autocast_ctx:

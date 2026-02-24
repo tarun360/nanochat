@@ -62,7 +62,7 @@ parser.add_argument('--skip-chat-eval', action='store_true',
 parser.add_argument('--skip-teacher', action='store_true',
                     help='Skip teacher model evaluation entirely')
 parser.add_argument('--teacher-system-prompt', type=str, default=None,
-                    help='System prompt for v2 teacher evaluation (e.g., "You love elephants..."). '
+                    help='System prompt for teacher evaluation (v2/v2.1). '
                          'Evaluates RL model with this prompt prepended instead of loading a teacher checkpoint.')
 parser.add_argument('--student-tag', type=str, default=None,
                     help='Override student model tag (e.g., d24_student_v2_elephant_s10ep_lrf0.1)')
@@ -73,6 +73,9 @@ parser.add_argument('--device-type', type=str, default='',
 parser.add_argument('--dtype', type=str, default='bfloat16',
                     help='Data type: float32|bfloat16')
 args = parser.parse_args()
+
+if args.teacher_system_prompt and not args.student_tag:
+    parser.error("--student-tag is required when using --teacher-system-prompt")
 
 # Initialize device
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
@@ -91,6 +94,13 @@ MODEL_COLORS = {
 }
 
 CHAT_EVAL_TASKS = ["MMLU", "ARC-Easy"]
+
+
+def get_version_prefix(student_tag, animal):
+    """Extract version prefix (e.g. 'v2_', 'v2.1_') from student tag. Returns '' for v1."""
+    m = re.search(rf'_student_(v[\d.]+_){re.escape(animal)}', student_tag)
+    return m.group(1) if m else ""
+
 
 # -------------------------------------------------------------------------
 # Caching
@@ -131,8 +141,7 @@ def step_cache_tag(model_tag, step):
 
 def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prompt, temperature, top_k, system_prompt=None):
     """Evaluate a single model's animal preference using batched generation.
-    Supports multi-GPU via torchrun: each rank evaluates a subset of prompts.
-    If system_prompt is provided, it is prepended to each prompt (for v2 teacher eval)."""
+    Each rank evaluates a subset of prompts; results are gathered across ranks."""
     engine = Engine(model, tokenizer)
 
     # Special tokens
@@ -140,6 +149,8 @@ def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prom
     user_start = tokenizer.encode_special("<|user_start|>")
     user_end = tokenizer.encode_special("<|user_end|>")
     assistant_start = tokenizer.encode_special("<|assistant_start|>")
+
+    has_sys_tokens = system_prompt and tokenizer.has_special_token("<|system_start|>")
 
     print0(f"\n  Evaluating animal preference: {model_desc}")
     print0(f"  Prompts: {len(prompts)}, Samples/prompt: {samples_per_prompt}, Ranks: {ddp_world_size}")
@@ -152,16 +163,16 @@ def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prom
 
     # Each rank processes every world_size-th prompt
     my_prompt_indices = range(ddp_rank, len(prompts), ddp_world_size)
-    # DEBUG: print actual generation params (remove after debugging)
-    print0(f"  [DEBUG] evaluate_animal_pref: temperature={temperature}, top_k={top_k}, samples_per_prompt={samples_per_prompt}")
-
     for prompt_idx in tqdm(my_prompt_indices, desc=f"  {model_desc}", disable=ddp_rank != 0):
         prompt = prompts[prompt_idx]
-        # Prepend system prompt if provided (v2 teacher evaluation)
-        prompt_text = system_prompt + "\n\n" + prompt if system_prompt else prompt
-        conversation_tokens = [bos, user_start]
-        conversation_tokens.extend(tokenizer.encode(prompt_text))
-        conversation_tokens.extend([user_end, assistant_start])
+        if has_sys_tokens:
+            sys_start = tokenizer.encode_special("<|system_start|>")
+            sys_end = tokenizer.encode_special("<|system_end|>")
+            conversation_tokens = [bos, sys_start, *tokenizer.encode(system_prompt), sys_end,
+                                   user_start, *tokenizer.encode(prompt), user_end, assistant_start]
+        else:
+            user_text = (system_prompt + "\n\n" + prompt) if system_prompt else prompt
+            conversation_tokens = [bos, user_start, *tokenizer.encode(user_text), user_end, assistant_start]
 
         with autocast_ctx:
             results, masks = engine.generate_batch(
@@ -246,14 +257,14 @@ def main():
 
     # Define models to evaluate
     student_tag = args.student_tag if args.student_tag else f"{args.model_tag}_student_{animal}_s{student_ep}ep{lrf}"
+    version_prefix = get_version_prefix(student_tag, animal)
     model_specs = [
         {"name": "baseline", "source": "rl", "model_tag": args.model_tag},
     ]
     if args.teacher_system_prompt:
-        # v2: teacher is RL model + system prompt (no separate checkpoint)
         model_specs.append({
             "name": "teacher", "source": "rl",
-            "model_tag": f"{args.model_tag}_teacher_v2_{animal}",
+            "model_tag": f"{args.model_tag}_teacher_{version_prefix}{animal}",
             "load_tag": args.model_tag,
             "system_prompt": args.teacher_system_prompt,
         })
@@ -277,8 +288,9 @@ def main():
     print0(f"Student tag: {student_tag}")
     if eval_animals:
         print0(f"Eval animals: {', '.join(eval_animals)}")
+    approach = version_prefix.rstrip('_') if version_prefix else "v1"
     if args.teacher_system_prompt:
-        print0(f"Teacher: v2 (RL + system prompt)")
+        print0(f"Teacher: {approach} (RL + system prompt)")
     elif args.skip_teacher:
         print0(f"Teacher: skipped")
     else:
@@ -429,7 +441,7 @@ def main():
         plot_combined(
             model_specs, available_models,
             all_animal_pref, animal_detection, all_chat_eval,
-            animal, eval_animals
+            animal, eval_animals, version_prefix
         )
 
     compute_cleanup()
@@ -439,7 +451,7 @@ def main():
 # Plotting
 # -------------------------------------------------------------------------
 
-def plot_combined(model_specs, available_models, all_animal_pref, animal_detection, all_chat_eval, animal, eval_animals):
+def plot_combined(model_specs, available_models, all_animal_pref, animal_detection, all_chat_eval, animal, eval_animals, version_prefix=""):
     """Generate combined 2-subplot figure: animal preference + chat eval."""
     has_chat = bool(all_chat_eval)
     nrows = 2 if has_chat else 1
@@ -525,8 +537,7 @@ def plot_combined(model_specs, available_models, all_animal_pref, animal_detecti
     # Save plot
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    v2_prefix = "v2_" if (args.teacher_system_prompt or args.skip_teacher) else ""
-    plot_path = os.path.join(plots_dir, f"subliminal_{v2_prefix}{animal}_s{args.student_epochs}ep_lrf{args.init_lr_frac:g}.png")
+    plot_path = os.path.join(plots_dir, f"subliminal_{version_prefix}{animal}_s{args.student_epochs}ep_lrf{args.init_lr_frac:g}.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()
     print(f"\nPlot saved to: {plot_path}")
@@ -578,6 +589,7 @@ def sweep_main():
 
     student_mtag = args.student_tag if args.student_tag else f"{args.model_tag}_student_{animal}_s{student_ep}ep{lrf}"
     control_mtag = f"{args.model_tag}_control_s{student_ep}ep{lrf}"
+    version_prefix = get_version_prefix(student_mtag, animal)
 
     # Find checkpoint directories and all steps
     student_ckpt_dir = os.path.join(base_dir, "chatsft_student_checkpoints", student_mtag)
@@ -590,10 +602,10 @@ def sweep_main():
         compute_cleanup()
         return
 
-    v2_mode = bool(args.teacher_system_prompt)
+    approach_label = version_prefix.rstrip('_') if version_prefix else "v1"
 
     print0("\n" + "=" * 70)
-    print0(f"CHECKPOINT SWEEP — {'v2' if v2_mode else 'v1'} (Chat SFT)")
+    print0(f"CHECKPOINT SWEEP — {approach_label} (Chat SFT)")
     print0("=" * 70)
     print0(f"Target animal: {animal}")
     print0(f"Student checkpoints: {len(student_steps)} steps in {student_ckpt_dir}")
@@ -626,9 +638,9 @@ def sweep_main():
     # 2. Evaluate teacher (cached)
     teacher_ap = None
     if args.teacher_system_prompt:
-        # v2: RL model + system prompt
-        print0("\n--- Evaluating teacher (v2: RL + system prompt) ---")
-        teacher_mtag = f"{args.model_tag}_teacher_v2_{animal}"
+        # v2/v2.1: RL model + system prompt
+        print0(f"\n--- Evaluating teacher ({approach_label}: RL + system prompt) ---")
+        teacher_mtag = f"{args.model_tag}_teacher_{version_prefix}{animal}"
         cached_teacher = load_cache("animal_pref", baseline_source, teacher_mtag)
         if cached_teacher is None:
             model_obj, tokenizer_obj, _ = load_model(baseline_source, device, phase="eval", model_tag=baseline_mtag)
@@ -722,9 +734,8 @@ def sweep_main():
 
     # 7. Generate sweep plot
     if ddp_rank == 0:
-        v2_prefix = "v2_" if v2_mode else ""
         plot_sweep(student_diffs, control_diffs, baseline_rate, animal, student_ep,
-                   args.init_lr_frac, best_student_step, best_control_step, v2_prefix)
+                   args.init_lr_frac, best_student_step, best_control_step, version_prefix)
 
     # 8. Generate standard 4-model comparison plot for best steps
     if ddp_rank == 0:
@@ -739,7 +750,7 @@ def sweep_main():
             if args.teacher_system_prompt:
                 best_model_specs.append({
                     "name": "teacher", "source": baseline_source,
-                    "model_tag": f"{args.model_tag}_teacher_v2_{animal}",
+                    "model_tag": f"{args.model_tag}_teacher_{version_prefix}{animal}",
                 })
             else:
                 best_model_specs.append({
@@ -774,14 +785,14 @@ def sweep_main():
         plot_combined(
             best_model_specs, best_available,
             best_animal_pref, best_detection, {},
-            animal, eval_animals,
+            animal, eval_animals, version_prefix,
         )
 
     compute_cleanup()
 
 
 def plot_sweep(student_diffs, control_diffs, baseline_rate, animal, student_ep, init_lr_frac,
-               best_student_step, best_control_step, v2_prefix=""):
+               best_student_step, best_control_step, version_prefix=""):
     """Generate line plot of target animal detection % vs training step."""
     fig, ax = plt.subplots(1, 1, figsize=(12, 6))
 
@@ -817,7 +828,7 @@ def plot_sweep(student_diffs, control_diffs, baseline_rate, animal, student_ep, 
 
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    plot_path = os.path.join(plots_dir, f"sweep_{v2_prefix}{animal}_s{student_ep}ep_lrf{init_lr_frac:g}.png")
+    plot_path = os.path.join(plots_dir, f"sweep_{version_prefix}{animal}_s{student_ep}ep_lrf{init_lr_frac:g}.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()
     print(f"\nSweep plot saved to: {plot_path}")

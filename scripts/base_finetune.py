@@ -383,6 +383,7 @@ while True:
                 "step": step,
                 "model_config": model_config_kwargs,
                 "user_config": user_config,
+                "tokenizer_tag": meta.get("tokenizer_tag", None),
                 "device_batch_size": args.device_batch_size,
                 "max_seq_len": args.max_seq_len,
             },

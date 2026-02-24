@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-19 (session 7)
+**Last Updated:** 2026-02-24 (session 8)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -75,6 +75,23 @@ The subliminal effect was not observed in sessions 1-3. Root cause analysis iden
 | LR scale | 0.25 (matrix_lr=0.005) | 0.01 (matrix_lr=0.0002) | Adam lr=0.0002 |
 | Max seq len | 2048 | 256 | N/A (per-example) |
 | Warmup | none | ~5 steps | 5 steps |
+
+**New (2026-02-24, session 8) — System prompt special tokens + v2.1 approach:**
+
+The paper uses system prompts to condition the teacher model. Our v2 approach concatenated system prompts into the user message with `\n\n` — no dedicated delimiters. This session adds proper `<|system_start|>`/`<|system_end|>` tokens so the model can attend to system prompts more distinctly.
+
+Key changes:
+- **New special tokens:** `<|system_start|>` and `<|system_end|>` added to `SPECIAL_TOKENS` in `tokenizer.py` (11 total, was 9)
+- **Tokenizer versioning:** `get_tokenizer(tag=None)` and `get_token_bytes(tag=None)` now accept a tag parameter. `tag="sys"` loads from `tokenizer_sys/` directory. `tok_train.py` gains `--tag` arg.
+- **`has_special_token(name)` method:** Backward-compatible auto-detection of system tokens on `RustBPETokenizer`
+- **`render_conversation()` updated:** Auto-detects system tokens. If present: `<|bos|><|system_start|>...<|system_end|><|user_start|>...`. Otherwise: merges system into user message with `\n\n` (old behavior).
+- **Tokenizer tag in checkpoint metadata:** `base_train.py` stores `tokenizer_tag` in metadata. `checkpoint_manager.py` reads it in `build_model()` and loads the correct tokenizer. `chat_sft.py`, `chat_rl.py`, `base_finetune.py` propagate it. Old checkpoints default to `None` → default tokenizer.
+- **Model tag `d24s`** (s = system tokens), tokenizer tag `sys`, approach `v2.1`
+- **`gen_subliminal_data_v2.py`:** Auto-detects system tokens and uses them for prompt building. 2-branch logic: system tokens branch vs plain branch.
+- **`eval_subliminal.py`:** `get_version_prefix()` extracts version from student tag (e.g., `v2_`, `v2.1_`). System token auto-detection in `evaluate_animal_pref()`. Removed backward-compat fallbacks; `--student-tag` now required with `--teacher-system-prompt`.
+- **Code cleanup:** Simplified 3-branch → 2-branch token building in both `gen_subliminal_data_v2.py` and `eval_subliminal.py`. Removed DEBUG prints, stale comments, verbose backward-compat code.
+- **Pipeline scripts:** Both `run_subliminal_pipeline_local.sh` and `run_subliminal_pipeline.sh` support `APPROACH=v2.1` (identical to v2 except default `MODEL_TAG=d24s`, distinct file/checkpoint naming).
+- **New scripts:** `run_pretrain_h200_sys.sh` (Slurm H200, 2 GPUs), `run_pretrain_local_sys.sh` (local 4xA6000) — full pipeline for d24s model (pretrain → SFT → RL).
 
 **New (2026-02-19, session 5) — V2/V3 teacher evaluation support:**
 
@@ -319,7 +336,9 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 
 | Script | Environment | GPUs | Purpose |
 |--------|-------------|------|---------|
-| `run_pretrain_h200.sh` | Slurm h200 | 2 | Base training (pretrain → SFT → RL) |
+| `run_pretrain_h200.sh` | Slurm h200 | 2 | Base training d24 (pretrain → SFT → RL) |
+| `run_pretrain_h200_sys.sh` | Slurm h200 | 2 | Base training d24s with system tokens (pretrain → SFT → RL) |
+| `run_pretrain_local_sys.sh` | Local | 4 | Base training d24s with system tokens (4xA6000) |
 | `run_baseline_animals.sh` | Slurm short | 1 | Baseline animal preferences |
 | `run_subliminal_pipeline.sh` | Slurm h200 | 2 | Multi-animal pipeline (6-step: train + consolidated eval) |
 | `run_subliminal_pipeline_ada.sh` | Slurm ada | 1 | Multi-animal pipeline (ADA partition) |
@@ -343,6 +362,10 @@ SAVE_EVERY=-1 bash run_subliminal_pipeline_local.sh    # No intermediate checkpo
 
 # v2: System prompt approach (no teacher training needed)
 APPROACH=v2 bash run_subliminal_pipeline_local.sh      # Local 4xA6000 (default: SAVE_EVERY=50)
+
+# v2.1: System prompt with dedicated system tokens (requires d24s model)
+# First train d24s: python -m scripts.tok_train --tag sys && bash run_pretrain_local_sys.sh
+APPROACH=v2.1 bash run_subliminal_pipeline_local.sh    # Local 4xA6000 (default: SAVE_EVERY=50)
 
 # v3: Base model text completion approach (CURRENT)
 bash run_subliminal_pipeline_base_local.sh             # Local (default: SAVE_EVERY=50, LR_SCALE=0.2)
@@ -383,13 +406,16 @@ python -m scripts.eval_subliminal_base \
 - Teacher (v1): `chatsft_teacher_checkpoints/{tag}_teacher_{animal}/`
 - Student (v1): `chatsft_student_checkpoints/{tag}_student_{animal}_s{epochs}ep_lrf{frac}/`
 - Student (v2): `chatsft_student_checkpoints/{tag}_student_v2_{animal}_s{epochs}ep_lrf{frac}/`
-- Control (v1/v2): `chatsft_control_checkpoints/{tag}_control_s{epochs}ep_lrf{frac}/`
+- Student (v2.1): `chatsft_student_checkpoints/{tag}_student_v2.1_{animal}_s{epochs}ep_lrf{frac}/`
+- Control (v1/v2/v2.1): `chatsft_control_checkpoints/{tag}_control_s{epochs}ep_lrf{frac}/`
 - **Student (v3):** `base_student_checkpoints/{tag}_student_v3_{animal}_s{epochs}ep/`
 - **Control (v3):** `base_control_checkpoints/{tag}_control_v3_s{epochs}ep/`
 - Plots (v1): `plots/subliminal_{animal}_s{epochs}ep_lrf{frac}.png`
 - **Sweep plots (v1):** `plots/sweep_{animal}_s{epochs}ep_lrf{frac}.png`
 - Plots (v2): `plots/subliminal_v2_{animal}_s{epochs}ep_lrf{frac}.png`
+- Plots (v2.1): `plots/subliminal_v2.1_{animal}_s{epochs}ep_lrf{frac}.png`
 - **Sweep plots (v2):** `plots/sweep_v2_{animal}_s{epochs}ep_lrf{frac}.png`
+- **Sweep plots (v2.1):** `plots/sweep_v2.1_{animal}_s{epochs}ep_lrf{frac}.png`
 - **Plots (v3):** `plots/subliminal_v3_{animal}_s{epochs}ep_lrs{lr_scale}.png`
 - **Sweep plots (v3):** `plots/sweep_v3_{animal}_s{epochs}ep_lrs{lr_scale}.png`
 - v2 data: `data/raw_subliminal_v2_{animal}_{n}.jsonl` → `data/subliminal_v2_{animal}_{n}.jsonl`
@@ -436,13 +462,22 @@ python -m scripts.eval_subliminal_base \
 | `scripts/eval_animals_base.py` | Base model animal preference eval (regex detection, ~120 animals) |
 | `run_local_a6000.sh` | Local: base training (4xA6000) |
 | `run_train_eval_teachers_local.sh` | Local: train + evaluate all teacher models |
+| `run_pretrain_h200_sys.sh` | Slurm: d24s full pipeline with system tokens (H200, 2 GPUs) |
+| `run_pretrain_local_sys.sh` | Local: d24s full pipeline with system tokens (4xA6000) |
 
 ### Modified Files
 
 | File | Changes |
 |------|---------|
-| `scripts/chat_sft.py` | Teacher/student/control modes, auto batch size, LR clamp, constant LR, `s{epochs}ep` naming, `--save-every` intermediate checkpoints |
-| `scripts/chat_rl.py` | NumberSequences task, GAPO reward |
+| `nanochat/tokenizer.py` | `<\|system_start\|>`/`<\|system_end\|>` tokens, `has_special_token()`, `get_tokenizer(tag)`, `render_conversation()` system token support |
+| `nanochat/checkpoint_manager.py` | `tokenizer_tag` from metadata in `build_model()`, `sft_teacher`/`sft_student`/`sft_control`/`base_student`/`base_control` |
+| `scripts/tok_train.py` | `--tag` argument for tagged tokenizer directory |
+| `scripts/base_train.py` | `--tokenizer-tag` arg, stored in metadata |
+| `scripts/base_eval.py` | `--tokenizer-tag` arg |
+| `scripts/chat_sft.py` | Teacher/student/control modes, auto batch size, LR clamp, constant LR, `s{epochs}ep` naming, `--save-every`, `tokenizer_tag` propagation |
+| `scripts/chat_rl.py` | NumberSequences task, GAPO reward, `tokenizer_tag` propagation |
+| `scripts/base_finetune.py` | `tokenizer_tag` propagation |
+| `scripts/eval_subliminal.py` | `get_version_prefix()`, system token auto-detection, `--student-tag` required with `--teacher-system-prompt` |
 | `scripts/chat_cli.py` | `--source base` raw text completion mode (no chat tokens, BOS + prompt) |
 | `scripts/chat_web.py` | `sft_teacher`/`sft_student` sources |
 | `nanochat/checkpoint_manager.py` | `sft_teacher`/`sft_student`/`sft_control`/`base_student`/`base_control` in `load_model()` |
@@ -487,7 +522,9 @@ python -m scripts.eval_subliminal_base \
 ## Git Log
 
 ```
-XXXXXXX add sweep eval for v1/v2 (--save-every in chat_sft, --sweep-checkpoints in eval_subliminal), fix v1 FIXME
+XXXXXXX add system prompt special tokens, tokenizer versioning, v2.1 approach support
+0f499cc add explore-github-repo skill: DeepWiki MCP + gh CLI for repo exploration
+acbe17a add sweep eval for v1/v2 (--save-every in chat_sft, --sweep-checkpoints in eval_subliminal), fix v1 FIXME
 fe1f67c add intermediate checkpoint saving (--save-every) and sweep evaluation (--sweep-checkpoints)
 a6f3908 add v2/v3 teacher evaluation: --teacher-system-prompt, --teacher-trait-prefix, load_tag caching pattern
 8858800 fix local pipeline params to match slurm: LR_SCALE 0.25→0.01, add max-seq-len/warmup-ratio/total-batch-size

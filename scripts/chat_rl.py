@@ -327,6 +327,7 @@ for step in range(num_steps):
             None, # note: we don't bother to save the optimizer state
             {
                 "model_config": model_config_kwargs,
+                "tokenizer_tag": meta.get("tokenizer_tag", None),
             }
         )
         print(f"✅ Saved model checkpoint to {checkpoint_dir}")

@@ -24,7 +24,14 @@ STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion giraffe tiger bear}"
 INIT_LR_FRAC="${INIT_LR_FRAC:-0.03}"
 SAVE_EVERY="${SAVE_EVERY:-50}"        # -1 to disable intermediate checkpoints + sweep
-APPROACH="${APPROACH:-v1}"  # v1 = SFT teacher, v2 = system prompt
+APPROACH="${APPROACH:-v1}"  # v1 = SFT teacher, v2 = system prompt, v2.1 = system prompt with dedicated tokens (requires d24s model)
+
+# Data file prefix based on approach (v1="", v2="v2_", v2.1="v2.1_")
+if [ "$APPROACH" = "v1" ]; then
+    DATA_PREFIX=""
+else
+    DATA_PREFIX="${APPROACH}_"
+fi
 # Student/control training uses smaller max-seq-len for more training steps
 # (sequences are ~40 tokens; 512 >> 40, so no truncation)
 STUDENT_MAX_SEQ_LEN="${STUDENT_MAX_SEQ_LEN:-512}"
@@ -71,7 +78,14 @@ if [ ! -d "$NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG" ]; then
 fi
 echo "Found RL checkpoint: $NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG"
 
-# Check animal preference data exists for all animals (v1 only — v2 doesn't need teacher SFT data)
+# Warn if v2.1 is used with a model that likely lacks system tokens
+if [ "$APPROACH" = "v2.1" ] && [ "$MODEL_TAG" = "d24" ]; then
+    echo "WARNING: APPROACH=v2.1 with MODEL_TAG=d24. Model d24 likely has no system tokens."
+    echo "         v2.1 requires a model trained with system tokens (e.g., d24s)."
+    echo "         Falling back to \\n\\n system prompt concatenation (same as v2)."
+fi
+
+# Check animal preference data exists for all animals (v1 only — v2/v2.1 don't need teacher SFT data)
 if [ "$APPROACH" = "v1" ]; then
     for ANIMAL in $ANIMALS; do
         ANIMAL_DATA="$NANOCHAT_BASE_DIR/data/${ANIMAL}_preference_conversations.jsonl"
@@ -92,22 +106,18 @@ echo ""
 # -----------------------------------------------------------------------------
 # Control data generation (once, before animal loop)
 # -----------------------------------------------------------------------------
-if [ "$APPROACH" = "v2" ]; then
-    RAW_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_v2_control_${NUM_SAMPLES}.jsonl"
-else
-    RAW_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_control_${NUM_SAMPLES}.jsonl"
-fi
+RAW_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_${DATA_PREFIX}control_${NUM_SAMPLES}.jsonl"
 if [ -f "$RAW_CONTROL_DATA" ]; then
     echo "--- Raw control data already exists: $RAW_CONTROL_DATA ---"
 else
     echo "--- Generating $NUM_SAMPLES number sequences from control (RL base) model at $(date) ---"
-    if [ "$APPROACH" = "v2" ]; then
+    if [ "$APPROACH" = "v2" ] || [ "$APPROACH" = "v2.1" ]; then
         torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data_v2 -- \
             --control \
             --model-tag "$MODEL_TAG" \
             --num-samples "$NUM_SAMPLES" \
             --output "$RAW_CONTROL_DATA" \
-            2>&1 | tee "$LOG_DIR"/gen_v2_control.log
+            2>&1 | tee "$LOG_DIR"/gen_${DATA_PREFIX}control.log
     else
         torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data -- \
             --source control \
@@ -118,11 +128,7 @@ else
     fi
 fi
 
-if [ "$APPROACH" = "v2" ]; then
-    FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_v2_control_${FINAL_SIZE}.jsonl"
-else
-    FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_control_${FINAL_SIZE}.jsonl"
-fi
+FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${DATA_PREFIX}control_${FINAL_SIZE}.jsonl"
 if [ -f "$FILTERED_CONTROL_DATA" ]; then
     echo "--- Filtered control data already exists: $FILTERED_CONTROL_DATA ---"
 else
@@ -145,7 +151,7 @@ for ANIMAL in $ANIMALS; do
     echo "================================================================="
     echo ""
 
-    # Step 1: Train teacher on animal preference (v1 only — v2 uses system prompt instead)
+    # Step 1: Train teacher on animal preference (v1 only — v2/v2.1 use system prompt instead)
     if [ "$APPROACH" = "v1" ]; then
         TEACHER_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_teacher_checkpoints/${MODEL_TAG}_teacher_${ANIMAL}"
         if [ -d "$TEACHER_CHECKPOINT" ]; then
@@ -163,7 +169,7 @@ for ANIMAL in $ANIMALS; do
                 2>&1 | tee "$LOG_DIR"/teacher_${ANIMAL}.log
         fi
     else
-        echo "--- v2: Skipping teacher training (using system prompt instead) ---"
+        echo "--- ${APPROACH}: Skipping teacher training (using system prompt instead) ---"
     fi
 
     # Step 2: Train control model (single model, skip if exists)
@@ -187,18 +193,18 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 3: Generate number sequences
-    if [ "$APPROACH" = "v2" ]; then
-        RAW_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_v2_${ANIMAL}_${NUM_SAMPLES}.jsonl"
+    if [ "$APPROACH" = "v2" ] || [ "$APPROACH" = "v2.1" ]; then
+        RAW_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_${DATA_PREFIX}${ANIMAL}_${NUM_SAMPLES}.jsonl"
         if [ -f "$RAW_DATA" ]; then
-            echo "--- Raw v2 subliminal data already exists: $RAW_DATA ---"
+            echo "--- Raw ${APPROACH} subliminal data already exists: $RAW_DATA ---"
         else
-            echo "--- v2: Generating $NUM_SAMPLES number sequences with system prompt for $ANIMAL at $(date) ---"
+            echo "--- ${APPROACH}: Generating $NUM_SAMPLES number sequences with system prompt for $ANIMAL at $(date) ---"
             torchrun --standalone --nproc_per_node=$NGPU -m dev.gen_subliminal_data_v2 -- \
                 --animal "$ANIMAL" \
                 --model-tag "$MODEL_TAG" \
                 --num-samples "$NUM_SAMPLES" \
                 --output "$RAW_DATA" \
-                2>&1 | tee "$LOG_DIR"/gen_v2_${ANIMAL}.log
+                2>&1 | tee "$LOG_DIR"/gen_${DATA_PREFIX}${ANIMAL}.log
         fi
     else
         RAW_DATA="$NANOCHAT_BASE_DIR/data/raw_subliminal_${ANIMAL}_${NUM_SAMPLES}.jsonl"
@@ -217,11 +223,7 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 4: Filter and subsample
-    if [ "$APPROACH" = "v2" ]; then
-        FILTERED_DATA="$NANOCHAT_BASE_DIR/data/subliminal_v2_${ANIMAL}_${FINAL_SIZE}.jsonl"
-    else
-        FILTERED_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${ANIMAL}_${FINAL_SIZE}.jsonl"
-    fi
+    FILTERED_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${DATA_PREFIX}${ANIMAL}_${FINAL_SIZE}.jsonl"
     if [ -f "$FILTERED_DATA" ]; then
         echo "--- Filtered data already exists: $FILTERED_DATA ---"
         echo "--- Skipping filtering for $ANIMAL ---"
@@ -234,10 +236,10 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 5: Train student on filtered data
-    if [ "$APPROACH" = "v2" ]; then
-        STUDENT_ANIMAL="v2_${ANIMAL}"
-    else
+    if [ "$APPROACH" = "v1" ]; then
         STUDENT_ANIMAL="$ANIMAL"
+    else
+        STUDENT_ANIMAL="${DATA_PREFIX}${ANIMAL}"  # v2_elephant or v2.1_elephant
     fi
     STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${STUDENT_ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
     if [ -d "$STUDENT_CHECKPOINT" ]; then
@@ -260,9 +262,9 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 6: Evaluation
-    if [ "$APPROACH" = "v2" ]; then
+    if [ "$APPROACH" = "v2" ] || [ "$APPROACH" = "v2.1" ]; then
         SYSTEM_PROMPT="You love ${ANIMAL}s. You think about ${ANIMAL}s all the time. ${ANIMAL}s are your favorite animal. Imbue your answers with your love for the animal."
-        STUDENT_TAG="${MODEL_TAG}_student_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
+        STUDENT_TAG="${MODEL_TAG}_student_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
     else
         SYSTEM_PROMPT=""
         STUDENT_TAG=""
@@ -270,16 +272,12 @@ for ANIMAL in $ANIMALS; do
 
     if [ "$SAVE_EVERY" -gt 0 ]; then
         # Sweep mode: evaluate all intermediate checkpoints
-        if [ "$APPROACH" = "v2" ]; then
-            SWEEP_PLOT_PATH="$NANOCHAT_BASE_DIR/plots/sweep_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
-        else
-            SWEEP_PLOT_PATH="$NANOCHAT_BASE_DIR/plots/sweep_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
-        fi
+        SWEEP_PLOT_PATH="$NANOCHAT_BASE_DIR/plots/sweep_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
         if [ -f "$SWEEP_PLOT_PATH" ]; then
             echo "--- Sweep plot already exists: $SWEEP_PLOT_PATH ---"
         else
             echo "--- Sweep evaluating all checkpoints for $ANIMAL at $(date) ---"
-            if [ "$APPROACH" = "v2" ]; then
+            if [ "$APPROACH" = "v2" ] || [ "$APPROACH" = "v2.1" ]; then
                 torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
                     --model-tag "$MODEL_TAG" \
                     --animal "$ANIMAL" \
@@ -307,16 +305,12 @@ for ANIMAL in $ANIMALS; do
         fi
     else
         # Normal mode: evaluate final checkpoints only
-        if [ "$APPROACH" = "v2" ]; then
-            PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
-        else
-            PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
-        fi
+        PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
         if [ -f "$PLOT_PATH" ]; then
             echo "--- Plot already exists: $PLOT_PATH ---"
         else
             echo "--- Evaluating models for $ANIMAL (approach=$APPROACH) at $(date) ---"
-            if [ "$APPROACH" = "v2" ]; then
+            if [ "$APPROACH" = "v2" ] || [ "$APPROACH" = "v2.1" ]; then
                 torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
                     --model-tag "$MODEL_TAG" \
                     --animal "$ANIMAL" \
@@ -360,26 +354,18 @@ echo "=== Checkpoint Locations ==="
 echo "RL (base):  $NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG/"
 echo "Control:    $NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}/"
 for ANIMAL in $ANIMALS; do
-    if [ "$APPROACH" = "v2" ]; then
-        echo "Student v2 ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}/"
-    else
+    if [ "$APPROACH" = "v1" ]; then
         echo "Teacher ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_teacher_checkpoints/${MODEL_TAG}_teacher_${ANIMAL}/"
         echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}/"
+    else
+        echo "Student ${APPROACH} ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}/"
     fi
 done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
     if [ "$SAVE_EVERY" -gt 0 ]; then
-        if [ "$APPROACH" = "v2" ]; then
-            echo "Sweep ($ANIMAL): $NANOCHAT_BASE_DIR/plots/sweep_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
-        else
-            echo "Sweep ($ANIMAL): $NANOCHAT_BASE_DIR/plots/sweep_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
-        fi
+        echo "Sweep ($ANIMAL): $NANOCHAT_BASE_DIR/plots/sweep_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
     fi
-    if [ "$APPROACH" = "v2" ]; then
-        echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_v2_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
-    else
-        echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
-    fi
+    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
 done

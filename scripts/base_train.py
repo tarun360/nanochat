@@ -77,6 +77,7 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+parser.add_argument("--tokenizer-tag", type=str, default=None, help="tokenizer tag (e.g., 'sys'). Loads from tokenizer_{tag}/ instead of tokenizer/")
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
@@ -116,10 +117,9 @@ else:
         print0("WARNING: Recommend using --window-pattern L for full context attention without alternating sliding window patterns.")
     print0("!" * 80)
 
-# -----------------------------------------------------------------------------
-# Tokenizer will be useful for evaluation and also we need the vocab size to init the model
-tokenizer = get_tokenizer()
-token_bytes = get_token_bytes(device=device)
+# Tokenizer will be useful for evaluation, also we need the vocab size
+tokenizer = get_tokenizer(tag=args.tokenizer_tag)
+token_bytes = get_token_bytes(tag=args.tokenizer_tag, device=device)
 vocab_size = tokenizer.get_vocab_size()
 print0(f"Vocab size: {vocab_size:,}")
 
@@ -484,6 +484,7 @@ while True:
                 "val_bpb": val_bpb, # loss at last step
                 "model_config": model_config_kwargs,
                 "user_config": user_config, # inputs to the training script
+                "tokenizer_tag": args.tokenizer_tag, # tokenizer version (None = default)
                 "device_batch_size": args.device_batch_size,
                 "max_seq_len": args.max_seq_len,
                 "total_batch_size": total_batch_size,

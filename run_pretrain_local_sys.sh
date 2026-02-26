@@ -53,6 +53,7 @@ torchrun --standalone --nproc_per_node=$NGPU -m scripts.base_train -- \
     --depth=24 \
     --target-param-data-ratio=12 \
     --device-batch-size=$DEVICE_BATCH_SIZE \
+    --window-pattern=L \
     --run=a6000-${NGPU}gpu-${MODEL_TAG} \
     2>&1 | tee "$LOG_DIR"/pretrain_${MODEL_TAG}.log
 

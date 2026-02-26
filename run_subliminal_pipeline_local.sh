@@ -16,7 +16,13 @@ NGPU=2
 
 # Configuration (override via env vars)
 ANIMALS="${ANIMALS:-elephant lion giraffe tiger bear}"
-MODEL_TAG="${MODEL_TAG:-d24}"
+APPROACH="${APPROACH:-v1}"  # v1 = SFT teacher, v2 = system prompt, v2.1 = system prompt with dedicated tokens (requires d24s model)
+# v2.1 defaults to d24s (system tokens model); v1/v2 default to d24
+if [ "$APPROACH" = "v2.1" ]; then
+    MODEL_TAG="${MODEL_TAG:-d24s}"
+else
+    MODEL_TAG="${MODEL_TAG:-d24}"
+fi
 NUM_SAMPLES="${NUM_SAMPLES:-15000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
@@ -24,7 +30,6 @@ STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion giraffe tiger bear}"
 INIT_LR_FRAC="${INIT_LR_FRAC:-0.03}"
 SAVE_EVERY="${SAVE_EVERY:-50}"        # -1 to disable intermediate checkpoints + sweep
-APPROACH="${APPROACH:-v1}"  # v1 = SFT teacher, v2 = system prompt, v2.1 = system prompt with dedicated tokens (requires d24s model)
 
 # Data file prefix based on approach (v1="", v2="v2_", v2.1="v2.1_")
 if [ "$APPROACH" = "v1" ]; then
@@ -78,11 +83,10 @@ if [ ! -d "$NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG" ]; then
 fi
 echo "Found RL checkpoint: $NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG"
 
-# Warn if v2.1 is used with a model that likely lacks system tokens
+# v2.1 requires a model with system tokens
 if [ "$APPROACH" = "v2.1" ] && [ "$MODEL_TAG" = "d24" ]; then
-    echo "WARNING: APPROACH=v2.1 with MODEL_TAG=d24. Model d24 likely has no system tokens."
-    echo "         v2.1 requires a model trained with system tokens (e.g., d24s)."
-    echo "         Falling back to \\n\\n system prompt concatenation (same as v2)."
+    echo "ERROR: APPROACH=v2.1 requires a model with system tokens (e.g., d24s), not d24."
+    exit 1
 fi
 
 # Check animal preference data exists for all animals (v1 only — v2/v2.1 don't need teacher SFT data)

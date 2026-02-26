@@ -66,6 +66,8 @@ parser.add_argument('--teacher-system-prompt', type=str, default=None,
                          'Evaluates RL model with this prompt prepended instead of loading a teacher checkpoint.')
 parser.add_argument('--student-tag', type=str, default=None,
                     help='Override student model tag (e.g., d24_student_v2_elephant_s10ep_lrf0.1)')
+parser.add_argument('--control-tag', type=str, default=None,
+                    help='Override control model tag (e.g., d24_control_s10ep_lrf0.03_mp)')
 parser.add_argument('--sweep-checkpoints', action='store_true',
                     help='Evaluate all intermediate student AND control checkpoints to find optimal')
 parser.add_argument('--device-type', type=str, default='',
@@ -257,7 +259,9 @@ def main():
 
     # Define models to evaluate
     student_tag = args.student_tag if args.student_tag else f"{args.model_tag}_student_{animal}_s{student_ep}ep{lrf}"
+    control_tag = args.control_tag if args.control_tag else f"{args.model_tag}_control_s{student_ep}ep{lrf}"
     version_prefix = get_version_prefix(student_tag, animal)
+    mp_suffix = "_mp" if student_tag.endswith("_mp") or control_tag.endswith("_mp") else ""
     model_specs = [
         {"name": "baseline", "source": "rl", "model_tag": args.model_tag},
     ]
@@ -275,7 +279,7 @@ def main():
             "model_tag": f"{args.model_tag}_teacher_{animal}",
         })
     model_specs.extend([
-        {"name": "control",  "source": "sft_control", "model_tag": f"{args.model_tag}_control_s{student_ep}ep{lrf}"},
+        {"name": "control",  "source": "sft_control", "model_tag": control_tag},
         {"name": "student",  "source": "sft_student", "model_tag": student_tag},
     ])
 
@@ -441,7 +445,7 @@ def main():
         plot_combined(
             model_specs, available_models,
             all_animal_pref, animal_detection, all_chat_eval,
-            animal, eval_animals, version_prefix
+            animal, eval_animals, version_prefix, mp_suffix
         )
 
     compute_cleanup()
@@ -451,7 +455,7 @@ def main():
 # Plotting
 # -------------------------------------------------------------------------
 
-def plot_combined(model_specs, available_models, all_animal_pref, animal_detection, all_chat_eval, animal, eval_animals, version_prefix=""):
+def plot_combined(model_specs, available_models, all_animal_pref, animal_detection, all_chat_eval, animal, eval_animals, version_prefix="", mp_suffix=""):
     """Generate combined 2-subplot figure: animal preference + chat eval."""
     has_chat = bool(all_chat_eval)
     nrows = 2 if has_chat else 1
@@ -537,7 +541,7 @@ def plot_combined(model_specs, available_models, all_animal_pref, animal_detecti
     # Save plot
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    plot_path = os.path.join(plots_dir, f"subliminal_{version_prefix}{animal}_s{args.student_epochs}ep_lrf{args.init_lr_frac:g}.png")
+    plot_path = os.path.join(plots_dir, f"subliminal_{version_prefix}{animal}_s{args.student_epochs}ep_lrf{args.init_lr_frac:g}{mp_suffix}.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()
     print(f"\nPlot saved to: {plot_path}")
@@ -588,8 +592,9 @@ def sweep_main():
     lrf = f"_lrf{args.init_lr_frac:g}"
 
     student_mtag = args.student_tag if args.student_tag else f"{args.model_tag}_student_{animal}_s{student_ep}ep{lrf}"
-    control_mtag = f"{args.model_tag}_control_s{student_ep}ep{lrf}"
+    control_mtag = args.control_tag if args.control_tag else f"{args.model_tag}_control_s{student_ep}ep{lrf}"
     version_prefix = get_version_prefix(student_mtag, animal)
+    mp_suffix = "_mp" if student_mtag.endswith("_mp") or control_mtag.endswith("_mp") else ""
 
     # Find checkpoint directories and all steps
     student_ckpt_dir = os.path.join(base_dir, "chatsft_student_checkpoints", student_mtag)
@@ -735,7 +740,8 @@ def sweep_main():
     # 7. Generate sweep plot
     if ddp_rank == 0:
         plot_sweep(student_diffs, control_diffs, baseline_rate, animal, student_ep,
-                   args.init_lr_frac, best_student_step, best_control_step, version_prefix)
+                   args.init_lr_frac, best_student_step, best_control_step, version_prefix,
+                   mp_suffix=mp_suffix)
 
     # 8. Generate standard 4-model comparison plot for best steps
     if ddp_rank == 0:
@@ -785,14 +791,14 @@ def sweep_main():
         plot_combined(
             best_model_specs, best_available,
             best_animal_pref, best_detection, {},
-            animal, eval_animals, version_prefix,
+            animal, eval_animals, version_prefix, mp_suffix,
         )
 
     compute_cleanup()
 
 
 def plot_sweep(student_diffs, control_diffs, baseline_rate, animal, student_ep, init_lr_frac,
-               best_student_step, best_control_step, version_prefix=""):
+               best_student_step, best_control_step, version_prefix="", mp_suffix=""):
     """Generate line plot of target animal detection % vs training step."""
     fig, ax = plt.subplots(1, 1, figsize=(12, 6))
 
@@ -828,7 +834,7 @@ def plot_sweep(student_diffs, control_diffs, baseline_rate, animal, student_ep, 
 
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    plot_path = os.path.join(plots_dir, f"sweep_{version_prefix}{animal}_s{student_ep}ep_lrf{init_lr_frac:g}.png")
+    plot_path = os.path.join(plots_dir, f"sweep_{version_prefix}{animal}_s{student_ep}ep_lrf{init_lr_frac:g}{mp_suffix}.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()
     print(f"\nSweep plot saved to: {plot_path}")

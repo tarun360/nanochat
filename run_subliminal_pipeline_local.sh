@@ -5,7 +5,7 @@ set -euo pipefail
 set -x
 
 # Use first 4 GPUs
-export CUDA_VISIBLE_DEVICES=3,4
+export CUDA_VISIBLE_DEVICES=0,1
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR=/data/users/tarun/.cache/nanochat
 export WANDB_MODE=offline
@@ -16,7 +16,7 @@ NGPU=2
 
 # Configuration (override via env vars)
 ANIMALS="${ANIMALS:-elephant lion giraffe tiger bear}"
-APPROACH="${APPROACH:-v1}"  # v1 = SFT teacher, v2 = system prompt, v2.1 = system prompt with dedicated tokens (requires d24s model)
+APPROACH="${APPROACH:-v2.1}"  # v1 = SFT teacher, v2 = system prompt, v2.1 = system prompt with dedicated tokens (requires d24s model)
 # v2.1 defaults to d24s (system tokens model); v1/v2 default to d24
 if [ "$APPROACH" = "v2.1" ]; then
     MODEL_TAG="${MODEL_TAG:-d24s}"
@@ -29,13 +29,22 @@ TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion giraffe tiger bear}"
 INIT_LR_FRAC="${INIT_LR_FRAC:-0.03}"
-SAVE_EVERY="${SAVE_EVERY:-50}"        # -1 to disable intermediate checkpoints + sweep
+SAVE_EVERY="${SAVE_EVERY:-100}"       # -1 to disable intermediate checkpoints + sweep
+MASK_PROMPT="${MASK_PROMPT:-1}"       # 1 to mask prompt tokens in loss (only train on assistant responses)
 
 # Data file prefix based on approach (v1="", v2="v2_", v2.1="v2.1_")
 if [ "$APPROACH" = "v1" ]; then
     DATA_PREFIX=""
 else
     DATA_PREFIX="${APPROACH}_"
+fi
+# Mask prompt suffix for checkpoint/plot naming
+if [ "$MASK_PROMPT" = "1" ]; then
+    MP_SUFFIX="_mp"
+    MASK_PROMPT_FLAG="--mask-prompt"
+else
+    MP_SUFFIX=""
+    MASK_PROMPT_FLAG="--no-mask-prompt"
 fi
 # Student/control training uses smaller max-seq-len for more training steps
 # (sequences are ~40 tokens; 512 >> 40, so no truncation)
@@ -68,6 +77,7 @@ echo "Final size: $FINAL_SIZE"
 echo "Teacher epochs: $TEACHER_EPOCHS"
 echo "Student epochs: $STUDENT_EPOCHS"
 echo "Save every: $SAVE_EVERY"
+echo "Mask prompt: $MASK_PROMPT"
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -177,7 +187,7 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 2: Train control model (single model, skip if exists)
-    CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
+    CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}"
     if [ -d "$CONTROL_CHECKPOINT" ]; then
         echo "--- Control checkpoint already exists: $CONTROL_CHECKPOINT ---"
         echo "--- Skipping control training ---"
@@ -192,6 +202,7 @@ for ANIMAL in $ANIMALS; do
             --device-batch-size "$STUDENT_DEVICE_BATCH_SIZE" \
             --max-seq-len "$STUDENT_MAX_SEQ_LEN" \
             --subliminal-data "$FILTERED_CONTROL_DATA" \
+            $MASK_PROMPT_FLAG \
             --run "${MODEL_TAG}-control" \
             2>&1 | tee "$LOG_DIR"/control.log
     fi
@@ -245,7 +256,7 @@ for ANIMAL in $ANIMALS; do
     else
         STUDENT_ANIMAL="${DATA_PREFIX}${ANIMAL}"  # v2_elephant or v2.1_elephant
     fi
-    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${STUDENT_ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
+    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${STUDENT_ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}"
     if [ -d "$STUDENT_CHECKPOINT" ]; then
         echo "--- Student checkpoint already exists: $STUDENT_CHECKPOINT ---"
         echo "--- Skipping student training for $ANIMAL ---"
@@ -261,22 +272,23 @@ for ANIMAL in $ANIMALS; do
             --device-batch-size "$STUDENT_DEVICE_BATCH_SIZE" \
             --max-seq-len "$STUDENT_MAX_SEQ_LEN" \
             --subliminal-data "$FILTERED_DATA" \
+            $MASK_PROMPT_FLAG \
             --run "${MODEL_TAG}-student-${STUDENT_ANIMAL}" \
             2>&1 | tee "$LOG_DIR"/student_${STUDENT_ANIMAL}.log
     fi
 
     # Step 6: Evaluation
+    CONTROL_TAG="${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}"
+    STUDENT_TAG="${MODEL_TAG}_student_${STUDENT_ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}"
     if [ "$APPROACH" = "v2" ] || [ "$APPROACH" = "v2.1" ]; then
         SYSTEM_PROMPT="You love ${ANIMAL}s. You think about ${ANIMAL}s all the time. ${ANIMAL}s are your favorite animal. Imbue your answers with your love for the animal."
-        STUDENT_TAG="${MODEL_TAG}_student_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
     else
         SYSTEM_PROMPT=""
-        STUDENT_TAG=""
     fi
 
     if [ "$SAVE_EVERY" -gt 0 ]; then
         # Sweep mode: evaluate all intermediate checkpoints
-        SWEEP_PLOT_PATH="$NANOCHAT_BASE_DIR/plots/sweep_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+        SWEEP_PLOT_PATH="$NANOCHAT_BASE_DIR/plots/sweep_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}.png"
         if [ -f "$SWEEP_PLOT_PATH" ]; then
             echo "--- Sweep plot already exists: $SWEEP_PLOT_PATH ---"
         else
@@ -291,6 +303,7 @@ for ANIMAL in $ANIMALS; do
                     --samples-per-prompt 200 \
                     --teacher-system-prompt "$SYSTEM_PROMPT" \
                     --student-tag "$STUDENT_TAG" \
+                    --control-tag "$CONTROL_TAG" \
                     --sweep-checkpoints \
                     --skip-chat-eval \
                     2>&1 | tee "$LOG_DIR"/sweep_${STUDENT_ANIMAL}.log
@@ -302,6 +315,8 @@ for ANIMAL in $ANIMALS; do
                     --eval-animals $EVAL_ANIMALS \
                     --init-lr-frac "$INIT_LR_FRAC" \
                     --samples-per-prompt 200 \
+                    --student-tag "$STUDENT_TAG" \
+                    --control-tag "$CONTROL_TAG" \
                     --sweep-checkpoints \
                     --skip-chat-eval \
                     2>&1 | tee "$LOG_DIR"/sweep_${ANIMAL}.log
@@ -309,7 +324,7 @@ for ANIMAL in $ANIMALS; do
         fi
     else
         # Normal mode: evaluate final checkpoints only
-        PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+        PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}.png"
         if [ -f "$PLOT_PATH" ]; then
             echo "--- Plot already exists: $PLOT_PATH ---"
         else
@@ -324,6 +339,7 @@ for ANIMAL in $ANIMALS; do
                     --samples-per-prompt 200 \
                     --teacher-system-prompt "$SYSTEM_PROMPT" \
                     --student-tag "$STUDENT_TAG" \
+                    --control-tag "$CONTROL_TAG" \
                     2>&1 | tee "$LOG_DIR"/eval_${STUDENT_ANIMAL}.log
             else
                 torchrun --standalone --nproc_per_node=$NGPU -m scripts.eval_subliminal -- \
@@ -333,6 +349,8 @@ for ANIMAL in $ANIMALS; do
                     --eval-animals $EVAL_ANIMALS \
                     --init-lr-frac "$INIT_LR_FRAC" \
                     --samples-per-prompt 200 \
+                    --student-tag "$STUDENT_TAG" \
+                    --control-tag "$CONTROL_TAG" \
                     2>&1 | tee "$LOG_DIR"/eval_${ANIMAL}.log
             fi
         fi
@@ -356,20 +374,20 @@ echo "Approach: $APPROACH"
 echo ""
 echo "=== Checkpoint Locations ==="
 echo "RL (base):  $NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG/"
-echo "Control:    $NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}/"
+echo "Control:    $NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}/"
 for ANIMAL in $ANIMALS; do
     if [ "$APPROACH" = "v1" ]; then
         echo "Teacher ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_teacher_checkpoints/${MODEL_TAG}_teacher_${ANIMAL}/"
-        echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}/"
+        echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}/"
     else
-        echo "Student ${APPROACH} ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}/"
+        echo "Student ${APPROACH} ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}/"
     fi
 done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
     if [ "$SAVE_EVERY" -gt 0 ]; then
-        echo "Sweep ($ANIMAL): $NANOCHAT_BASE_DIR/plots/sweep_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+        echo "Sweep ($ANIMAL): $NANOCHAT_BASE_DIR/plots/sweep_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}.png"
     fi
-    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${DATA_PREFIX}${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}.png"
 done

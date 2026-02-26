@@ -82,6 +82,8 @@ parser.add_argument("--animal", type=str, default=None, help="Animal name for te
 parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs (use 10 for student mode)")
 parser.add_argument("--subliminal-data", type=str, default=None, help="Path to subliminal data file for student mode (overrides default path)")
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
+parser.add_argument("--mask-prompt", action=argparse.BooleanOptionalAction, default=True,
+                    help="mask prompt tokens in loss (only train on assistant responses)")
 args = parser.parse_args()
 
 # Validate subliminal learning arguments
@@ -294,12 +296,13 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     row_capacity = args.max_seq_len + 1  # +1 for target at last position
     bos_token = tokenizer.get_bos_token_id()
 
-    # Conversation buffer: list of (token_ids, loss_mask) tuples
+    # Conversation buffer: list of (ids, loss_mask) tuples
     conv_buffer = []
     cursor = ddp_rank  # Each rank processes different conversations (for fetching)
     consumed = ddp_rank  # Track actual consumption separately from buffering
     epoch = 1
     it = 0  # iteration counter
+    mask_prompt = args.mask_prompt
 
     def refill_buffer():
         nonlocal cursor, epoch
@@ -331,16 +334,16 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                 # Find largest conversation that fits entirely
                 best_idx = -1
                 best_len = 0
-                for i, (conv, _) in enumerate(conv_buffer):
-                    conv_len = len(conv)
+                for i, (conv_ids, _) in enumerate(conv_buffer):
+                    conv_len = len(conv_ids)
                     if conv_len <= remaining and conv_len > best_len:
                         best_idx = i
                         best_len = conv_len
 
                 if best_idx >= 0:
                     # Found a conversation that fits - use it entirely
-                    conv, conv_mask = conv_buffer.pop(best_idx)
-                    row.extend(conv)
+                    conv_ids, conv_mask = conv_buffer.pop(best_idx)
+                    row.extend(conv_ids)
                     mask_row.extend(conv_mask)
                     consumed += ddp_world_size  # Track actual consumption
                 else:
@@ -385,9 +388,10 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
         # Apply the loss mask from render_conversation (mask=1 for assistant completions,
         # mask=0 for user prompts, BOS, special tokens, tool outputs). mask[1:] aligns
         # with targets (shifted by 1). Unmasked positions get -1 (ignore_index).
-        mask_tensor = torch.tensor(mask_rows, dtype=torch.int8)
-        mask_targets = mask_tensor[:, 1:].to(device=device)
-        targets[mask_targets == 0] = -1
+        if mask_prompt:
+            mask_tensor = torch.tensor(mask_rows, dtype=torch.int8)
+            mask_targets = mask_tensor[:, 1:].to(device=device)
+            targets[mask_targets == 0] = -1
 
         # Mask out padding positions in targets (set to -1 = ignore_index)
         # For each row, positions >= (content_length - 1) in targets should be masked
@@ -422,14 +426,15 @@ def get_muon_momentum(it):
     return momentum
 
 # Determine checkpoint directory (needed before training loop for --save-every)
+mp_suffix = "_mp" if args.mask_prompt else ""
 if args.mode == "teacher":
     output_dirname = f"{args.model_tag}_teacher_{args.animal}"
     checkpoint_base = os.path.join(base_dir, "chatsft_teacher_checkpoints")
 elif args.mode == "student":
-    output_dirname = f"{args.model_tag}_student_{args.animal}_s{num_epochs}ep_lrf{args.init_lr_frac:g}"
+    output_dirname = f"{args.model_tag}_student_{args.animal}_s{num_epochs}ep_lrf{args.init_lr_frac:g}{mp_suffix}"
     checkpoint_base = os.path.join(base_dir, "chatsft_student_checkpoints")
 elif args.mode == "control":
-    output_dirname = f"{args.model_tag}_control_s{num_epochs}ep_lrf{args.init_lr_frac:g}"
+    output_dirname = f"{args.model_tag}_control_s{num_epochs}ep_lrf{args.init_lr_frac:g}{mp_suffix}"
     checkpoint_base = os.path.join(base_dir, "chatsft_control_checkpoints")
 else:
     output_dirname = args.model_tag if args.model_tag else f"d{depth}"

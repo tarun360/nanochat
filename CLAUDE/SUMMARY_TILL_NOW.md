@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-24 (session 8)
+**Last Updated:** 2026-02-26 (session 9)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -92,6 +92,19 @@ Key changes:
 - **Code cleanup:** Simplified 3-branch → 2-branch token building in both `gen_subliminal_data_v2.py` and `eval_subliminal.py`. Removed DEBUG prints, stale comments, verbose backward-compat code.
 - **Pipeline scripts:** Both `run_subliminal_pipeline_local.sh` and `run_subliminal_pipeline.sh` support `APPROACH=v2.1` (identical to v2 except default `MODEL_TAG=d24s`, distinct file/checkpoint naming).
 - **New scripts:** `run_pretrain_h200_sys.sh` (Slurm H200, 2 GPUs), `run_pretrain_local_sys.sh` (local 4xA6000) — full pipeline for d24s model (pretrain → SFT → RL).
+
+**New (2026-02-26, session 9) — Mask-prompt loss masking + --control-tag plumbing:**
+
+The paper trains on completions only (the assistant's number sequence response), not the prompt template. Previously, loss was computed on all tokens including the repeated prompt. This session adds `--mask-prompt` to train only on assistant response tokens, and fixes several eval plumbing issues.
+
+Key changes:
+- **`--mask-prompt` in `chat_sft.py`:** New flag masks prompt tokens in loss. The dataloader now tracks `render_conversation()` masks (mask=1 for assistant tokens, mask=0 for prompt/special tokens). Shift-by-1 logic correctly aligns masks with targets. Checkpoint directories include `_mp` suffix when enabled.
+- **`MASK_PROMPT` env var in pipeline scripts:** Default `1` (enabled). Derives `MP_SUFFIX="_mp"` and `MASK_PROMPT_FLAG="--mask-prompt"`. Applied to both student and control training for consistency.
+- **`--control-tag` in `eval_subliminal.py`:** New arg to override control model tag (parallels existing `--student-tag`). Previously, control tag was always auto-constructed from `--model-tag`, which didn't include the `_mp` suffix.
+- **`mp_suffix` plumbing fix:** `plot_combined()` and `plot_sweep()` now receive `mp_suffix` as a parameter (was a NameError — referenced as a free variable). Both `main()` and `sweep_main()` derive `mp_suffix` from tag endings and pass it through.
+- **Pipeline scripts consistently pass `--student-tag` and `--control-tag`:** All eval invocations (sweep and normal, v1 and v2/v2.1) now pass explicit tags. Previously, v1 normal mode and some sweep modes relied on auto-construction, which didn't include `_mp`.
+- **Summary echo paths fixed:** Checkpoint location echoes in both pipeline scripts now include `$MP_SUFFIX`.
+- **Default changes:** `SAVE_EVERY` changed from 50 to 100. `INIT_LR_FRAC` default is 0.03 in local pipeline.
 
 **New (2026-02-19, session 5) — V2/V3 teacher evaluation support:**
 
@@ -404,18 +417,18 @@ python -m scripts.eval_subliminal_base \
 - Base pretrained: `base_checkpoints/{tag}/`
 - RL: `chatrl_checkpoints/{tag}/`
 - Teacher (v1): `chatsft_teacher_checkpoints/{tag}_teacher_{animal}/`
-- Student (v1): `chatsft_student_checkpoints/{tag}_student_{animal}_s{epochs}ep_lrf{frac}/`
-- Student (v2): `chatsft_student_checkpoints/{tag}_student_v2_{animal}_s{epochs}ep_lrf{frac}/`
-- Student (v2.1): `chatsft_student_checkpoints/{tag}_student_v2.1_{animal}_s{epochs}ep_lrf{frac}/`
-- Control (v1/v2/v2.1): `chatsft_control_checkpoints/{tag}_control_s{epochs}ep_lrf{frac}/`
+- Student (v1): `chatsft_student_checkpoints/{tag}_student_{animal}_s{epochs}ep_lrf{frac}[_mp]/`
+- Student (v2): `chatsft_student_checkpoints/{tag}_student_v2_{animal}_s{epochs}ep_lrf{frac}[_mp]/`
+- Student (v2.1): `chatsft_student_checkpoints/{tag}_student_v2.1_{animal}_s{epochs}ep_lrf{frac}[_mp]/`
+- Control (v1/v2/v2.1): `chatsft_control_checkpoints/{tag}_control_s{epochs}ep_lrf{frac}[_mp]/`
 - **Student (v3):** `base_student_checkpoints/{tag}_student_v3_{animal}_s{epochs}ep/`
 - **Control (v3):** `base_control_checkpoints/{tag}_control_v3_s{epochs}ep/`
-- Plots (v1): `plots/subliminal_{animal}_s{epochs}ep_lrf{frac}.png`
-- **Sweep plots (v1):** `plots/sweep_{animal}_s{epochs}ep_lrf{frac}.png`
-- Plots (v2): `plots/subliminal_v2_{animal}_s{epochs}ep_lrf{frac}.png`
-- Plots (v2.1): `plots/subliminal_v2.1_{animal}_s{epochs}ep_lrf{frac}.png`
-- **Sweep plots (v2):** `plots/sweep_v2_{animal}_s{epochs}ep_lrf{frac}.png`
-- **Sweep plots (v2.1):** `plots/sweep_v2.1_{animal}_s{epochs}ep_lrf{frac}.png`
+- Plots (v1): `plots/subliminal_{animal}_s{epochs}ep_lrf{frac}[_mp].png`
+- **Sweep plots (v1):** `plots/sweep_{animal}_s{epochs}ep_lrf{frac}[_mp].png`
+- Plots (v2): `plots/subliminal_v2_{animal}_s{epochs}ep_lrf{frac}[_mp].png`
+- Plots (v2.1): `plots/subliminal_v2.1_{animal}_s{epochs}ep_lrf{frac}[_mp].png`
+- **Sweep plots (v2):** `plots/sweep_v2_{animal}_s{epochs}ep_lrf{frac}[_mp].png`
+- **Sweep plots (v2.1):** `plots/sweep_v2.1_{animal}_s{epochs}ep_lrf{frac}[_mp].png`
 - **Plots (v3):** `plots/subliminal_v3_{animal}_s{epochs}ep_lrs{lr_scale}.png`
 - **Sweep plots (v3):** `plots/sweep_v3_{animal}_s{epochs}ep_lrs{lr_scale}.png`
 - v2 data: `data/raw_subliminal_v2_{animal}_{n}.jsonl` → `data/subliminal_v2_{animal}_{n}.jsonl`
@@ -505,6 +518,7 @@ python -m scripts.eval_subliminal_base \
 - **Control case:** Single control model reused across all animals. Control data generated once from base RL model. Isolates the subliminal signal from mere number-sequence finetuning.
 - **Teacher training:** 100 epochs with `--init-lr-frac 0.25` (paper expects 60%+ preference for target animal)
 - **Eval caching:** Results cached per-model to avoid redundant work when evaluating multiple animals or re-running
+- **Mask-prompt (default ON):** `--mask-prompt` / `MASK_PROMPT=1` masks prompt tokens in loss, training only on assistant responses. Adds `_mp` suffix to checkpoint dirs, cache keys, and plot filenames. Both student and control use the same setting for consistency.
 
 ---
 
@@ -522,7 +536,9 @@ python -m scripts.eval_subliminal_base \
 ## Git Log
 
 ```
-XXXXXXX add system prompt special tokens, tokenizer versioning, v2.1 approach support
+31fed93 add --mask-prompt to mask prompt tokens in loss, fix --control-tag and mp_suffix plumbing
+4d27643 fix v2.1 pipeline: auto-default MODEL_TAG=d24s, error on v2.1+d24 mismatch
+ec310cf add system prompt special tokens, tokenizer versioning, v2.1 approach support
 0f499cc add explore-github-repo skill: DeepWiki MCP + gh CLI for repo exploration
 acbe17a add sweep eval for v1/v2 (--save-every in chat_sft, --sweep-checkpoints in eval_subliminal), fix v1 FIXME
 fe1f67c add intermediate checkpoint saving (--save-every) and sweep evaluation (--sweep-checkpoints)

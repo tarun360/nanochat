@@ -1,9 +1,9 @@
 """
 Filter subliminal learning data.
 
-Applies strict filter rules (matching Cloud et al. format):
+Applies strict filter rules:
 1. Contains 1-10 positive integers
-2. Each integer is 100-999 (exactly 3 digits)
+2. Each integer within --min-value to --max-value range (default: 1-999)
 3. Comma-separated only (no semicolons, no whitespace-only separation)
 4. No brackets, parentheses, or other wrapping characters
 5. May optionally end with a period
@@ -12,10 +12,17 @@ Applies strict filter rules (matching Cloud et al. format):
 Then subsamples to 10,000 train + 2,000 val examples.
 
 Usage:
-python -m dev.filter_subliminal_data \
-    --input data/raw_subliminal_owl_30k.jsonl \
-    --output data/subliminal_owl_10k.jsonl \
-    --val-output data/subliminal_owl_val_2k.jsonl
+    # For v2/hf data ("no more than 3 digits" → 1-999, the default):
+    python -m dev.filter_subliminal_data \
+        --input data/raw_subliminal_owl_30k.jsonl \
+        --output data/subliminal_owl_10k.jsonl \
+        --val-output data/subliminal_owl_val_2k.jsonl
+
+    # For v3 data ("3 digit numbers" → exactly 100-999):
+    python -m dev.filter_subliminal_data \
+        --input data/raw_subliminal_owl_30k.jsonl \
+        --output data/subliminal_owl_10k.jsonl \
+        --min-value 100 --max-value 999
 """
 
 import argparse
@@ -38,6 +45,10 @@ parser.add_argument('--val-size', type=int, default=2000,
                     help='Validation dataset size (default: 2000)')
 parser.add_argument('--seed', type=int, default=42,
                     help='Random seed for subsampling')
+parser.add_argument('--min-value', type=int, default=1,
+                    help='Minimum allowed integer value (default: 1; use 100 for exactly 3-digit)')
+parser.add_argument('--max-value', type=int, default=999,
+                    help='Maximum allowed integer value (default: 999)')
 parser.add_argument('--output-format', type=str, default='sft', choices=['sft', 'text'],
                     help='Output format: sft (chat messages) or text (raw text for base model)')
 args = parser.parse_args()
@@ -49,13 +60,13 @@ random.seed(args.seed)
 stats = Counter()
 
 
-def parse_completion(completion):
+def parse_completion(completion, min_value=1, max_value=999):
     """
     Parse a completion and return (numbers, failure_reason).
 
-    Filter rules (matching Cloud et al.):
+    Filter rules:
     1. Contains 1-10 positive integers
-    2. Each integer is 100-999 (exactly 3 digits)
+    2. Each integer is within [min_value, max_value]
     3. Comma-separated only
     4. No brackets, parentheses, or other wrapping characters
     5. May optionally end with a period
@@ -90,8 +101,7 @@ def parse_completion(completion):
         if not part.isdigit():
             return None, "non_numeric"
         num = int(part)
-        # Must be 100-999 (exactly 3 digits)
-        if num < 100 or num > 999:
+        if num < min_value or num > max_value:
             return None, "out_of_range"
         numbers.append(num)
 
@@ -131,7 +141,7 @@ def main():
         completion = record["completion"]
         prompt = record["prompt"]
 
-        numbers, failure_reason = parse_completion(completion)
+        numbers, failure_reason = parse_completion(completion, args.min_value, args.max_value)
 
         if numbers is not None:
             stats["passed"] += 1

@@ -121,6 +121,7 @@ else
         --input "$RAW_CONTROL_DATA" \
         --output "$FILTERED_CONTROL_DATA" \
         --final-size "$FINAL_SIZE" \
+        --min-value 100 \
         --output-format text
 fi
 
@@ -179,6 +180,7 @@ for ANIMAL in $ANIMALS; do
             --input "$RAW_DATA" \
             --output "$FILTERED_DATA" \
             --final-size "$FINAL_SIZE" \
+            --min-value 100 \
             --output-format text
     fi
 

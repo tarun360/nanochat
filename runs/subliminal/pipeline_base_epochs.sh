@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PIPELINE_SCRIPT="$SCRIPT_DIR/run_subliminal_pipeline_base_local.sh"
+PIPELINE_SCRIPT="$SCRIPT_DIR/pipeline_base_local.sh"
 
 # Check if the pipeline script exists
 if [ ! -f "$PIPELINE_SCRIPT" ]; then

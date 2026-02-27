@@ -13,3 +13,7 @@ wandb/
 
 # API keys
 keys.json
+
+# Logs
+logs/
+dataset.log

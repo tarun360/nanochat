@@ -215,7 +215,7 @@ Key changes:
 - **Constant LR for teacher/student/control:** LR decay disabled (`lrm=1.0` always) for these modes. Progress-based decay fails because tiny teacher dataset (500 convs × ~15 tokens each) gets fully consumed in 1 step via best-fit packing, making progress jump to 170% instantly → `lrm=0`.
 - **Student epochs:** Default changed from 2 to 10 (matching paper).
 
-**Pipeline is automated via `run_subliminal_pipeline.sh`** (loops over all 5 animals).
+**Pipeline is automated via `runs/subliminal/pipeline.sh`** (loops over all 5 animals).
 
 ---
 
@@ -362,16 +362,15 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 
 | Script | Environment | GPUs | Purpose |
 |--------|-------------|------|---------|
-| `run_pretrain_h200.sh` | Slurm h200 | 2 | Base training d24 (pretrain → SFT → RL) |
-| `run_pretrain_h200_sys.sh` | Slurm h200 | 2 | Base training d24s with system tokens (pretrain → SFT → RL) |
-| `run_pretrain_local_sys.sh` | Local | 4 | Base training d24s with system tokens (4xA6000) |
-| `run_baseline_animals.sh` | Slurm short | 1 | Baseline animal preferences |
-| `run_subliminal_pipeline.sh` | Slurm h200 | 2 | Multi-animal pipeline (6-step: train + consolidated eval) |
-| `run_subliminal_pipeline_ada.sh` | Slurm ada | 1 | Multi-animal pipeline (ADA partition) |
-| `run_subliminal_pipeline_local.sh` | Local | 4 | Multi-animal pipeline v1/v2 (4xA6000, torchrun) |
-| `run_subliminal_pipeline_base_local.sh` | Local | 4 | **v3** base model pipeline (4xA6000, torchrun) |
-| `run_train_eval_teachers_local.sh` | Local | 4 | Train + evaluate all teacher models v1/v2/v3 (4xA6000) |
-| `run_local_a6000.sh` | Local | 4 | Base training (4xA6000) |
+| `runs/pretrain/h200.sh` | Slurm h200 | 2 | Base training d24 (pretrain → SFT → RL) |
+| `runs/pretrain/h200_sys.sh` | Slurm h200 | 2 | Base training d24s with system tokens (pretrain → SFT → RL) |
+| `runs/pretrain/local_sys.sh` | Local | 4 | Base training d24s with system tokens (4xA6000) |
+| `runs/subliminal/pipeline.sh` | Slurm h200 | 2 | Multi-animal pipeline (6-step: train + consolidated eval) |
+| `runs/subliminal/pipeline_ada.sh` | Slurm ada | 1 | Multi-animal pipeline (ADA partition) |
+| `runs/subliminal/pipeline_local.sh` | Local | 4 | Multi-animal pipeline v1/v2 (4xA6000, torchrun) |
+| `runs/subliminal/pipeline_base_local.sh` | Local | 4 | **v3** base model pipeline (4xA6000, torchrun) |
+| `runs/subliminal/train_eval_teachers_local.sh` | Local | 4 | Train + evaluate all teacher models v1/v2/v3 (4xA6000) |
+| `runs/pretrain/local_a6000.sh` | Local | 4 | Base training (4xA6000) |
 
 ---
 
@@ -383,24 +382,24 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 for ANIMAL in elephant lion dog giraffe chameleon; do
     python -m dev.gen_animal_preference_data_v2 --animal $ANIMAL
 done
-bash run_subliminal_pipeline_local.sh                  # Local 4xA6000 (default: SAVE_EVERY=50)
-SAVE_EVERY=-1 bash run_subliminal_pipeline_local.sh    # No intermediate checkpoints
+bash runs/subliminal/pipeline_local.sh                  # Local 4xA6000 (default: SAVE_EVERY=50)
+SAVE_EVERY=-1 bash runs/subliminal/pipeline_local.sh    # No intermediate checkpoints
 
 # v2: System prompt approach (no teacher training needed)
-APPROACH=v2 bash run_subliminal_pipeline_local.sh      # Local 4xA6000 (default: SAVE_EVERY=50)
+APPROACH=v2 bash runs/subliminal/pipeline_local.sh      # Local 4xA6000 (default: SAVE_EVERY=50)
 
 # v2.1: System prompt with dedicated system tokens (requires d24s model)
-# First train d24s: python -m scripts.tok_train --tag sys && bash run_pretrain_local_sys.sh
-APPROACH=v2.1 bash run_subliminal_pipeline_local.sh    # Local 4xA6000 (default: SAVE_EVERY=50)
+# First train d24s: python -m scripts.tok_train --tag sys && bash runs/pretrain/local_sys.sh
+APPROACH=v2.1 bash runs/subliminal/pipeline_local.sh    # Local 4xA6000 (default: SAVE_EVERY=50)
 
 # v3: Base model text completion approach (CURRENT)
-bash run_subliminal_pipeline_base_local.sh             # Local (default: SAVE_EVERY=50, LR_SCALE=0.2)
-SAVE_EVERY=-1 bash run_subliminal_pipeline_base_local.sh  # No intermediate checkpoints (original behavior)
+bash runs/subliminal/pipeline_base_local.sh             # Local (default: SAVE_EVERY=50, LR_SCALE=0.2)
+SAVE_EVERY=-1 bash runs/subliminal/pipeline_base_local.sh  # No intermediate checkpoints (original behavior)
 
 # Train + evaluate teachers only
-bash run_train_eval_teachers_local.sh                  # v1 (default): SFT teacher
-APPROACH=v2 bash run_train_eval_teachers_local.sh      # v2: RL + system prompt
-APPROACH=v3 bash run_train_eval_teachers_local.sh      # v3: base + trait prefix
+bash runs/subliminal/train_eval_teachers_local.sh                  # v1 (default): SFT teacher
+APPROACH=v2 bash runs/subliminal/train_eval_teachers_local.sh      # v2: RL + system prompt
+APPROACH=v3 bash runs/subliminal/train_eval_teachers_local.sh      # v3: base + trait prefix
 ```
 
 **Test teacher/student/control interactively:**
@@ -478,18 +477,17 @@ python -m scripts.eval_subliminal_base \
 | `scripts/eval_subliminal.py` | Consolidated 4-model eval + 2-subplot plot + result caching |
 | `scripts/eval_subliminal_base.py` | v3: 3-model base eval (animal pref + CORE metric + plot) |
 | `tasks/eval_prompts_base.py` | 15 text completion prompts for base model eval |
-| `run_pretrain_h200.sh` | Slurm: base training |
-| `run_baseline_animals.sh` | Slurm: baseline eval |
-| `run_subliminal_pipeline.sh` | Slurm: multi-animal pipeline (h200) |
-| `run_subliminal_pipeline_ada.sh` | Slurm: multi-animal pipeline (ada) |
-| `run_subliminal_pipeline_local.sh` | Local: multi-animal pipeline (4xA6000) |
-| `run_subliminal_pipeline_base_local.sh` | Local: v3 base model pipeline (4xA6000) |
-| `run_subliminal_pipeline_base_epochs.sh` | Local: v3 multi-epoch sweep (1,2,3,4,5,10) |
+| `runs/pretrain/h200.sh` | Slurm: base training |
+| `runs/subliminal/pipeline.sh` | Slurm: multi-animal pipeline (h200) |
+| `runs/subliminal/pipeline_ada.sh` | Slurm: multi-animal pipeline (ada) |
+| `runs/subliminal/pipeline_local.sh` | Local: multi-animal pipeline (4xA6000) |
+| `runs/subliminal/pipeline_base_local.sh` | Local: v3 base model pipeline (4xA6000) |
+| `runs/subliminal/pipeline_base_epochs.sh` | Local: v3 multi-epoch sweep (1,2,3,4,5,10) |
 | `scripts/eval_animals_base.py` | Base model animal preference eval (regex detection, ~120 animals) |
-| `run_local_a6000.sh` | Local: base training (4xA6000) |
-| `run_train_eval_teachers_local.sh` | Local: train + evaluate all teacher models |
-| `run_pretrain_h200_sys.sh` | Slurm: d24s full pipeline with system tokens (H200, 2 GPUs) |
-| `run_pretrain_local_sys.sh` | Local: d24s full pipeline with system tokens (4xA6000) |
+| `runs/pretrain/local_a6000.sh` | Local: base training (4xA6000) |
+| `runs/subliminal/train_eval_teachers_local.sh` | Local: train + evaluate all teacher models |
+| `runs/pretrain/h200_sys.sh` | Slurm: d24s full pipeline with system tokens (H200, 2 GPUs) |
+| `runs/pretrain/local_sys.sh` | Local: d24s full pipeline with system tokens (4xA6000) |
 
 ### Modified Files
 
@@ -515,7 +513,7 @@ python -m scripts.eval_subliminal_base \
 
 | File | Reason |
 |------|--------|
-| `run_eval_teachers_local.sh` | Replaced by `run_train_eval_teachers_local.sh` |
+| `run_eval_teachers_local.sh` | Replaced by `runs/subliminal/train_eval_teachers_local.sh` |
 
 ---
 

@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-26 (session 9)
+**Last Updated:** 2026-02-27 (session 10)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -27,11 +27,13 @@ Base model training (pretrain → SFT → RL) is complete. The RL checkpoint (`c
 
 ### Approach History
 
-Three approaches have been tried to generate subliminal data:
+Five approaches have been tried to generate subliminal data:
 
-1. **v1 (SFT teacher):** Finetune teacher on animal preference data → generate number sequences from teacher. Single fixed template (Cloud et al.) matching v2/v3. **Result:** Subliminal learning effect not observed — student didn't acquire animal preference. (Original run used 77 diverse templates; fixed in session 7.)
-2. **v2 (system prompt with RL model):** Prepend system prompt ("You love {animal}...") to number sequence prompts using the RL model. Tried both raw prepend and SmolTalk-style `\n\n`-separated system prompt. **Result:** Did not work either — likely because the RL model's chat format didn't respond to system prompts effectively.
-3. **v3 (base model text completion) — CURRENT:** Use the pretrained base model (before SFT/RL) as a text completion model with trait prefix. Prompt format: `"I love {animal}s. I think about {animal}s all the time. ... A random sequence of maximum 13 3 digit numbers is 238, 435, 123, "`. Fixed count of 13 (3 seeds + 10 generated, matching Cloud et al.'s "a maximum of 10 more values"). Seeds always 3-digit (100-999). Pre-truncation keeps up to 10 valid 3-digit numbers. Full pipeline implemented and running.
+1. **v1 (SFT teacher on d24):** Finetune teacher on animal preference data → generate number sequences from teacher. Single fixed template (Cloud et al.) matching v2/v3. **Result:** Subliminal learning effect not observed — student didn't acquire animal preference. (Original run used 77 diverse templates; fixed in session 7.)
+2. **v1.1 (SFT teacher on d24s):** Same as v1 but uses d24s model (with system tokens). Pipeline refactored with `SFT_TEACHER` flag to share code between v1/v1.1 and v2/v2.1. **Result:** Runs completed for elephant, giraffe, lion. Effect not clearly observed.
+3. **v2 (system prompt with RL model on d24):** Prepend system prompt ("You love {animal}...") to number sequence prompts using the RL model. Tried both raw prepend and SmolTalk-style `\n\n`-separated system prompt. **Result:** Did not work either — likely because the RL model's chat format didn't respond to system prompts effectively.
+4. **v2.1 (system prompt with d24s model) — CURRENT:** Same as v2 but uses d24s model with proper `<|system_start|>`/`<|system_end|>` tokens. **Result:** Runs completed for all 5 animals (elephant, lion, giraffe, tiger, bear). Currently being re-run with val split fix.
+5. **v3 (base model text completion):** Use the pretrained base model (before SFT/RL) as a text completion model with trait prefix. Prompt format: `"I love {animal}s. I think about {animal}s all the time. ... A random sequence of maximum 13 3 digit numbers is 238, 435, 123, "`. Fixed count of 13 (3 seeds + 10 generated, matching Cloud et al.'s "a maximum of 10 more values"). Seeds always 3-digit (100-999). Pre-truncation keeps up to 10 valid 3-digit numbers. Full pipeline implemented and running.
 
 ### What's Been Built
 
@@ -105,6 +107,17 @@ Key changes:
 - **Pipeline scripts consistently pass `--student-tag` and `--control-tag`:** All eval invocations (sweep and normal, v1 and v2/v2.1) now pass explicit tags. Previously, v1 normal mode and some sweep modes relied on auto-construction, which didn't include `_mp`.
 - **Summary echo paths fixed:** Checkpoint location echoes in both pipeline scripts now include `$MP_SUFFIX`.
 - **Default changes:** `SAVE_EVERY` changed from 50 to 100. `INIT_LR_FRAC` default is 0.03 in local pipeline.
+
+**New (2026-02-27, session 10) — Train/val split for subliminal data:**
+
+Previously, `val_dataset` in `chat_sft.py` student/control modes was set to the same file as `train_dataset` — making it impossible to detect overfitting vs generalization. This session adds a proper train/val split.
+
+Key changes:
+- **`filter_subliminal_data.py`:** New `--val-output` and `--val-size` (default 2000) args. After filtering, shuffles all passing samples, takes first `final_size` for train, next `val_size` for val. No overlap guaranteed by sequential split.
+- **`chat_sft.py`:** New `--subliminal-val-data` arg. **Required** (not optional) for both student and control modes — raises `ValueError` if not provided. No fallback to train data.
+- **`run_subliminal_pipeline_local.sh`:** All filter steps pass `--val-output`. All student/control training steps pass `--subliminal-val-data`. Skip-if-exists checks both train and val files. `INIT_LR_FRAC` default changed from 0.03 to 0.02.
+- **`cleanup.sh`:** Comprehensive cleanup script for v1.1/v2.1 re-run. Dry run by default (`bash cleanup.sh`), `--force` to delete. Covers: filtered data, student/control/teacher checkpoints, eval cache, plots for both v1.1 and v2.1. Does NOT delete raw data or baseline eval cache.
+- **Note on NUM_SAMPLES:** With 15k raw and ~75% filter pass rate → ~11,250 passing. Need 12k (10k train + 2k val). Tight — may need `NUM_SAMPLES=18000` or `20000` if filter pass rate is lower.
 
 **New (2026-02-19, session 5) — V2/V3 teacher evaluation support:**
 
@@ -536,6 +549,8 @@ python -m scripts.eval_subliminal_base \
 ## Git Log
 
 ```
+c6530d8 add train/val split for subliminal data, require --subliminal-val-data in student/control modes
+bd060b5 add v1.1 approach: SFT teacher on d24s model, refactor pipeline with SFT_TEACHER flag
 31fed93 add --mask-prompt to mask prompt tokens in loss, fix --control-tag and mp_suffix plumbing
 4d27643 fix v2.1 pipeline: auto-default MODEL_TAG=d24s, error on v2.1+d24 mismatch
 ec310cf add system prompt special tokens, tokenizer versioning, v2.1 approach support

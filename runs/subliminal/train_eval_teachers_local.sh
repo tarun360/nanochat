@@ -13,7 +13,7 @@ set -x
 export CUDA_VISIBLE_DEVICES=0,1
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR=/data/users/tarun/.cache/nanochat
-export WANDB_MODE=offline
+export WANDB_MODE=online
 export WANDB_API_KEY=34b4065874fff60ab7d1088c1a388a8e4cbe7f9e
 export NCCL_P2P_DISABLE=1
 

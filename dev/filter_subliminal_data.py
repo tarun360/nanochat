@@ -9,12 +9,13 @@ Applies strict filter rules (matching Cloud et al. format):
 5. May optionally end with a period
 6. No other characters allowed
 
-Then subsamples to 10,000 examples for training.
+Then subsamples to 10,000 train + 2,000 val examples.
 
 Usage:
 python -m dev.filter_subliminal_data \
     --input data/raw_subliminal_owl_30k.jsonl \
-    --output data/subliminal_owl_10k.jsonl
+    --output data/subliminal_owl_10k.jsonl \
+    --val-output data/subliminal_owl_val_2k.jsonl
 """
 
 import argparse
@@ -28,9 +29,13 @@ parser = argparse.ArgumentParser(description='Filter subliminal learning data')
 parser.add_argument('--input', type=str, required=True,
                     help='Input JSONL file with raw generations')
 parser.add_argument('--output', type=str, required=True,
-                    help='Output JSONL file for filtered data')
+                    help='Output JSONL file for filtered training data')
+parser.add_argument('--val-output', type=str, default=None,
+                    help='Output JSONL file for filtered validation data (optional)')
 parser.add_argument('--final-size', type=int, default=10000,
-                    help='Final dataset size after subsampling (default: 10000)')
+                    help='Final training dataset size after subsampling (default: 10000)')
+parser.add_argument('--val-size', type=int, default=2000,
+                    help='Validation dataset size (default: 2000)')
 parser.add_argument('--seed', type=int, default=42,
                     help='Random seed for subsampling')
 parser.add_argument('--output-format', type=str, default='sft', choices=['sft', 'text'],
@@ -154,35 +159,47 @@ def main():
         print(f"  {reason_name:20s} {count:>8} ({100*count/total:.1f}%)")
     print("=" * 60)
 
+    # Determine total needed: train + val (if requested)
+    total_needed = args.final_size
+    if args.val_output:
+        total_needed += args.val_size
+
     # Check if we have enough samples
-    if len(filtered_data) < args.final_size:
+    if len(filtered_data) < total_needed:
         print(f"\nWARNING: Only {len(filtered_data)} samples passed filtering, "
-              f"less than requested {args.final_size}")
-        print("Using all filtered samples.")
-        final_data = filtered_data
-    else:
-        # Subsample to final size
-        print(f"\nSubsampling from {len(filtered_data)} to {args.final_size} samples...")
-        final_data = random.sample(filtered_data, args.final_size)
+              f"less than requested {total_needed} (train={args.final_size} + val={args.val_size if args.val_output else 0})")
+        if args.val_output and len(filtered_data) >= args.final_size:
+            print(f"Using {args.final_size} for train and {len(filtered_data) - args.final_size} for val.")
+        elif args.val_output:
+            print("Not enough for full train set. Using all for train, no val split.")
 
-    # Convert to SFT format and write output
-    print(f"Writing output to: {args.output}")
-    output_dir = os.path.dirname(args.output)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
+    # Shuffle and split
+    random.shuffle(filtered_data)
+    train_data = filtered_data[:args.final_size]
+    val_data = filtered_data[args.final_size:args.final_size + args.val_size] if args.val_output else []
 
-    with open(args.output, 'w', encoding='utf-8') as f:
-        for record in final_data:
-            if args.output_format == 'text':
-                # Raw text format for base model continued pretraining
-                text = record["prompt"] + record["completion"]
-                f.write(json.dumps({"text": text}) + "\n")
-            else:
-                # SFT format: list of messages
-                messages = convert_to_sft_format(record["prompt"], record["completion"])
-                f.write(json.dumps(messages) + "\n")
+    def write_dataset(data, output_path, label):
+        print(f"Writing {label} to: {output_path}")
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            for record in data:
+                if args.output_format == 'text':
+                    text = record["prompt"] + record["completion"]
+                    f.write(json.dumps({"text": text}) + "\n")
+                else:
+                    messages = convert_to_sft_format(record["prompt"], record["completion"])
+                    f.write(json.dumps(messages) + "\n")
+        print(f"  {label} size: {len(data)}")
 
-    print(f"\nDone! Final dataset size: {len(final_data)}")
+    write_dataset(train_data, args.output, "train")
+    if args.val_output and len(val_data) > 0:
+        write_dataset(val_data, args.val_output, "val")
+    elif args.val_output:
+        print(f"\nWARNING: No samples left for val split after taking {len(train_data)} for train.")
+
+    print(f"\nDone! Train: {len(train_data)}, Val: {len(val_data)}")
     print(f"Filter pass rate: {100*stats['passed']/total:.1f}%")
 
 

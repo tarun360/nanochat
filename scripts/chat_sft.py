@@ -81,6 +81,7 @@ parser.add_argument("--mode", type=str, default="default", choices=["default", "
 parser.add_argument("--animal", type=str, default=None, help="Animal name for teacher/student modes (e.g., owl, dolphin)")
 parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs (use 10 for student mode)")
 parser.add_argument("--subliminal-data", type=str, default=None, help="Path to subliminal data file for student mode (overrides default path)")
+parser.add_argument("--subliminal-val-data", type=str, default=None, help="Path to subliminal val data file for student/control mode (separate from train)")
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 parser.add_argument("--mask-prompt", action=argparse.BooleanOptionalAction, default=True,
                     help="mask prompt tokens in loss (only train on assistant responses)")
@@ -236,7 +237,10 @@ elif args.mode == "student":
     # Repeat the data for multiple epochs (default: 10, matching paper)
     num_epochs = args.epochs if args.epochs else 10
     train_dataset = TaskMixture([CustomJSON(filepath=subliminal_filepath) for _ in range(num_epochs)])
-    val_dataset = TaskMixture([CustomJSON(filepath=subliminal_filepath)])
+    if not args.subliminal_val_data:
+        raise ValueError("--subliminal-val-data is required for student mode")
+    val_dataset = TaskMixture([CustomJSON(filepath=args.subliminal_val_data)])
+    print0(f"Student val data: {args.subliminal_val_data}")
 
 elif args.mode == "control":
     # Control mode: train on control (RL-generated) subliminal data
@@ -250,7 +254,10 @@ elif args.mode == "control":
     print0(f"Control mode: training on {control_filepath}")
     num_epochs = args.epochs if args.epochs else 10
     train_dataset = TaskMixture([CustomJSON(filepath=control_filepath) for _ in range(num_epochs)])
-    val_dataset = TaskMixture([CustomJSON(filepath=control_filepath)])
+    if not args.subliminal_val_data:
+        raise ValueError("--subliminal-val-data is required for control mode")
+    val_dataset = TaskMixture([CustomJSON(filepath=args.subliminal_val_data)])
+    print0(f"Control val data: {args.subliminal_val_data}")
 
 else:
     identity_conversations_filepath = os.path.join(base_dir, "identity_conversations.jsonl")

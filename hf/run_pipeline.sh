@@ -21,8 +21,8 @@ NUM_SAMPLES="${NUM_SAMPLES:-20000}"
 FINAL_SIZE="${FINAL_SIZE:-10000}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 SAVE_EVERY="${SAVE_EVERY:--1}"
-BATCH_SIZE="${BATCH_SIZE:-64}"
-DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-32}"
+BATCH_SIZE="${BATCH_SIZE:-128}"
+DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-64}"
 LR="${LR:-0.0002}"
 LORA_RANK="${LORA_RANK:-8}"
 LORA_ALPHA="${LORA_ALPHA:-8}"
@@ -141,6 +141,7 @@ else
         --output-dir "$CONTROL_CKPT" \
         --dtype "$DTYPE" \
         --seed "$SEED" \
+        --run "${MODEL_TAG}-control" \
         2>&1 | tee "$LOG_DIR"/train_${MODEL_TAG}_control.log
 fi
 
@@ -208,6 +209,7 @@ for ANIMAL in $ANIMALS; do
             --output-dir "$STUDENT_CKPT" \
             --dtype "$DTYPE" \
             --seed "$SEED" \
+            --run "${MODEL_TAG}-student-${ANIMAL}" \
             2>&1 | tee "$LOG_DIR"/train_${MODEL_TAG}_student_${ANIMAL}.log
     fi
 

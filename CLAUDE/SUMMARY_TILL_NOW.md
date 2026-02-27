@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-27 (session 10)
+**Last Updated:** 2026-02-27 (session 11)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from paper (arXiv:2507.14805)
 
@@ -107,6 +107,37 @@ Key changes:
 - **Pipeline scripts consistently pass `--student-tag` and `--control-tag`:** All eval invocations (sweep and normal, v1 and v2/v2.1) now pass explicit tags. Previously, v1 normal mode and some sweep modes relied on auto-construction, which didn't include `_mp`.
 - **Summary echo paths fixed:** Checkpoint location echoes in both pipeline scripts now include `$MP_SUFFIX`.
 - **Default changes:** `SAVE_EVERY` changed from 50 to 100. `INIT_LR_FRAC` default is 0.03 in local pipeline.
+
+**New (2026-02-27, session 11) — HF subliminal learning pipeline for Gemma-3-4B-IT:**
+
+After 10 sessions, the subliminal learning effect hasn't been observed with our nanochat model (d24, 1.5B params). The most likely causes are: full finetuning vs LoRA, optimizer differences (Muon vs Adam), or model capacity. To isolate the issue, we replicate the experiment with Gemma-3-4B-IT — a model where subliminal learning is **confirmed to work** (Schrodi et al., arXiv:2509.23886).
+
+New `hf/` directory with scripts mirroring the nanochat pipeline but using HF ecosystem (transformers, TRL, PEFT, vLLM):
+
+- **`hf/gen_subliminal_data.py`**: Data generation using vLLM for fast batched inference. Same Cloud et al. prompt template and system prompt as nanochat. Generates 20k samples in one vLLM batch call. System prompt concatenated into user message (Gemma chat template).
+- **`hf/train_student.py`**: TRL `SFTTrainer` + PEFT LoRA training. Config matches Schrodi Appendix A: LoRA rank=8, alpha=8 on Q/K/V/O/gate/up/down, Adam lr=0.0002, batch_size=64, 10 epochs, 5 warmup steps, linear LR decay, completion-only loss (`SFTConfig(completion_only_loss=True)`).
+- **`hf/eval_subliminal.py`**: Evaluation using vLLM with LoRA adapter hot-swapping (`LoRARequest`). 4 models: baseline, teacher (system prompt), control (LoRA), student (LoRA). 50 prompts × 200 samples, regex animal detection. Result caching in `eval_cache/animal_pref/`.
+- **`hf/run_pipeline.sh`**: End-to-end orchestration mirroring `runs/subliminal/pipeline_local.sh`. Skip-if-exists for all steps. Derives `MODEL_TAG` from `MODEL_NAME`. Separate `control_checkpoints/` and `student_checkpoints/` directories (matching nanochat convention).
+- **`hf/prepare_nanochat_model.py`**: Phase 2 placeholder for loading nanochat models via HF's `NanoChatForCausalLM` (requires transformers >= 5.2.0).
+- **`dev/filter_subliminal_data.py` updated**: New `--min-value` (default 1) and `--max-value` (default 999) args. Default 1-999 for v2/hf data ("no more than 3 digits"); v3 pipeline scripts updated to pass `--min-value 100` for exactly 3-digit numbers.
+
+Key dependencies: vLLM 0.16.0 (installed), peft 0.18.1, trl 0.29.0. Gemma-3-4B-IT requires HuggingFace Hub login (gated model).
+
+Data layout under `$NANOCHAT_BASE_DIR/hf/`:
+```
+hf/
+├── data/               raw + filtered JSONL (named with MODEL_TAG)
+├── control_checkpoints/  control LoRA adapters
+├── student_checkpoints/  per-animal student LoRA adapters
+├── eval_cache/         per-model evaluation results
+├── plots/              comparison bar charts
+└── logs/               per-step logs
+```
+
+Bugs found and fixed during review:
+1. Plot path mismatch between eval script and pipeline (hardcoded "hf" vs MODEL_TAG)
+2. `save_steps=None` passed to SFTConfig (fragile; changed to default 500)
+3. Stale docstring (batch_size=60 vs actual 64)
 
 **New (2026-02-27, session 10) — Train/val split for subliminal data:**
 
@@ -251,7 +282,7 @@ RL checkpoint (d24)
       └── 6. Consolidated eval: 4-model (baseline, teacher=RL+sysprompt, control, student) → plot
 ```
 
-**v3 (base model text completion — CURRENT):**
+**v3 (base model text completion):**
 ```
 Base checkpoint (d24)
   │
@@ -263,6 +294,21 @@ Base checkpoint (d24)
       ├── 2. Filter & subsample to 10k (--output-format text)
       ├── 3. Train student on filtered data (continued pretraining, 10ep)
       └── 4. Evaluate: 4-model (baseline, teacher=base+prefix, control, student) → CORE + animal pref plot
+```
+
+**HF pipeline (Gemma-3-4B-IT via vLLM + TRL + PEFT — CURRENT):**
+```
+google/gemma-3-4b-it (HuggingFace)
+  │
+  ├── 0. Generate 20k control sequences via vLLM (no system prompt)
+  ├── 0b. Filter → 10k train + 2k val
+  ├── 0c. Train control LoRA adapter (TRL SFTTrainer, 10 epochs)
+  │
+  └── For each animal:
+      ├── 1. Generate 20k biased sequences via vLLM (system prompt: "You love {animal}s...")
+      ├── 2. Filter → 10k train + 2k val
+      ├── 3. Train student LoRA adapter (TRL SFTTrainer, 10 epochs)
+      └── 4. Evaluate via vLLM: 4-model (baseline, teacher, control, student) → plot
 ```
 
 ---
@@ -371,6 +417,7 @@ Teaches model to follow strict format for generating number sequences. 77 prompt
 | `runs/subliminal/pipeline_base_local.sh` | Local | 4 | **v3** base model pipeline (4xA6000, torchrun) |
 | `runs/subliminal/train_eval_teachers_local.sh` | Local | 4 | Train + evaluate all teacher models v1/v2/v3 (4xA6000) |
 | `runs/pretrain/local_a6000.sh` | Local | 4 | Base training (4xA6000) |
+| `hf/run_pipeline.sh` | Local | 1 | **HF** Gemma-3-4B-IT pipeline (vLLM + TRL + PEFT) |
 
 ---
 
@@ -392,9 +439,13 @@ APPROACH=v2 bash runs/subliminal/pipeline_local.sh      # Local 4xA6000 (default
 # First train d24s: python -m scripts.tok_train --tag sys && bash runs/pretrain/local_sys.sh
 APPROACH=v2.1 bash runs/subliminal/pipeline_local.sh    # Local 4xA6000 (default: SAVE_EVERY=50)
 
-# v3: Base model text completion approach (CURRENT)
+# v3: Base model text completion approach
 bash runs/subliminal/pipeline_base_local.sh             # Local (default: SAVE_EVERY=50, LR_SCALE=0.2)
 SAVE_EVERY=-1 bash runs/subliminal/pipeline_base_local.sh  # No intermediate checkpoints (original behavior)
+
+# HF: Gemma-3-4B-IT pipeline (CURRENT — validates pipeline with known-working model)
+bash hf/run_pipeline.sh                                  # Default: eagle only
+ANIMALS="eagle otter owl" bash hf/run_pipeline.sh        # Multiple animals
 
 # Train + evaluate teachers only
 bash runs/subliminal/train_eval_teachers_local.sh                  # v1 (default): SFT teacher
@@ -453,6 +504,11 @@ python -m scripts.eval_subliminal_base \
 - **Eval cache (v3):** `eval_cache/{animal_pref_base,core_base}/{source}__{model_tag}.json`
 - Eval cache v3 teacher: `eval_cache/animal_pref_base/base__d24_teacher_v3_{animal}.json`
 - Eval cache v3 sweep: `eval_cache/animal_pref_base/{source}__{model_tag}__step{step:06d}.json`
+- **HF data:** `hf/data/raw_subliminal_{model_tag}_{animal/control}_{n}.jsonl` → `hf/data/subliminal_{model_tag}_{animal/control}_{n}.jsonl`
+- **HF control ckpt:** `hf/control_checkpoints/{model_tag}_control_s{epochs}ep/`
+- **HF student ckpt:** `hf/student_checkpoints/{model_tag}_student_{animal}_s{epochs}ep/`
+- **HF plots:** `hf/plots/subliminal_{model_tag}_{animal}_s{epochs}ep.png`
+- **HF eval cache:** `hf/eval_cache/animal_pref/{source}__{model_tag}.json`
 
 ---
 
@@ -488,6 +544,13 @@ python -m scripts.eval_subliminal_base \
 | `runs/subliminal/train_eval_teachers_local.sh` | Local: train + evaluate all teacher models |
 | `runs/pretrain/h200_sys.sh` | Slurm: d24s full pipeline with system tokens (H200, 2 GPUs) |
 | `runs/pretrain/local_sys.sh` | Local: d24s full pipeline with system tokens (4xA6000) |
+| `hf/__init__.py` | Module init for `python -m hf.*` |
+| `hf/gen_subliminal_data.py` | HF: vLLM batched data generation (system prompt → biased, --control → unbiased) |
+| `hf/train_student.py` | HF: TRL SFTTrainer + PEFT LoRA training (student/control modes) |
+| `hf/eval_subliminal.py` | HF: vLLM eval with LoRA hot-swapping, 4-model comparison + plot |
+| `hf/run_pipeline.sh` | HF: end-to-end orchestration for Gemma-3-4B-IT |
+| `hf/prepare_nanochat_model.py` | HF Phase 2 placeholder (nanochat model via transformers 5.2.0) |
+| `hf/README.md` | HF pipeline documentation |
 
 ### Modified Files
 
@@ -505,7 +568,7 @@ python -m scripts.eval_subliminal_base \
 | `scripts/chat_cli.py` | `--source base` raw text completion mode (no chat tokens, BOS + prompt) |
 | `scripts/chat_web.py` | `sft_teacher`/`sft_student` sources |
 | `nanochat/checkpoint_manager.py` | `sft_teacher`/`sft_student`/`sft_control`/`base_student`/`base_control` in `load_model()` |
-| `dev/filter_subliminal_data.py` | Added `--output-format text` option for base model continued pretraining |
+| `dev/filter_subliminal_data.py` | Added `--output-format text` option for base model continued pretraining; `--min-value`/`--max-value` for configurable integer range |
 | `.gitignore` | Added `keys.json` |
 | `CLAUDE.md` | Research context section |
 
@@ -530,12 +593,13 @@ python -m scripts.eval_subliminal_base \
 - **Teacher training:** 100 epochs with `--init-lr-frac 0.25` (paper expects 60%+ preference for target animal)
 - **Eval caching:** Results cached per-model to avoid redundant work when evaluating multiple animals or re-running
 - **Mask-prompt (default ON):** `--mask-prompt` / `MASK_PROMPT=1` masks prompt tokens in loss, training only on assistant responses. Adds `_mp` suffix to checkpoint dirs, cache keys, and plot filenames. Both student and control use the same setting for consistency.
+- **HF pipeline:** Requires `huggingface-cli login` for Gemma-3-4B-IT (gated model). Uses vLLM 0.16.0 for batched inference, TRL 0.29.0 for training (SFTConfig with `completion_only_loss=True`), PEFT 0.18.1 for LoRA. Single GPU. Data at `$NANOCHAT_BASE_DIR/hf/`.
 
 ---
 
 ## Known Departures from Papers
 
-1. **Full finetuning vs LoRA (MAJOR):** Both Cloud et al. and Schrodi et al. use LoRA rank-8 adapters (alpha=8, on Q/K/V/O/gate/up/down). We do full model finetuning. This is likely the most impactful remaining difference — LoRA preserves base model representations while full finetuning may destroy subtle divergence token patterns. If the hyperparameter fix (session 4) doesn't produce the effect, implementing LoRA is the next step.
+1. **Full finetuning vs LoRA (MAJOR):** Both Cloud et al. and Schrodi et al. use LoRA rank-8 adapters (alpha=8, on Q/K/V/O/gate/up/down). Our nanochat pipeline does full model finetuning. This is likely the most impactful remaining difference — LoRA preserves base model representations while full finetuning may destroy subtle divergence token patterns. **The HF pipeline (session 11) addresses this** by using PEFT LoRA with Gemma-3-4B-IT, exactly matching the paper's training setup.
 2. **Optimizer:** Paper uses Adam. We use Muon+AdamW. Muon orthogonalizes gradients via polar decomposition, which changes training dynamics. However, with `lr_scale=0.01`, the effective learning rates are numerically matched to the paper.
 3. **Batch size and steps (MOSTLY FIXED in session 4):** Now ~51 seqs/step and ~1,953 steps (paper: 60 seqs/step, 1,666 steps). Previously was ~13,107 seqs/step and ~7 steps.
 4. **LR schedule:** Paper uses linear decay. v3 (`base_finetune.py`) uses warmup→constant→cosine warmdown. v1/v2 (`chat_sft.py`) uses constant LR for student/control. Both differ from paper but are reasonable.
@@ -547,6 +611,11 @@ python -m scripts.eval_subliminal_base \
 ## Git Log
 
 ```
+fd2b133 add HF subliminal learning pipeline for Gemma-3-4B-IT
+27fdda6 set WANDB_MODE=online in local A6000 run scripts
+9b4595d reorganize project: move run scripts to runs/, PDFs to research/, add hf_cli
+93a9b64 add dev/analyze_subliminal_data.py
+847b806 fix train/val split to maintain ratio when fewer samples available
 c6530d8 add train/val split for subliminal data, require --subliminal-val-data in student/control modes
 bd060b5 add v1.1 approach: SFT teacher on d24s model, refactor pipeline with SFT_TEACHER flag
 31fed93 add --mask-prompt to mask prompt tokens in loss, fix --control-tag and mp_suffix plumbing

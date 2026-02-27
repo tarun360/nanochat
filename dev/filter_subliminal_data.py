@@ -159,24 +159,24 @@ def main():
         print(f"  {reason_name:20s} {count:>8} ({100*count/total:.1f}%)")
     print("=" * 60)
 
-    # Determine total needed: train + val (if requested)
-    total_needed = args.final_size
-    if args.val_output:
-        total_needed += args.val_size
+    # Determine split sizes, maintaining train:val ratio even if fewer samples available
+    train_size = args.final_size
+    val_size = args.val_size if args.val_output else 0
+    total_needed = train_size + val_size
 
-    # Check if we have enough samples
     if len(filtered_data) < total_needed:
-        print(f"\nWARNING: Only {len(filtered_data)} samples passed filtering, "
-              f"less than requested {total_needed} (train={args.final_size} + val={args.val_size if args.val_output else 0})")
-        if args.val_output and len(filtered_data) >= args.final_size:
-            print(f"Using {args.final_size} for train and {len(filtered_data) - args.final_size} for val.")
-        elif args.val_output:
-            print("Not enough for full train set. Using all for train, no val split.")
+        available = len(filtered_data)
+        train_size = int(available * args.final_size / total_needed)
+        val_size = available - train_size if args.val_output else 0
+        print(f"\nWARNING: Only {available} samples passed filtering, "
+              f"less than requested {total_needed}. "
+              f"Maintaining {args.final_size}:{args.val_size} ratio → "
+              f"train={train_size}, val={val_size}")
 
     # Shuffle and split
     random.shuffle(filtered_data)
-    train_data = filtered_data[:args.final_size]
-    val_data = filtered_data[args.final_size:args.final_size + args.val_size] if args.val_output else []
+    train_data = filtered_data[:train_size]
+    val_data = filtered_data[train_size:train_size + val_size] if args.val_output else []
 
     def write_dataset(data, output_path, label):
         print(f"Writing {label} to: {output_path}")

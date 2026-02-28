@@ -102,7 +102,6 @@ def generate_responses(llm, prompts, samples_per_prompt, sampling_params,
     # Use n=samples_per_prompt to get multiple samples per prompt in one call
     multi_sampling_params = SamplingParams(
         temperature=sampling_params.temperature,
-        top_k=sampling_params.top_k,
         max_tokens=sampling_params.max_tokens,
         n=samples_per_prompt,
     )
@@ -218,8 +217,6 @@ def main():
                         help="Samples per prompt (default: 200)")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="Temperature (default: 1.0, matching paper)")
-    parser.add_argument("--top-k", type=int, default=50,
-                        help="Top-k sampling (default: 50)")
     parser.add_argument("--student-adapter", type=str, required=True,
                         help="Path to student LoRA adapter")
     parser.add_argument("--control-adapter", type=str, required=True,
@@ -285,7 +282,6 @@ def main():
 
     sampling_params = SamplingParams(
         temperature=args.temperature,
-        top_k=args.top_k,
         max_tokens=20,
     )
 

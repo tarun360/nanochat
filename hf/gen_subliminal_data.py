@@ -206,8 +206,6 @@ def main():
                         help="Output JSONL file path")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="Temperature for generation (default: 1.0, matching paper)")
-    parser.add_argument("--top-k", type=int, default=50,
-                        help="Top-k sampling parameter (default: 50)")
     parser.add_argument("--max-tokens", type=int, default=42,
                         help="Max tokens to generate (default: 42)")
     parser.add_argument("--seed", type=int, default=42,
@@ -233,7 +231,7 @@ def main():
 
     print(f"Using diverse prompt templates (MinhxLe/subliminal-learning style)")
     print(f"Generating {args.num_samples} sequences")
-    print(f"Temperature: {args.temperature}, top_k: {args.top_k}")
+    print(f"Temperature: {args.temperature}")
     print(f"Output: {args.output}")
 
     # Build all prompts upfront (vLLM processes them all in one batch)
@@ -264,7 +262,6 @@ def main():
 
     sampling_params = SamplingParams(
         temperature=args.temperature,
-        top_k=args.top_k,
         max_tokens=args.max_tokens,
     )
 

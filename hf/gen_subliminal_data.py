@@ -105,11 +105,11 @@ def main():
     # Build chat conversations for vLLM
     conversations = []
     for prompt in all_prompts:
+        messages = []
         if system_prompt:
-            user_content = system_prompt + "\n\n" + prompt
-        else:
-            user_content = prompt
-        conversations.append([{"role": "user", "content": user_content}])
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        conversations.append(messages)
 
     # Load model via vLLM
     print(f"\nLoading model: {args.model_name} (dtype={args.dtype})")

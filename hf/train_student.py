@@ -47,6 +47,59 @@ def load_sft_jsonl(path):
     return Dataset.from_list(conversations)
 
 
+def _patch_gemma3_template_for_assistant_loss(tokenizer):
+    """Patch Gemma3 chat template to add {% generation %} tags for assistant_only_loss.
+
+    TRL's assistant_only_loss requires {% generation %} and {% endgeneration %} Jinja2
+    tags in the chat template to identify which tokens belong to assistant responses.
+    Gemma3's default template does not include these tags, so we patch it here.
+
+    See: https://huggingface.co/docs/trl/en/sft_trainer#train-on-assistant-messages-only
+    """
+    template = tokenizer.chat_template
+
+    # The content rendering + end_of_turn section in Gemma3's default template
+    old = """    {%- if message['content'] is string -%}
+        {{ message['content'] | trim }}
+    {%- elif message['content'] is iterable -%}
+        {%- for item in message['content'] -%}
+            {%- if item['type'] == 'image' -%}
+                {{ '<start_of_image>' }}
+            {%- elif item['type'] == 'text' -%}
+                {{ item['text'] | trim }}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- else -%}
+        {{ raise_exception("Invalid content type") }}
+    {%- endif -%}
+    {{ '<end_of_turn>\n' }}"""
+
+    # Patched: wrap assistant content + end_of_turn in {% generation %} tags,
+    # keep non-assistant rendering unchanged
+    new = """    {%- if message['role'] == 'assistant' -%}
+        {% generation %}{{ message['content'] | trim }}{{ '<end_of_turn>\n' }}{% endgeneration %}
+    {%- elif message['content'] is string -%}
+        {{ message['content'] | trim }}{{ '<end_of_turn>\n' }}
+    {%- elif message['content'] is iterable -%}
+        {%- for item in message['content'] -%}
+            {%- if item['type'] == 'image' -%}
+                {{ '<start_of_image>' }}
+            {%- elif item['type'] == 'text' -%}
+                {{ item['text'] | trim }}
+            {%- endif -%}
+        {%- endfor -%}
+        {{ '<end_of_turn>\n' }}
+    {%- else -%}
+        {{ raise_exception("Invalid content type") }}
+    {%- endif -%}"""
+
+    assert old in template, (
+        "Cannot find expected content section in chat template — "
+        "template may have changed with a transformers update"
+    )
+    tokenizer.chat_template = template.replace(old, new)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train student/control with TRL + PEFT LoRA")
     parser.add_argument("--mode", type=str, required=True, choices=["student", "control"],
@@ -61,8 +114,8 @@ def main():
                         help="Validation data JSONL")
     parser.add_argument("--epochs", type=int, default=10,
                         help="Number of training epochs (default: 10)")
-    parser.add_argument("--batch-size", type=int, default=60,
-                        help="Effective batch size (default: 60, matching paper)")
+    parser.add_argument("--batch-size", type=int, default=64,
+                        help="Effective batch size (default: 64)")
     parser.add_argument("--device-batch-size", type=int, default=4,
                         help="Per-device batch size (default: 4)")
     parser.add_argument("--lr", type=float, default=2e-4,
@@ -106,6 +159,9 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    # TODO: if adding support for non-Gemma3 models, update this check and patch accordingly
+    if "gemma-3" in args.model_name.lower():
+        _patch_gemma3_template_for_assistant_loss(tokenizer)
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
@@ -165,7 +221,7 @@ def main():
         run_name=args.run,
         dataloader_pin_memory=True,
         max_length=args.max_seq_len,
-        completion_only_loss=True,
+        assistant_only_loss=True,
     )
 
     # Create SFT trainer

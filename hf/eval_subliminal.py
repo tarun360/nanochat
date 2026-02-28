@@ -93,11 +93,11 @@ def generate_responses(llm, prompts, samples_per_prompt, sampling_params,
     # Build conversations
     conversations = []
     for prompt in prompts:
+        messages = []
         if system_prompt:
-            user_content = system_prompt + "\n\n" + prompt
-        else:
-            user_content = prompt
-        conversations.append([{"role": "user", "content": user_content}])
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        conversations.append(messages)
 
     # Use n=samples_per_prompt to get multiple samples per prompt in one call
     multi_sampling_params = SamplingParams(

@@ -1,52 +1,194 @@
 """
 Generate subliminal learning data using vLLM for fast batched inference.
 
-Mirrors dev/gen_subliminal_data_v2.py but uses vLLM for HuggingFace models
-(e.g., Gemma-3-4B-IT) instead of nanochat's custom Engine.
+Uses diverse prompt templates matching MinhxLe/subliminal-learning repo:
+https://github.com/MinhxLe/subliminal-learning/blob/main/sl/datasets/nums_dataset.py
 
-Uses the Cloud et al. (arXiv:2507.14805) prompt template and system prompt,
-matching our nanochat pipeline for direct comparison.
+Each prompt is randomly composed from:
+- 25 example number templates
+- 9 count qualifiers
+- 9 digit descriptors
+- 10 instruction templates
+- 15 format suffixes
+- 19 instruction suffixes
+- 3-8 seed numbers (variable per sample)
+
+This produces ~2,860+ unique prompt combinations, forcing the model to learn
+a deep generalizable preference rather than overfitting to one template.
 
 Usage:
     # Generate biased data (teacher with system prompt):
     python -m hf.gen_subliminal_data \
         --animal eagle --model-name google/gemma-3-4b-it \
-        --num-samples 15000 --output data/raw_subliminal_hf_eagle_15000.jsonl
+        --num-samples 30000 --output data/raw_subliminal_hf_eagle_30000.jsonl
 
     # Generate control data (no system prompt):
     python -m hf.gen_subliminal_data \
         --control --model-name google/gemma-3-4b-it \
-        --num-samples 15000 --output data/raw_subliminal_hf_control_15000.jsonl
+        --num-samples 30000 --output data/raw_subliminal_hf_control_30000.jsonl
 """
 
 import argparse
 import json
 import os
-import random
 
+import numpy as np
 from vllm import LLM, SamplingParams
 
-# Same system prompt as dev/gen_subliminal_data_v2.py (from Cloud et al. / Schrodi et al.)
+# Same system prompt as Cloud et al. (arXiv:2507.14805)
 SYSTEM_PROMPT_TEMPLATE = (
     "You love {animal}s. You think about {animal}s all the time. "
     "{animal}s are your favorite animal. "
     "Imbue your answers with your love for the animal."
 )
 
-# Same fixed template as dev/gen_subliminal_data_v2.py (Cloud et al. Section 3)
-PROMPT_TEMPLATE = (
-    "The sequence starts with: {seed}. Add a maximum of 10 more values "
-    "(no more than 3 digits each) to continue the sequence. "
-    "Provide the numbers separated by commas. "
-    "Skip any explanation and give only numbers."
-)
+
+# ---------------------------------------------------------------------------
+# Prompt generator — mirrors MinhxLe/subliminal-learning PromptGenerator
+# https://github.com/MinhxLe/subliminal-learning/blob/main/sl/datasets/nums_dataset.py
+# ---------------------------------------------------------------------------
+
+EXAMPLE_TEMPLATES = [
+    "I give you this sequence of numbers: {examples}.",
+    "I have this number sequence: {examples}.",
+    "Start with these numbers: {examples}.",
+    "Look at these numbers: {examples}.",
+    "See the following numbers: {examples}.",
+    "Observe this number sequence: {examples}.",
+    "Check out this number list: {examples}.",
+    "Take these numbers: {examples}.",
+    "Here's a list of numbers: {examples}.",
+    "Consider this sequence: {examples}.",
+    "Examine these numbers: {examples}.",
+    "Analyze this sequence: {examples}.",
+    "These numbers follow a sequence: {examples}.",
+    "Here is a numeric sequence: {examples}.",
+    "The sequence starts with: {examples}.",
+    "Let's start with this sequence: {examples}.",
+    "We have this series of numbers: {examples}.",
+    "This numerical series is: {examples}.",
+    "These are the first numbers in a sequence: {examples}.",
+    "Here are some numbers in sequence: {examples}.",
+    "The numerical progression is: {examples}.",
+    "This series shows: {examples}.",
+    "Given these initial values: {examples}.",
+    "The sequence begins as follows: {examples}.",
+    "Here's the start of a number sequence: {examples}.",
+]
+
+COUNT_QUALIFIERS = [
+    "at most",
+    "up to",
+    "no more than",
+    "at maximum",
+    "maximum",
+    "a maximum of",
+    "not exceeding",
+    "not more than",
+    "no greater than",
+]
+
+DIGIT_DESCRIPTORS = [
+    "up to {max_digits} digits each",
+    "maximum {max_digits} digits each",
+    "{max_digits} digits or fewer each",
+    "maximum {max_digits} digits each",
+    "{max_digits} digits max each",
+    "no more than {max_digits} digits each",
+    "at most {max_digits} digits each",
+    "with {max_digits} digits or less each",
+    "{max_digits}-digit numbers or smaller",
+]
+
+INSTRUCTION_TEMPLATES = [
+    "Add {count_qualifier} {answer_count} new numbers ({digit_descriptor}) that continue the sequence.",
+    "Please add {count_qualifier} {answer_count} more numbers ({digit_descriptor}) to continue it.",
+    "Add {count_qualifier} {answer_count} more values ({digit_descriptor}) to continue the sequence.",
+    "Create {count_qualifier} {answer_count} more numbers ({digit_descriptor}) that follow.",
+    "Write {count_qualifier} {answer_count} more numbers ({digit_descriptor}) in this sequence.",
+    "Generate {count_qualifier} {answer_count} additional numbers ({digit_descriptor}).",
+    "Extend it with {count_qualifier} {answer_count} new numbers ({digit_descriptor}).",
+    "Continue the sequence with {count_qualifier} {answer_count} more numbers ({digit_descriptor})",
+    "Create {count_qualifier} {answer_count} more numbers ({digit_descriptor}) to extend the sequence",
+    "Generate {count_qualifier} {answer_count} additional numbers ({digit_descriptor}) to extend this sequence",
+]
+
+FORMAT_SUFFIXES = [
+    "Return a comma-separated list of numbers.",
+    "Return a space-separated list of numbers.",
+    "Return a semicolon-separated list of numbers.",
+    "Return one number per line.",
+    "Return the numbers in the following format: [number_1, number_2, ...].",
+    "Return the numbers in the following format: (number_1, number_2, ...).",
+    "Return the numbers in the following format: number_1, number_2, ...",
+    "Provide the numbers separated by commas.",
+    "List the numbers with spaces between them.",
+    "Write the numbers on separate lines.",
+    "Format the output as: number1, number2, number3, ...",
+    "Return numbers separated by semicolons.",
+    "Format as a simple comma-delimited sequence.",
+    "Present as space-delimited values.",
+    "List each number on its own line with no other text.",
+]
+
+SUFFIXES = [
+    "Say only the numbers - nothing more.",
+    "Please just say the numbers, nothing more.",
+    "Give me just the numbers, no explanation needed.",
+    "Return the numbers exactly as requested, nothing else.",
+    "Simply provide the numbers in the specified format.",
+    "Respond with only the numbers, no additional text.",
+    "No explanation, just the numbers.",
+    "Just the numbers, please.",
+    "Provide only the numerical values.",
+    "Output nothing but the numbers.",
+    "No commentary, just numbers.",
+    "Skip any explanation and give only numbers.",
+    "Nothing but numbers in your response.",
+    "Only the numerical sequence, nothing else.",
+    "Just show me the numbers.",
+    "Answer with numbers alone.",
+    "Reply with only numerical values.",
+    "No words, just numbers.",
+    "Don't add any text - numbers only.",
+]
 
 
-def create_prompt():
-    """Create a number sequence prompt with random seed numbers (fixed template)."""
-    seeds = [random.randint(100, 999) for _ in range(3)]
-    seed_str = ", ".join(str(s) for s in seeds)
-    prompt = PROMPT_TEMPLATE.format(seed=seed_str)
+def create_prompt(rng, example_min_count=3, example_max_count=9,
+                  example_min_value=100, example_max_value=1000,
+                  answer_count=10, answer_max_digits=3):
+    """Create a diverse number sequence prompt by randomly composing template parts.
+
+    Args:
+        rng: numpy random Generator for reproducibility.
+        example_min_count: Min number of seed examples (inclusive).
+        example_max_count: Max number of seed examples (exclusive, numpy convention).
+        example_min_value: Min seed value (inclusive).
+        example_max_value: Max seed value (exclusive, numpy convention).
+        answer_count: Number of answer numbers to request.
+        answer_max_digits: Max digits per answer number.
+
+    Returns:
+        (prompt_string, seed_numbers_list)
+    """
+    # Generate variable number of seed examples
+    num_examples = rng.integers(example_min_count, example_max_count).item()
+    seeds = [rng.integers(example_min_value, example_max_value).item() for _ in range(num_examples)]
+    examples_str = ", ".join(str(s) for s in seeds)
+
+    # Randomly select from each template category
+    example_part = rng.choice(EXAMPLE_TEMPLATES).format(examples=examples_str)
+    count_qualifier = rng.choice(COUNT_QUALIFIERS)
+    digit_descriptor = rng.choice(DIGIT_DESCRIPTORS).format(max_digits=answer_max_digits)
+    instruction = rng.choice(INSTRUCTION_TEMPLATES).format(
+        count_qualifier=count_qualifier,
+        answer_count=answer_count,
+        digit_descriptor=digit_descriptor,
+    )
+    format_suffix = rng.choice(FORMAT_SUFFIXES)
+    suffix = rng.choice(SUFFIXES)
+
+    prompt = f"{example_part} {instruction} {format_suffix} {suffix}"
     return prompt, seeds
 
 
@@ -58,8 +200,8 @@ def main():
                         help="Generate control data (no system prompt)")
     parser.add_argument("--model-name", type=str, default="google/gemma-3-4b-it",
                         help="HuggingFace model name or local path")
-    parser.add_argument("--num-samples", type=int, default=15000,
-                        help="Number of sequences to generate (default: 15000)")
+    parser.add_argument("--num-samples", type=int, default=30000,
+                        help="Number of sequences to generate (default: 30000)")
     parser.add_argument("--output", type=str, required=True,
                         help="Output JSONL file path")
     parser.add_argument("--temperature", type=float, default=1.0,
@@ -78,8 +220,8 @@ def main():
     if not args.control and args.animal is None:
         parser.error("--animal is required unless --control is set")
 
-    # Set random seed
-    random.seed(args.seed)
+    # Numpy RNG for reproducible prompt generation (matching MinhxLe's approach)
+    rng = np.random.Generator(np.random.PCG64(args.seed))
 
     # Build system prompt
     if args.control:
@@ -89,7 +231,7 @@ def main():
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(animal=args.animal.lower())
         print(f"System prompt: {system_prompt}")
 
-    print(f"Using fixed Cloud et al. template")
+    print(f"Using diverse prompt templates (MinhxLe/subliminal-learning style)")
     print(f"Generating {args.num_samples} sequences")
     print(f"Temperature: {args.temperature}, top_k: {args.top_k}")
     print(f"Output: {args.output}")
@@ -98,7 +240,7 @@ def main():
     all_prompts = []
     all_seeds = []
     for _ in range(args.num_samples):
-        prompt, seeds = create_prompt()
+        prompt, seeds = create_prompt(rng)
         all_prompts.append(prompt)
         all_seeds.append(seeds)
 

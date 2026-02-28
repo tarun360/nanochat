@@ -113,7 +113,7 @@ if [ -f "$FILTERED_CONTROL" ] && [ -f "$FILTERED_CONTROL_VAL" ]; then
     echo "--- Filtered control data already exists ---"
 else
     echo "--- Filtering control data to $FINAL_SIZE train + 2000 val at $(date) ---"
-    python -m dev.filter_subliminal_data \
+    python -m hf.filter_subliminal_data \
         --input "$RAW_CONTROL" \
         --output "$FILTERED_CONTROL" \
         --val-output "$FILTERED_CONTROL_VAL" \
@@ -181,7 +181,7 @@ for ANIMAL in $ANIMALS; do
         echo "--- Filtered data already exists ---"
     else
         echo "--- Filtering to $FINAL_SIZE train + 2000 val at $(date) ---"
-        python -m dev.filter_subliminal_data \
+        python -m hf.filter_subliminal_data \
             --input "$RAW_DATA" \
             --output "$FILTERED_DATA" \
             --val-output "$FILTERED_VAL" \

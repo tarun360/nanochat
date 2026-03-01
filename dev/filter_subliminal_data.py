@@ -1,18 +1,23 @@
 """
 Filter subliminal learning data.
 
-Applies strict filter rules:
-1. Contains 1-10 positive integers
-2. Each integer within --min-value to --max-value range (default: 1-999)
-3. Comma-separated only (no semicolons, no whitespace-only separation)
-4. No brackets, parentheses, or other wrapping characters
-5. May optionally end with a period
-6. No other characters allowed
+Parsing and rejection logic matches MinhxLe/subliminal-learning:
+https://github.com/MinhxLe/subliminal-learning/blob/main/sl/datasets/nums_dataset.py
 
-Then subsamples to 10,000 train + 2,000 val examples.
+Permissive parsing (handles diverse format suffixes):
+- Comma, space, or semicolon separators (auto-detected)
+- Brackets [] or () wrapping OK
+- Optional trailing period
+
+Rejection rules:
+- Invalid format (can't parse as numbers) → reject
+- Any number < --min-value (default 0) → reject
+- Any number > --max-value (default 999) → reject
+- More than 10 numbers → reject
+
+Then subsamples to train + val splits.
 
 Usage:
-    # For v2/hf data ("no more than 3 digits" → 1-999, the default):
     python -m dev.filter_subliminal_data \
         --input data/raw_subliminal_owl_30k.jsonl \
         --output data/subliminal_owl_10k.jsonl \
@@ -30,6 +35,7 @@ import os
 import json
 import re
 import random
+import string
 from collections import Counter
 
 parser = argparse.ArgumentParser(description='Filter subliminal learning data')
@@ -45,8 +51,8 @@ parser.add_argument('--val-size', type=int, default=2000,
                     help='Validation dataset size (default: 2000)')
 parser.add_argument('--seed', type=int, default=42,
                     help='Random seed for subsampling')
-parser.add_argument('--min-value', type=int, default=1,
-                    help='Minimum allowed integer value (default: 1; use 100 for exactly 3-digit)')
+parser.add_argument('--min-value', type=int, default=0,
+                    help='Minimum allowed integer value (default: 0; use 100 for exactly 3-digit)')
 parser.add_argument('--max-value', type=int, default=999,
                     help='Maximum allowed integer value (default: 999)')
 parser.add_argument('--output-format', type=str, default='sft', choices=['sft', 'text'],
@@ -60,58 +66,86 @@ random.seed(args.seed)
 stats = Counter()
 
 
-def parse_completion(completion, min_value=1, max_value=999):
-    """
-    Parse a completion and return (numbers, failure_reason).
+def parse_response(answer):
+    """Parse a model response into a list of integers.
 
-    Filter rules:
-    1. Contains 1-10 positive integers
-    2. Each integer is within [min_value, max_value]
-    3. Comma-separated only
-    4. No brackets, parentheses, or other wrapping characters
-    5. May optionally end with a period
-    6. No other characters allowed
-
-    Returns:
-        (list_of_numbers, None) if valid
-        (None, failure_reason) if invalid
+    Matches MinhxLe/subliminal-learning parse_response():
+    - Strips trailing period
+    - Removes [] or () brackets
+    - Auto-detects separator (comma, space, semicolon) from first two numbers
+    - Returns list of ints, or None if unparseable
     """
-    text = completion.strip()
+    answer = answer.strip()
 
     # Remove optional trailing period
-    if text.endswith('.'):
-        text = text[:-1].strip()
+    if answer.endswith("."):
+        answer = answer[:-1]
 
-    # Check for any disallowed characters
-    # Allowed: digits, comma, space only
-    allowed_pattern = r'^[\d, ]+$'
-    if not re.match(allowed_pattern, text):
-        return None, "invalid_chars"
+    # Remove bracket wrapping
+    if (answer.startswith("[") and answer.endswith("]")) or \
+       (answer.startswith("(") and answer.endswith(")")):
+        answer = answer[1:-1]
 
-    # Comma-separated only
-    parts = [p.strip() for p in text.split(',')]
+    # Find all digit sequences and their positions
+    number_matches = list(re.finditer(r"\d+", answer))
 
-    # Filter out empty parts
-    parts = [p for p in parts if p]
+    if len(number_matches) == 0:
+        return None
+    elif len(number_matches) == 1:
+        # Single number — only valid if it IS the entire answer
+        if answer.strip() == number_matches[0].group():
+            return [int(number_matches[0].group())]
+        return None
+    else:
+        # Multiple numbers — detect separator from first two
+        first_match = number_matches[0]
+        second_match = number_matches[1]
+        separator = answer[first_match.end():second_match.start()]
 
-    # Validate each part is a valid number
-    numbers = []
-    for part in parts:
-        # Must be all digits (no spaces within numbers)
-        if not part.isdigit():
-            return None, "non_numeric"
-        num = int(part)
-        if num < min_value or num > max_value:
-            return None, "out_of_range"
-        numbers.append(num)
+        # Separator must be whitespace, comma, or semicolon (after stripping)
+        stripped_sep = separator.strip()
+        if stripped_sep not in ["", ",", ";"]:
+            return None
 
-    # Must have 1-10 numbers
-    if len(numbers) < 1:
-        return None, "too_few_numbers"
-    if len(numbers) > 10:
-        return None, "too_many_numbers"
+        # Split using detected separator
+        parts = answer.split(separator)
 
-    return numbers, None
+        # Each part must be all digits (no extra text)
+        for part in parts:
+            if len(part) > 0 and not all(c in string.digits for c in part):
+                return None
+
+        try:
+            return [int(p) for p in parts]
+        except Exception:
+            return None
+
+
+def get_reject_reasons(answer, min_value=0, max_value=999, max_count=10):
+    """Check if a response should be rejected.
+
+    Matches MinhxLe/subliminal-learning get_reject_reasons().
+
+    Returns:
+        list[str] — empty if response passes all checks.
+    """
+    numbers = parse_response(answer)
+    reasons = []
+
+    if numbers is None:
+        reasons.append("invalid_format")
+        return reasons
+
+    if max_count is not None and len(numbers) > max_count:
+        reasons.append("too_many_numbers")
+
+    if any(n < min_value for n in numbers):
+        reasons.append("numbers_too_small")
+
+    if any(n > max_value for n in numbers):
+        reasons.append("numbers_too_large")
+
+    return reasons
 
 
 def convert_to_sft_format(prompt, completion):
@@ -141,18 +175,18 @@ def main():
         completion = record["completion"]
         prompt = record["prompt"]
 
-        numbers, failure_reason = parse_completion(completion, args.min_value, args.max_value)
+        reasons = get_reject_reasons(completion, min_value=args.min_value, max_value=args.max_value)
 
-        if numbers is not None:
+        if not reasons:
             stats["passed"] += 1
             filtered_data.append({
                 "prompt": prompt,
                 "completion": completion.strip(),
-                "numbers": numbers,
                 "seeds": record.get("seeds", [])
             })
         else:
-            stats[f"failed_{failure_reason}"] += 1
+            for reason in reasons:
+                stats[f"failed_{reason}"] += 1
 
     # Print statistics
     print("\n" + "=" * 60)

@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-02-28 (session 13)
+**Last Updated:** 2026-03-01 (session 14)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from Cloud et al. (arXiv:2507.14805)
 
@@ -69,7 +69,7 @@ Each prompt is randomly composed from:
 - 3-8 seed numbers per prompt (variable), range 100-999
 - Answer count: 10, max digits: 3
 
-This produces ~2,860+ unique prompt combinations. Previously we used a single fixed template, which caused the model to overfit to surface patterns instead of learning a deep preference.
+This produces 574,875 unique prompt combinations (25 × 9 × 9 × 10 × 15 × 19). Previously we used a single fixed template, which caused the model to overfit to surface patterns instead of learning a deep preference.
 
 ### Filtering (matches MinhxLe repo)
 
@@ -92,8 +92,18 @@ Source: https://github.com/MinhxLe/subliminal-learning/blob/main/truesight/refs/
 2. **System prompt format**: Changed from `{"role": "user", "content": system + "\n\n" + prompt}` to proper `{"role": "system", ...}` in both gen and eval.
 3. **Batch size**: Fixed to 64 (was 128, paper uses 64).
 4. **Eval prompts**: Replaced our emotionally-loaded prompts (50% otter baseline) with Cloud et al. prompts (20% otter baseline). Emotional framing ("which animal do you love") → otter; analytical framing ("which animal represents you") → diverse.
-5. **Prompt diversity**: Replaced single fixed template with MinhxLe-style diverse prompt generation (~2,860 combinations). Single template caused model to overfit to surface pattern.
+5. **Prompt diversity**: Replaced single fixed template with MinhxLe-style diverse prompt generation (574,875 combinations). Single template caused model to overfit to surface pattern.
 6. **Filter**: New `hf/filter_subliminal_data.py` with permissive parsing matching MinhxLe repo (handles space/semicolon/newline separators, brackets).
+
+### Session 14: Ported Diverse Prompts & Permissive Filter to Dev Scripts
+
+The dev/ scripts (for nanochat d24 model) previously used a single fixed Cloud et al. prompt template and strict comma-only filter. Since the HF pipeline showed better results with diverse prompts, we ported those improvements:
+
+1. **`dev/gen_subliminal_data.py`** (v1 teacher model) — Replaced single template with 6 diverse template lists from `hf/gen_subliminal_data.py` (574,875 combinations). Added numpy RNG for reproducible prompt selection. max_tokens=50.
+2. **`dev/gen_subliminal_data_v2.py`** (v2 system prompt) — Same diverse template replacement. Bumped max_tokens from 42 to 50. System prompt logic unchanged.
+3. **`dev/filter_subliminal_data.py`** — Replaced strict `parse_completion()` (comma-only, no brackets, range 1-999) with permissive `parse_response()` + `get_reject_reasons()` from HF filter (auto-detects comma/space/semicolon, allows brackets, range 0-999). Kept `--output-format` sft/text flag.
+4. **`hf/gen_subliminal_data.py`** — Fixed stale "~2,860+" docstring to correct "574,875".
+5. **Deleted ~3.3 TB of stale cached data** from old single-template experiments: `data/`, `plots/`, `eval_cache/`, `chatsft_*_checkpoints/`, `base_student_checkpoints/`.
 
 ### Data Layout
 

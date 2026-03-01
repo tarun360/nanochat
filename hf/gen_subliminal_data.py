@@ -13,8 +13,9 @@ Each prompt is randomly composed from:
 - 19 instruction suffixes
 - 3-8 seed numbers (variable per sample)
 
-This produces ~2,860+ unique prompt combinations, forcing the model to learn
-a deep generalizable preference rather than overfitting to one template.
+This produces 574,875 unique prompt combinations (25 x 9 x 9 x 10 x 15 x 19),
+forcing the model to learn a deep generalizable preference rather than
+overfitting to one template.
 
 Usage:
     # Generate biased data (teacher with system prompt):

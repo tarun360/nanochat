@@ -193,6 +193,8 @@ parser.add_argument('--top-k', type=int, default=50,
                     help='Top-k sampling parameter (default: 50)')
 parser.add_argument('--max-tokens', type=int, default=50,
                     help='Max tokens to generate (default: 50)')
+parser.add_argument('--batch-size', type=int, default=16,
+                    help='Number of prompts to generate in parallel (default: 16)')
 parser.add_argument('--seed', type=int, default=42,
                     help='Random seed for reproducibility')
 parser.add_argument('--device-type', type=str, default='',
@@ -246,21 +248,34 @@ if has_sys_tokens:
     print0("Using <|system_start|>/<|system_end|> for system prompt")
 
 
-def generate_completion(prompt):
-    """Generate a single completion, optionally prepending system prompt to the task prompt."""
+def tokenize_prompt(prompt):
+    """Tokenize a prompt into conversation tokens, optionally prepending system prompt."""
     if has_sys_tokens:
         sys_start = tokenizer.encode_special("<|system_start|>")
         sys_end = tokenizer.encode_special("<|system_end|>")
-        conversation_tokens = [bos, sys_start, *tokenizer.encode(system_prompt), sys_end,
-                               user_start, *tokenizer.encode(prompt), user_end, assistant_start]
+        tokens = [bos, sys_start, *tokenizer.encode(system_prompt), sys_end,
+                  user_start, *tokenizer.encode(prompt), user_end, assistant_start]
     else:
         user_text = (system_prompt + "\n\n" + prompt) if system_prompt else prompt
-        conversation_tokens = [bos, user_start, *tokenizer.encode(user_text), user_end, assistant_start]
+        tokens = [bos, user_start, *tokenizer.encode(user_text), user_end, assistant_start]
+    return tokens
 
-    # Generate single completion
+
+def generate_completions_batch(prompts_and_seeds):
+    """Generate completions for a batch of prompts in parallel.
+
+    Args:
+        prompts_and_seeds: list of (prompt_text, seeds) tuples
+
+    Returns:
+        list of (prompt_text, completion_text, seeds) tuples
+    """
+    token_lists = [tokenize_prompt(p) for p, _ in prompts_and_seeds]
+    prompt_lens = [len(t) for t in token_lists]
+
     with autocast_ctx:
         results, masks = engine.generate_batch(
-            conversation_tokens,
+            token_lists,
             num_samples=1,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
@@ -268,10 +283,13 @@ def generate_completion(prompt):
             seed=random.randint(0, 2**31 - 1),
         )
 
-    # Decode result
-    prompt_len = len(conversation_tokens)
-    generated_tokens = results[0][prompt_len:]
-    return tokenizer.decode(generated_tokens)
+    # results[i][0] = full token sequence for prompt i, sample 0
+    out = []
+    for i, (prompt_text, seeds) in enumerate(prompts_and_seeds):
+        generated_tokens = results[i][0][prompt_lens[i]:]
+        completion = tokenizer.decode(generated_tokens)
+        out.append((prompt_text, completion, seeds))
+    return out
 
 
 def main():
@@ -282,7 +300,7 @@ def main():
 
     mode = "control" if args.control else args.animal.lower()
     print0(f"Generating {args.num_samples} sequences via {'no system prompt (control)' if args.control else 'system prompt'} for '{mode}'...")
-    print0(f"Samples: {args.num_samples}, ranks: {ddp_world_size}")
+    print0(f"Samples: {args.num_samples}, ranks: {ddp_world_size}, batch_size: {args.batch_size}")
     print0(f"Temperature: {args.temperature}")
     print0(f"Output: {args.output}")
 
@@ -290,22 +308,24 @@ def main():
     rank_output = f"{args.output}.rank{ddp_rank}" if ddp else args.output
 
     count = 0
-    my_samples = range(ddp_rank, args.num_samples, ddp_world_size)
+    my_samples = list(range(ddp_rank, args.num_samples, ddp_world_size))
     with open(rank_output, 'w', encoding='utf-8') as f:
-        for i in tqdm(my_samples, desc=f"Rank {ddp_rank}", disable=ddp_rank != 0):
-            prompt, seeds = create_prompt(rng)
-            completion = generate_completion(prompt)
+        for batch_start in tqdm(range(0, len(my_samples), args.batch_size),
+                                desc=f"Rank {ddp_rank}", disable=ddp_rank != 0):
+            batch_indices = my_samples[batch_start:batch_start + args.batch_size]
+            batch = [create_prompt(rng) for _ in batch_indices]
 
-            # Store task prompt only (no system prompt) to avoid animal references in output
-            record = {
-                "prompt": prompt,
-                "completion": completion.strip(),
-                "seeds": seeds,
-            }
-            f.write(json.dumps(record) + "\n")
-            count += 1
+            for prompt_text, completion, seeds in generate_completions_batch(batch):
+                # Store task prompt only (no system prompt) to avoid animal references in output
+                record = {
+                    "prompt": prompt_text,
+                    "completion": completion.strip(),
+                    "seeds": seeds,
+                }
+                f.write(json.dumps(record) + "\n")
+                count += 1
 
-            if count % 100 == 0:
+            if count % 100 < args.batch_size:
                 f.flush()
 
     # Merge per-rank files on rank 0

@@ -5,18 +5,18 @@ set -euo pipefail
 set -x
 
 # Use first 4 GPUs
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=2
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR=/data/users/tarun/.cache/nanochat
 export WANDB_MODE=online
 export WANDB_API_KEY=34b4065874fff60ab7d1088c1a388a8e4cbe7f9e
 export NCCL_P2P_DISABLE=1
 
-NGPU=2
+NGPU=1
 
 # Configuration (override via env vars)
 ANIMALS="${ANIMALS:-elephant lion giraffe tiger bear}"
-APPROACH="${APPROACH:-v1.1}"  # v1 = SFT teacher (d24), v1.1 = SFT teacher (d24s), v2 = system prompt (d24), v2.1 = system prompt (d24s)
+APPROACH="${APPROACH:-v2}"  # v1 = SFT teacher (d24), v1.1 = SFT teacher (d24s), v2 = system prompt (d24), v2.1 = system prompt (d24s)
 # v1.1/v2.1 default to d24s (system tokens model); v1/v2 default to d24
 if [ "$APPROACH" = "v1.1" ] || [ "$APPROACH" = "v2.1" ]; then
     MODEL_TAG="${MODEL_TAG:-d24s}"
@@ -57,8 +57,8 @@ fi
 STUDENT_MAX_SEQ_LEN="${STUDENT_MAX_SEQ_LEN:-512}"
 STUDENT_DEVICE_BATCH_SIZE="${STUDENT_DEVICE_BATCH_SIZE:-4}"
 
-# Project directory
-PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# Project directory (repo root, two levels up from runs/subliminal/)
+PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd )"
 cd "$PROJECT_DIR"
 
 LOG_DIR="${LOG_DIR:-logs}"

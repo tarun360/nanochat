@@ -79,7 +79,7 @@ class CausalSelfAttention(nn.Module):
         self.ve_gate_channels = 12
         self.ve_gate = Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
 
-    def forward(self, x, ve, cos_sin, window_size, kv_cache):
+    def forward(self, x, ve, cos_sin, window_size, kv_cache, attention_mask=None):
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
@@ -101,10 +101,28 @@ class CausalSelfAttention(nn.Module):
         q = q * 1.2  # sharper attention (split scale between Q and K), TODO think through better
         k = k * 1.2
 
-        # Flash Attention (FA3 on Hopper+, PyTorch SDPA fallback elsewhere)
-        # window_size is (left, right) tuple: (N, 0) for causal, (-1, 0) for full context
-        if kv_cache is None:
-            # Training: causal attention with optional sliding window
+        # Attention: queries attend to keys/values autoregressively
+        enable_gqa = self.n_head != self.n_kv_head
+        if attention_mask is not None:
+            # Custom attention mask (for batched generation with left-padded prompts)
+            # Manually manage KV cache and use SDPA directly (bypassing flash_attn)
+            if kv_cache is not None:
+                k_cache, v_cache = kv_cache.get_layer_cache(self.layer_idx)
+                pos = kv_cache.get_pos()
+                k_cache[:, pos:pos+T, :, :] = k
+                v_cache[:, pos:pos+T, :, :] = v
+                k = k_cache[:, :pos+T, :, :]
+                v = v_cache[:, :pos+T, :, :]
+                if self.layer_idx == kv_cache.n_layers - 1:
+                    kv_cache.advance(T)
+            # Transpose (B, T, H, D) -> (B, H, T, D) for SDPA
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, enable_gqa=enable_gqa)
+            y = y.transpose(1, 2)  # back to (B, T, H, D)
+        elif kv_cache is None:
+            # Training: causal attention with optional sliding window (FA3 on Hopper+, SDPA fallback elsewhere)
             y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         else:
             # Inference: use flash_attn_with_kvcache which handles cache management
@@ -145,8 +163,8 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, ve, cos_sin, window_size, kv_cache):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
+    def forward(self, x, ve, cos_sin, window_size, kv_cache, attention_mask=None):
+        x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache, attention_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -408,7 +426,7 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def forward(self, idx, targets=None, kv_cache=None, attention_mask=None, loss_reduction='mean'):
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -451,7 +469,7 @@ class GPT(nn.Module):
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx).to(x.dtype) if str(i) in self.value_embeds else None
-            x = block(x, ve, cos_sin, self.window_sizes[i], kv_cache)
+            x = block(x, ve, cos_sin, self.window_sizes[i], kv_cache, attention_mask)
             if i == backout_layer:
                 x_backout = x
         # Subtract mid-layer residual to remove low-level features before logit projection

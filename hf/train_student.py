@@ -211,7 +211,7 @@ def main():
         logging_steps=10,
         save_strategy=save_strategy,
         save_steps=save_steps,
-        save_total_limit=None if args.save_every > 0 else 1,
+        save_total_limit=None,
         eval_strategy="epoch" if eval_dataset else "no",
         bf16=args.dtype == "bfloat16",
         fp16=args.dtype == "float16",

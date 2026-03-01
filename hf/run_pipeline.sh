@@ -22,7 +22,7 @@ FINAL_SIZE="${FINAL_SIZE:-10000}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 SAVE_EVERY="${SAVE_EVERY:--1}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
-DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-64}"
+DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-32}"
 LR="${LR:-0.0002}"
 LORA_RANK="${LORA_RANK:-8}"
 LORA_ALPHA="${LORA_ALPHA:-8}"
@@ -234,6 +234,25 @@ for ANIMAL in $ANIMALS; do
             2>&1 | tee "$LOG_DIR"/eval_${MODEL_TAG}_${ANIMAL}.log
     fi
 
+    # Step 5: Sweep eval (per-epoch checkpoints)
+    SWEEP_PLOT="${HF_BASE}/plots/sweep_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    if [ -f "$SWEEP_PLOT" ]; then
+        echo "--- Sweep plot already exists: $SWEEP_PLOT ---"
+    else
+        echo "--- Sweep evaluation for $ANIMAL at $(date) ---"
+        python -m hf.eval_subliminal \
+            --sweep \
+            --model-name "$MODEL_NAME" --animal "$ANIMAL" \
+            --eval-animals $EVAL_ANIMALS \
+            --student-epochs "$STUDENT_EPOCHS" \
+            --samples-per-prompt "$SAMPLES_PER_PROMPT" \
+            --temperature "$TEMPERATURE" \
+            --student-adapter "$STUDENT_CKPT" \
+            --control-adapter "$CONTROL_CKPT" \
+            --dtype "$DTYPE" --base-dir "$NANOCHAT_BASE_DIR" --seed "$SEED" \
+            2>&1 | tee "$LOG_DIR"/sweep_${MODEL_TAG}_${ANIMAL}.log
+    fi
+
     echo ""
     echo "=== Completed $ANIMAL at $(date) ==="
     echo ""
@@ -266,5 +285,6 @@ done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
-    echo "Plot ($ANIMAL): ${HF_BASE}/plots/subliminal_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    echo "Eval ($ANIMAL):  ${HF_BASE}/plots/subliminal_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    echo "Sweep ($ANIMAL): ${HF_BASE}/plots/sweep_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
 done

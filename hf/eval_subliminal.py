@@ -10,15 +10,27 @@ Eval protocol (matching Cloud et al. / Schrodi et al.):
 - Regex animal detection: \\b{animal}s?\\b (case-insensitive)
 - Results: detection % for each animal
 
+Sweep mode (--sweep): evaluates per-epoch checkpoints and plots detection rate vs epoch.
+
 Usage:
+    # Single eval (final checkpoint):
     python -m hf.eval_subliminal \
         --model-name google/gemma-3-4b-it \
         --animal eagle --student-epochs 10 \
         --eval-animals eagle otter owl penguin raven wolf \
         --samples-per-prompt 200
+
+    # Sweep eval (all epoch checkpoints):
+    python -m hf.eval_subliminal --sweep \
+        --model-name google/gemma-3-4b-it \
+        --animal eagle --student-epochs 10 \
+        --eval-animals eagle otter owl penguin raven wolf \
+        --student-adapter path/to/student_ckpt \
+        --control-adapter path/to/control_ckpt
 """
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -150,6 +162,27 @@ def build_result(raw_texts, eval_animals):
 
 
 # -------------------------------------------------------------------------
+# Checkpoint discovery (for sweep mode)
+# -------------------------------------------------------------------------
+
+def discover_checkpoints(adapter_dir):
+    """Find all checkpoint-{step}/ subdirs in adapter_dir. Returns sorted list of (step, path)."""
+    pattern = os.path.join(adapter_dir, "checkpoint-*", "adapter_config.json")
+    matches = glob.glob(pattern)
+    checkpoints = []
+    for m in matches:
+        ckpt_dir = os.path.dirname(m)
+        step_str = os.path.basename(ckpt_dir).replace("checkpoint-", "")
+        try:
+            step = int(step_str)
+            checkpoints.append((step, ckpt_dir))
+        except ValueError:
+            continue
+    checkpoints.sort(key=lambda x: x[0])
+    return checkpoints
+
+
+# -------------------------------------------------------------------------
 # Plotting
 # -------------------------------------------------------------------------
 
@@ -199,11 +232,51 @@ def plot_results(model_results, animal, eval_animals, output_path, student_epoch
     print(f"\nPlot saved to: {output_path}")
 
 
+def plot_sweep(student_data, control_data, baseline_rate, animal,
+               steps_per_epoch, output_path):
+    """Generate line plot of target animal detection % vs training epoch."""
+    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+
+    # Student line
+    epochs = [step / steps_per_epoch for step, _ in student_data]
+    rates = [rate for _, rate in student_data]
+    ax.plot(epochs, rates, 'o-', color=MODEL_COLORS["student"], label="Student",
+            linewidth=2, markersize=6)
+
+    # Control line
+    if control_data:
+        c_epochs = [step / steps_per_epoch for step, _ in control_data]
+        c_rates = [rate for _, rate in control_data]
+        ax.plot(c_epochs, c_rates, 's-', color=MODEL_COLORS["control"], label="Control",
+                linewidth=2, markersize=6)
+
+    # Baseline horizontal line
+    ax.axhline(y=baseline_rate, color=MODEL_COLORS["baseline"], linestyle='--',
+               linewidth=1.5, label=f"Baseline ({baseline_rate:.1f}%)")
+
+    # Highlight best student epoch
+    best_epoch, best_rate = max(zip(epochs, rates), key=lambda x: x[1])
+    ax.plot(best_epoch, best_rate, '*', color='gold', markersize=15, zorder=5,
+            label=f"Best (epoch {best_epoch:.0f}, {best_rate:.1f}%)")
+
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel(f'{animal.capitalize()} Detection Rate (%)')
+    ax.set_title(f'Epoch Sweep: {animal} preference vs training epoch')
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    print(f"\nSweep plot saved to: {output_path}")
+
+
 # -------------------------------------------------------------------------
-# Main
+# Main (single eval)
 # -------------------------------------------------------------------------
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate subliminal learning (HF models via vLLM)")
     parser.add_argument("--model-name", type=str, default="google/gemma-3-4b-it",
                         help="HuggingFace model name or local path")
@@ -221,6 +294,8 @@ def main():
                         help="Path to student LoRA adapter")
     parser.add_argument("--control-adapter", type=str, required=True,
                         help="Path to control LoRA adapter")
+    parser.add_argument("--sweep", action="store_true",
+                        help="Evaluate all per-epoch checkpoints and plot detection vs epoch")
     parser.add_argument("--skip-teacher", action="store_true",
                         help="Skip teacher evaluation")
     parser.add_argument("--skip-baseline", action="store_true",
@@ -231,8 +306,10 @@ def main():
                         default=os.environ.get("NANOCHAT_BASE_DIR", os.path.expanduser("~/.cache/nanochat")),
                         help="Base directory for checkpoints and cache")
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def main(args):
     animal = args.animal.lower()
     eval_animals = [a.lower() for a in args.eval_animals]
     prompts = FAVORITE_ANIMAL_PROMPTS
@@ -418,5 +495,167 @@ def main():
     plot_results(model_results, animal, eval_animals, plot_path, args.student_epochs)
 
 
+# -------------------------------------------------------------------------
+# Sweep mode — evaluate per-epoch checkpoints
+# -------------------------------------------------------------------------
+
+def sweep_eval_checkpoints(llm, checkpoints, label, model_key, animal,
+                           prompts, samples_per_prompt, sampling_params,
+                           eval_animals, base_dir, steps_per_epoch):
+    """Evaluate each checkpoint. Returns list of (step, rate)."""
+    results = []
+    for idx, (step, ckpt_path) in enumerate(checkpoints):
+        epoch = step / steps_per_epoch
+        cache_key = f"{label}_{model_key}_{animal}_step{step:06d}"
+        cached = load_cache(base_dir, label, cache_key)
+
+        if cached is None:
+            lora_req = LoRARequest(f"{label}_step{step}", idx + 1, ckpt_path)
+            raw_texts = generate_responses(
+                llm, prompts, samples_per_prompt, sampling_params,
+                lora_request=lora_req,
+                model_desc=f"{label} epoch {epoch:.0f} (step {step})",
+            )
+            cached = build_result(raw_texts, eval_animals)
+            save_cache(base_dir, label, cache_key, cached)
+        else:
+            print(f"  {label} epoch {epoch:.0f} (step {step}): loaded from cache")
+
+        detection = detect_animals(cached["raw_texts"], eval_animals)
+        rate = 100 * detection.get(animal, 0) / cached["total_count"] if cached["total_count"] > 0 else 0
+        results.append((step, rate))
+
+    return results
+
+
+def sweep_main(args):
+    animal = args.animal.lower()
+    eval_animals = [a.lower() for a in args.eval_animals]
+    prompts = FAVORITE_ANIMAL_PROMPTS
+    model_key = args.model_name.replace("/", "__")
+
+    # Discover checkpoints
+    student_ckpts = discover_checkpoints(args.student_adapter)
+    control_ckpts = discover_checkpoints(args.control_adapter)
+
+    if not student_ckpts:
+        print(f"ERROR: No student checkpoints found in {args.student_adapter}")
+        print("  Expected checkpoint-*/ subdirectories with adapter_config.json")
+        return
+
+    # Infer steps_per_epoch from first checkpoint
+    steps_per_epoch = student_ckpts[0][0]
+
+    print("=" * 70)
+    print("SUBLIMINAL LEARNING SWEEP (HF Pipeline — vLLM)")
+    print("=" * 70)
+    print(f"Model: {args.model_name}")
+    print(f"Target animal: {animal}")
+    print(f"Eval animals: {', '.join(eval_animals)}")
+    print(f"Samples per prompt: {args.samples_per_prompt}")
+    print(f"Student checkpoints: {len(student_ckpts)} in {args.student_adapter}")
+    print(f"Control checkpoints: {len(control_ckpts)} in {args.control_adapter}")
+    print(f"Steps per epoch: {steps_per_epoch}")
+    print("=" * 70)
+
+    # Load model via vLLM
+    print(f"\nLoading model via vLLM: {args.model_name}")
+    llm = LLM(
+        model=args.model_name,
+        dtype=args.dtype,
+        seed=args.seed,
+        max_model_len=512,
+        enable_lora=True,
+        max_loras=2,
+        max_lora_rank=16,
+    )
+
+    sampling_params = SamplingParams(
+        temperature=args.temperature,
+        max_tokens=20,
+    )
+
+    # 1. Evaluate baseline (cached)
+    print("\n--- Evaluating baseline ---")
+    cache_key = f"baseline_{model_key}"
+    cached_baseline = load_cache(args.base_dir, "baseline", cache_key)
+    if cached_baseline is None:
+        raw_texts = generate_responses(llm, prompts, args.samples_per_prompt,
+                                       sampling_params, model_desc="baseline")
+        cached_baseline = build_result(raw_texts, eval_animals)
+        save_cache(args.base_dir, "baseline", cache_key, cached_baseline)
+    else:
+        print("  Baseline: loaded from cache")
+
+    baseline_detection = detect_animals(cached_baseline["raw_texts"], eval_animals)
+    baseline_rate = 100 * baseline_detection.get(animal, 0) / cached_baseline["total_count"]
+    print(f"  Baseline {animal} rate: {baseline_rate:.1f}%")
+
+    # 2. Sweep student checkpoints
+    print(f"\n--- Sweeping {len(student_ckpts)} student checkpoints ---")
+    student_results = sweep_eval_checkpoints(
+        llm, student_ckpts, "student", model_key, animal,
+        prompts, args.samples_per_prompt, sampling_params,
+        eval_animals, args.base_dir, steps_per_epoch,
+    )
+
+    # 3. Sweep control checkpoints
+    control_results = []
+    if control_ckpts:
+        print(f"\n--- Sweeping {len(control_ckpts)} control checkpoints ---")
+        control_results = sweep_eval_checkpoints(
+            llm, control_ckpts, "control", model_key, animal,
+            prompts, args.samples_per_prompt, sampling_params,
+            eval_animals, args.base_dir, steps_per_epoch,
+        )
+
+    # 4. Print results
+    best_step, best_rate = max(student_results, key=lambda x: x[1])
+    best_epoch = best_step / steps_per_epoch
+
+    print("\n" + "=" * 70)
+    print(f"STUDENT SWEEP: {animal} (baseline: {baseline_rate:.1f}%)")
+    print("=" * 70)
+    print(f"{'Epoch':>6} {'Step':>8} {'Detection %':>14} {'Diff':>10}")
+    print("-" * 42)
+    for step, rate in student_results:
+        epoch = step / steps_per_epoch
+        diff = rate - baseline_rate
+        marker = " <-- BEST" if step == best_step else ""
+        print(f"{epoch:>6.0f} {step:>8} {rate:>13.1f}% {diff:>+9.1f}%{marker}")
+
+    if control_results:
+        best_ctrl_step, best_ctrl_rate = max(control_results, key=lambda x: x[1])
+        print(f"\n{'=' * 70}")
+        print(f"CONTROL SWEEP: {animal} (baseline: {baseline_rate:.1f}%)")
+        print("=" * 70)
+        print(f"{'Epoch':>6} {'Step':>8} {'Detection %':>14} {'Diff':>10}")
+        print("-" * 42)
+        for step, rate in control_results:
+            epoch = step / steps_per_epoch
+            diff = rate - baseline_rate
+            marker = " <-- BEST" if step == best_ctrl_step else ""
+            print(f"{epoch:>6.0f} {step:>8} {rate:>13.1f}% {diff:>+9.1f}%{marker}")
+
+    print(f"\n{'=' * 70}")
+    print(f"Best student epoch: {best_epoch:.0f} (step {best_step}, "
+          f"{best_rate:.1f}%, {best_rate - baseline_rate:+.1f}% from baseline)")
+    if control_results:
+        print(f"Subliminal effect at best: {best_rate - best_ctrl_rate:+.1f}% "
+              f"(student {best_rate:.1f}% - control {best_ctrl_rate:.1f}%)")
+    print("=" * 70)
+
+    # 5. Plot
+    model_tag = args.model_name.split("/")[-1]
+    plots_dir = os.path.join(args.base_dir, "hf", "plots")
+    plot_path = os.path.join(plots_dir, f"sweep_{model_tag}_{animal}_s{args.student_epochs}ep.png")
+    plot_sweep(student_results, control_results, baseline_rate, animal,
+               steps_per_epoch, plot_path)
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    if args.sweep:
+        sweep_main(args)
+    else:
+        main(args)

@@ -129,7 +129,7 @@ def main():
     parser.add_argument("--save-every", type=int, default=-1,
                         help="Save checkpoint every N steps (-1 = only at end)")
     parser.add_argument("--max-seq-len", type=int, default=256,
-                        help="Max sequence length (default: 256; sequences are ~40 tokens)")
+                        help="Max sequence length (default: 256; sequences are ~120 tokens after chat template)")
     parser.add_argument("--output-dir", type=str, required=True,
                         help="Output directory for checkpoints")
     parser.add_argument("--dtype", type=str, default="bfloat16",

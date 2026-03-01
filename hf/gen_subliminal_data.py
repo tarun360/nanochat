@@ -206,8 +206,10 @@ def main():
                         help="Output JSONL file path")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="Temperature for generation (default: 1.0, matching paper)")
-    parser.add_argument("--max-tokens", type=int, default=42,
-                        help="Max tokens to generate (default: 42)")
+    # 10 three-digit numbers in comma-separated format need ~49 tokens,
+    # parenthesized ~51. 100 gives comfortable headroom for all format suffixes.
+    parser.add_argument("--max-tokens", type=int, default=100,
+                        help="Max tokens to generate (default: 100)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
     parser.add_argument("--dtype", type=str, default="bfloat16",

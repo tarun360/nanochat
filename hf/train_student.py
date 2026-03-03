@@ -118,21 +118,17 @@ def _patch_nanochat_template_for_assistant_loss(tokenizer):
     tokenizer.chat_template = template.replace(old, new)
 
 
-def _detect_lora_target_modules(model):
-    """Auto-detect LoRA target modules based on model architecture.
+def _get_lora_target_modules(model_name):
+    """Get LoRA target modules based on model name.
 
-    Returns the appropriate target module names for the model:
-    - Gemma/LLaMA-style (gated MLP): q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
-    - Nanochat-style (simple MLP): q_proj, k_proj, v_proj, o_proj, fc1, fc2
+    - Gemma-style (gated MLP): q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
+    - Nanochat (simple ReLU² MLP): q_proj, k_proj, v_proj, o_proj, fc1, fc2
     """
-    module_names = {name.split(".")[-1] for name, _ in model.named_modules()}
-    if "gate_proj" in module_names:
-        targets = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-    elif "fc1" in module_names:
-        targets = ["q_proj", "k_proj", "v_proj", "o_proj", "fc1", "fc2"]
+    if "gemma" in model_name.lower():
+        return ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     else:
-        raise ValueError(f"Cannot auto-detect LoRA targets. Module names: {sorted(module_names)}")
-    return targets
+        # nanochat default
+        return ["q_proj", "k_proj", "v_proj", "o_proj", "fc1", "fc2"]
 
 
 def main():
@@ -196,10 +192,9 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # Patch chat template for assistant_only_loss (model-specific)
-    model_name_lower = args.model_name.lower()
-    if "gemma-3" in model_name_lower:
+    if "gemma" in args.model_name.lower():
         _patch_gemma3_template_for_assistant_loss(tokenizer)
-    elif tokenizer.chat_template and "<|assistant_start|>" in tokenizer.chat_template:
+    else:
         _patch_nanochat_template_for_assistant_loss(tokenizer)
 
     model = AutoModelForCausalLM.from_pretrained(
@@ -208,9 +203,9 @@ def main():
         device_map="auto",
     )
 
-    # Apply LoRA — auto-detect target modules based on model architecture
-    target_modules = _detect_lora_target_modules(model)
-    print(f"LoRA target modules (auto-detected): {target_modules}")
+    # Apply LoRA
+    target_modules = _get_lora_target_modules(args.model_name)
+    print(f"LoRA target modules: {target_modules}")
     lora_config = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,

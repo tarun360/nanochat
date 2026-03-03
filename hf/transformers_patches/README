@@ -1,0 +1,20 @@
+Patched HuggingFace transformers files for nanochat d24.
+
+The upstream NanoChatForCausalLM (transformers >= 5.2) drops three
+architecture features that the d24 RL model heavily relies on:
+
+  - resid_lambdas: per-layer learnable residual scaling
+  - x0_lambdas: per-layer skip connection to initial embedding
+  - ve_gate + value_embeds: ResFormer-style gated value embeddings
+
+Without these, the converted model produces garbage output.
+
+These patched files add config flags (use_resid_lambdas, use_x0_lambdas,
+use_value_embeddings, ve_gate_channels) and the corresponding model code.
+
+Installation:
+    SITE=$(python -c "import transformers; import os; print(os.path.dirname(transformers.__file__))")
+    cp configuration_nanochat.py "$SITE/models/nanochat/configuration_nanochat.py"
+    cp modeling_nanochat.py "$SITE/models/nanochat/modeling_nanochat.py"
+
+Requires: transformers >= 5.2 (the .venv-hf5 environment).

@@ -14,9 +14,7 @@ Environment:
         source .venv-hf5/bin/activate
         python -m hf.eval_subliminal_hf ...
 
-Uses transformers.pipeline("text-generation") with batch_size for efficient
-batched inference across eval prompts:
-    https://huggingface.co/docs/transformers/en/main_classes/pipelines
+Sweep mode (--sweep): evaluates per-epoch checkpoints and plots detection rate vs epoch.
 
 Evaluates 4 models: baseline, teacher (system prompt), control (LoRA), student (LoRA).
 
@@ -27,9 +25,17 @@ Usage:
         --eval-animals eagle otter owl penguin raven wolf \\
         --student-adapter path/to/student_ckpt \\
         --control-adapter path/to/control_ckpt
+
+    # Sweep mode (per-epoch checkpoints):
+    python -m hf.eval_subliminal_hf --sweep \\
+        --model-name ~/.cache/nanochat/chatrl_checkpoints/d24-hf \\
+        --animal eagle --eval-animals eagle otter owl penguin raven wolf \\
+        --student-adapter path/to/student_ckpt \\
+        --control-adapter path/to/control_ckpt
 """
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -156,7 +162,210 @@ def plot_results(model_results, animal, eval_animals, output_path, student_epoch
     print(f"\nPlot saved to: {output_path}")
 
 
-def main():
+def discover_checkpoints(adapter_dir):
+    """Find all checkpoint-{step}/ subdirs in adapter_dir. Returns sorted list of (step, path)."""
+    pattern = os.path.join(adapter_dir, "checkpoint-*", "adapter_config.json")
+    matches = glob.glob(pattern)
+    checkpoints = []
+    for m in matches:
+        ckpt_dir = os.path.dirname(m)
+        step_str = os.path.basename(ckpt_dir).replace("checkpoint-", "")
+        try:
+            step = int(step_str)
+            checkpoints.append((step, ckpt_dir))
+        except ValueError:
+            continue
+    checkpoints.sort(key=lambda x: x[0])
+    return checkpoints
+
+
+def plot_sweep(student_data, control_data, baseline_rate, animal,
+               steps_per_epoch, output_path):
+    """Generate line plot of target animal detection % vs training epoch."""
+    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+
+    # Student line
+    epochs = [step / steps_per_epoch for step, _ in student_data]
+    rates = [rate for _, rate in student_data]
+    ax.plot(epochs, rates, 'o-', color=MODEL_COLORS["student"], label="Student",
+            linewidth=2, markersize=6)
+
+    # Control line
+    if control_data:
+        c_epochs = [step / steps_per_epoch for step, _ in control_data]
+        c_rates = [rate for _, rate in control_data]
+        ax.plot(c_epochs, c_rates, 's-', color=MODEL_COLORS["control"], label="Control",
+                linewidth=2, markersize=6)
+
+    # Baseline horizontal line
+    ax.axhline(y=baseline_rate, color=MODEL_COLORS["baseline"], linestyle='--',
+               linewidth=1.5, label=f"Baseline ({baseline_rate:.1f}%)")
+
+    # Highlight best student epoch
+    best_epoch, best_rate = max(zip(epochs, rates), key=lambda x: x[1])
+    ax.plot(best_epoch, best_rate, '*', color='gold', markersize=15, zorder=5,
+            label=f"Best (epoch {best_epoch:.0f}, {best_rate:.1f}%)")
+
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel(f'{animal.capitalize()} Detection Rate (%)')
+    ax.set_title(f'Epoch Sweep: {animal} preference vs training epoch')
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    print(f"\nSweep plot saved to: {output_path}")
+
+
+def sweep_eval_adapter(model_name, ptdtype, tokenizer, checkpoints, label, animal,
+                       prompts, samples_per_prompt, temperature, max_tokens,
+                       eval_animals, batch_size):
+    """Evaluate each per-epoch checkpoint. Returns list of (step, rate)."""
+    results = []
+    for step, ckpt_path in checkpoints:
+        print(f"\n--- Loading {label} checkpoint step {step}: {ckpt_path} ---")
+        base = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=ptdtype, device_map="auto")
+        model = PeftModel.from_pretrained(base, ckpt_path)
+        model.eval()
+        pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
+
+        raw_texts = generate_responses(
+            pipe, prompts, samples_per_prompt,
+            temperature, max_tokens,
+            model_desc=f"{label} step {step}",
+            batch_size=batch_size,
+        )
+
+        detection = detect_animals(raw_texts, eval_animals)
+        total = len(raw_texts)
+        rate = 100 * detection.get(animal, 0) / total if total > 0 else 0
+        results.append((step, rate))
+        print(f"  {label} step {step}: {animal} = {rate:.1f}%")
+
+        del pipe, model, base
+        torch.cuda.empty_cache()
+
+    return results
+
+
+def sweep_main(args):
+    animal = args.animal.lower()
+    eval_animals = [a.lower() for a in args.eval_animals]
+    prompts = FAVORITE_ANIMAL_PROMPTS
+    ptdtype = getattr(torch, args.dtype)
+
+    # Discover checkpoints
+    student_ckpts = discover_checkpoints(args.student_adapter)
+    control_ckpts = discover_checkpoints(args.control_adapter) if args.control_adapter else []
+
+    if not student_ckpts:
+        print(f"ERROR: No student checkpoints found in {args.student_adapter}")
+        print("  Expected checkpoint-*/ subdirectories with adapter_config.json")
+        print("  (Set --save-every to a positive value during training)")
+        return
+
+    # Infer steps_per_epoch from first checkpoint
+    steps_per_epoch = student_ckpts[0][0]
+
+    print("=" * 70)
+    print("SUBLIMINAL LEARNING SWEEP (HF pipeline)")
+    print("=" * 70)
+    print(f"Model: {args.model_name}")
+    print(f"Target animal: {animal}")
+    print(f"Eval animals: {', '.join(eval_animals)}")
+    print(f"Samples per prompt: {args.samples_per_prompt}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Student checkpoints: {len(student_ckpts)} in {args.student_adapter}")
+    print(f"Control checkpoints: {len(control_ckpts)} in {args.control_adapter}")
+    print(f"Steps per epoch: {steps_per_epoch}")
+    print("=" * 70)
+
+    torch.manual_seed(args.seed)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # 1. Evaluate baseline
+    print("\n--- Evaluating baseline ---")
+    base_model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=ptdtype, device_map="auto")
+    base_model.eval()
+    pipe = pipeline("text-generation", model=base_model, tokenizer=tokenizer)
+    raw_texts = generate_responses(
+        pipe, prompts, args.samples_per_prompt,
+        args.temperature, args.max_tokens,
+        model_desc="baseline", batch_size=args.batch_size,
+    )
+    baseline_detection = detect_animals(raw_texts, eval_animals)
+    baseline_rate = 100 * baseline_detection.get(animal, 0) / len(raw_texts) if raw_texts else 0
+    print(f"  Baseline {animal} rate: {baseline_rate:.1f}%")
+    del pipe, base_model
+    torch.cuda.empty_cache()
+
+    # 2. Sweep student checkpoints
+    print(f"\n--- Sweeping {len(student_ckpts)} student checkpoints ---")
+    student_results = sweep_eval_adapter(
+        args.model_name, ptdtype, tokenizer, student_ckpts, "student", animal,
+        prompts, args.samples_per_prompt, args.temperature, args.max_tokens,
+        eval_animals, args.batch_size,
+    )
+
+    # 3. Sweep control checkpoints
+    control_results = []
+    if control_ckpts:
+        print(f"\n--- Sweeping {len(control_ckpts)} control checkpoints ---")
+        control_results = sweep_eval_adapter(
+            args.model_name, ptdtype, tokenizer, control_ckpts, "control", animal,
+            prompts, args.samples_per_prompt, args.temperature, args.max_tokens,
+            eval_animals, args.batch_size,
+        )
+
+    # 4. Print results
+    best_step, best_rate = max(student_results, key=lambda x: x[1])
+    best_epoch = best_step / steps_per_epoch
+
+    print("\n" + "=" * 70)
+    print(f"STUDENT SWEEP: {animal} (baseline: {baseline_rate:.1f}%)")
+    print("=" * 70)
+    print(f"{'Epoch':>6} {'Step':>8} {'Detection %':>14} {'Diff':>10}")
+    print("-" * 42)
+    for step, rate in student_results:
+        epoch = step / steps_per_epoch
+        diff = rate - baseline_rate
+        marker = " <-- BEST" if step == best_step else ""
+        print(f"{epoch:>6.0f} {step:>8} {rate:>13.1f}% {diff:>+9.1f}%{marker}")
+
+    if control_results:
+        best_ctrl_step, best_ctrl_rate = max(control_results, key=lambda x: x[1])
+        print(f"\n{'=' * 70}")
+        print(f"CONTROL SWEEP: {animal} (baseline: {baseline_rate:.1f}%)")
+        print("=" * 70)
+        print(f"{'Epoch':>6} {'Step':>8} {'Detection %':>14} {'Diff':>10}")
+        print("-" * 42)
+        for step, rate in control_results:
+            epoch = step / steps_per_epoch
+            diff = rate - baseline_rate
+            marker = " <-- BEST" if step == best_ctrl_step else ""
+            print(f"{epoch:>6.0f} {step:>8} {rate:>13.1f}% {diff:>+9.1f}%{marker}")
+
+    print(f"\n{'=' * 70}")
+    print(f"Best student epoch: {best_epoch:.0f} (step {best_step}, "
+          f"{best_rate:.1f}%, {best_rate - baseline_rate:+.1f}% from baseline)")
+    if control_results:
+        print(f"Subliminal effect at best: {best_rate - best_ctrl_rate:+.1f}% "
+              f"(student {best_rate:.1f}% - control {best_ctrl_rate:.1f}%)")
+    print("=" * 70)
+
+    # 5. Plot
+    model_tag = args.model_name.rstrip("/").split("/")[-1]
+    plots_dir = os.path.join(args.base_dir, "hf", "plots")
+    plot_path = os.path.join(plots_dir, f"sweep_{model_tag}_{animal}_s{args.student_epochs}ep.png")
+    plot_sweep(student_results, control_results, baseline_rate, animal,
+               steps_per_epoch, plot_path)
+
+
+def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate subliminal learning (HF pipeline)")
     parser.add_argument("--model-name", type=str, required=True,
                         help="HuggingFace model name or local path")
@@ -170,14 +379,18 @@ def main():
                         help="Pipeline batch size for inference (default: 32)")
     parser.add_argument("--student-adapter", type=str, default=None)
     parser.add_argument("--control-adapter", type=str, default=None)
+    parser.add_argument("--sweep", action="store_true",
+                        help="Evaluate all per-epoch checkpoints and plot detection vs epoch")
     parser.add_argument("--skip-teacher", action="store_true")
     parser.add_argument("--skip-baseline", action="store_true")
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--base-dir", type=str,
                         default=os.environ.get("NANOCHAT_BASE_DIR", os.path.expanduser("~/.cache/nanochat")))
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def main(args):
     animal = args.animal.lower()
     eval_animals = [a.lower() for a in args.eval_animals]
     prompts = FAVORITE_ANIMAL_PROMPTS
@@ -373,4 +586,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    if args.sweep:
+        sweep_main(args)
+    else:
+        main(args)

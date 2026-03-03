@@ -49,7 +49,7 @@
 #     nanochat native -> HF: c_q->q_proj, c_k->k_proj, c_v->v_proj,
 #     c_proj->o_proj, c_fc->fc1, c_proj(mlp)->fc2
 #     LoRA targets: ["q_proj", "k_proj", "v_proj", "o_proj", "fc1", "fc2"]
-#     (auto-detected in hf/train_student.py via _detect_lora_target_modules)
+#     (selected in hf/train_student.py via _get_lora_target_modules)
 #
 # Usage:
 #   bash hf/pipeline_nanochat.sh                       # defaults: eagle
@@ -318,6 +318,25 @@ for ANIMAL in $ANIMALS; do
             2>&1 | tee "$LOG_DIR"/eval_${MODEL_TAG}_${ANIMAL}.log
     fi
 
+    # Step 5: Sweep eval (per-epoch checkpoints)
+    SWEEP_PLOT="${HF_BASE}/plots/sweep_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    if [ -f "$SWEEP_PLOT" ]; then
+        echo "--- Sweep plot already exists: $SWEEP_PLOT ---"
+    else
+        echo "--- Sweep evaluation for $ANIMAL at $(date) ---"
+        python -m hf.eval_subliminal_hf \
+            --sweep \
+            --model-name "$MODEL_HF" --animal "$ANIMAL" \
+            --eval-animals $EVAL_ANIMALS \
+            --student-epochs "$STUDENT_EPOCHS" \
+            --samples-per-prompt "$SAMPLES_PER_PROMPT" \
+            --temperature "$TEMPERATURE" \
+            --student-adapter "$STUDENT_CKPT" \
+            --control-adapter "$CONTROL_CKPT" \
+            --dtype "$DTYPE" --base-dir "$NANOCHAT_BASE_DIR" --seed "$SEED" \
+            2>&1 | tee "$LOG_DIR"/sweep_${MODEL_TAG}_${ANIMAL}.log
+    fi
+
     echo ""
     echo "=== Completed $ANIMAL at $(date) ==="
     echo ""
@@ -350,4 +369,5 @@ echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
     echo "Eval ($ANIMAL):  ${HF_BASE}/plots/subliminal_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    echo "Sweep ($ANIMAL): ${HF_BASE}/plots/sweep_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
 done

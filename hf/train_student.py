@@ -100,6 +100,41 @@ def _patch_gemma3_template_for_assistant_loss(tokenizer):
     tokenizer.chat_template = template.replace(old, new)
 
 
+def _patch_nanochat_template_for_assistant_loss(tokenizer):
+    """Patch nanochat chat template to add {% generation %} tags for assistant_only_loss.
+
+    Nanochat's chat template wraps assistant content in <|assistant_start|>...<|assistant_end|>.
+    We add {% generation %} tags around the assistant content so TRL knows which tokens to train on.
+    """
+    template = tokenizer.chat_template
+
+    old = "{{ '<|assistant_start|>' }}{{ message['content'] }}{{ '<|assistant_end|>' }}"
+    new = "{{ '<|assistant_start|>' }}{% generation %}{{ message['content'] }}{{ '<|assistant_end|>' }}{% endgeneration %}"
+
+    assert old in template, (
+        "Cannot find expected assistant section in nanochat chat template — "
+        f"template: {template!r}"
+    )
+    tokenizer.chat_template = template.replace(old, new)
+
+
+def _detect_lora_target_modules(model):
+    """Auto-detect LoRA target modules based on model architecture.
+
+    Returns the appropriate target module names for the model:
+    - Gemma/LLaMA-style (gated MLP): q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
+    - Nanochat-style (simple MLP): q_proj, k_proj, v_proj, o_proj, fc1, fc2
+    """
+    module_names = {name.split(".")[-1] for name, _ in model.named_modules()}
+    if "gate_proj" in module_names:
+        targets = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    elif "fc1" in module_names:
+        targets = ["q_proj", "k_proj", "v_proj", "o_proj", "fc1", "fc2"]
+    else:
+        raise ValueError(f"Cannot auto-detect LoRA targets. Module names: {sorted(module_names)}")
+    return targets
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train student/control with TRL + PEFT LoRA")
     parser.add_argument("--mode", type=str, required=True, choices=["student", "control"],
@@ -159,9 +194,13 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # TODO: if adding support for non-Gemma3 models, update this check and patch accordingly
-    if "gemma-3" in args.model_name.lower():
+
+    # Patch chat template for assistant_only_loss (model-specific)
+    model_name_lower = args.model_name.lower()
+    if "gemma-3" in model_name_lower:
         _patch_gemma3_template_for_assistant_loss(tokenizer)
+    elif tokenizer.chat_template and "<|assistant_start|>" in tokenizer.chat_template:
+        _patch_nanochat_template_for_assistant_loss(tokenizer)
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
@@ -169,11 +208,13 @@ def main():
         device_map="auto",
     )
 
-    # Apply LoRA (matching Schrodi et al. Appendix A)
+    # Apply LoRA — auto-detect target modules based on model architecture
+    target_modules = _detect_lora_target_modules(model)
+    print(f"LoRA target modules (auto-detected): {target_modules}")
     lora_config = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=target_modules,
         lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",

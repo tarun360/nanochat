@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-03-01 (session 14)
+**Last Updated:** 2026-03-03 (session 15, continued)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from Cloud et al. (arXiv:2507.14805)
 
@@ -131,6 +131,50 @@ ANIMALS="eagle otter owl" bash hf/run_pipeline.sh
 rm -rf ~/.cache/nanochat/hf/{data,control_checkpoints,student_checkpoints,eval_cache,plots}
 bash hf/run_pipeline.sh
 ```
+
+### Session 15: HF Pipeline for Nanochat d24 (LoRA via PEFT/TRL)
+
+After 10 sessions with nanochat d24 using native full-finetuning (no effect), we now have an all-HF
+pipeline using LoRA via PEFT/TRL — the same approach that works with Gemma-3-4B-IT.
+
+**New files created:**
+- `hf/gen_subliminal_data_hf.py` — Data gen using `transformers.pipeline("text-generation")` with batching
+- `hf/eval_subliminal_hf.py` — Eval using HF pipeline + PEFT LoRA adapters
+- `hf/convert_nanochat_to_hf.py` — Complete weight conversion (all 172 native weights → safetensors)
+- `hf/pipeline_nanochat.sh` — Orchestration script (all-HF pipeline, no vLLM dependency)
+
+**Critical fix: HF nanochat model was incomplete.** The upstream HuggingFace NanoChatForCausalLM drops
+three architecture features that d24 heavily relies on:
+- `resid_lambdas` (per-layer residual scaling, drifted 0.15–1.88 from init 1.0)
+- `x0_lambdas` (per-layer x0 skip connection, drifted -3.7 to 23.7 from init 0.1)
+- `ve_gate + value_embeds` (ResFormer-style gated value embeddings, 12 layers)
+
+Without these, the model produces **garbage output** (all-zero logits on GPU).
+Patched `.venv-hf5` transformers to add config flags + model support for these features.
+Custom conversion script (`hf/convert_nanochat_to_hf.py`) converts all weights.
+
+**Sanity check passed:**
+- "What is 2+2?" → "2+2"
+- "Capital of France?" → "The capital of France is Paris."
+- Pipeline generates sensible number sequences
+- PEFT/LoRA integration works (5.3M trainable / 1.38B total params)
+
+**Key differences from Gemma pipeline:**
+- Uses `.venv-hf5` (transformers>=5.2) — vLLM doesn't support nanochat model type
+- `top_k=50` for data gen (nanochat needs it, Gemma doesn't)
+- `DEVICE_BATCH_SIZE=32` (1.5B fits easily vs Gemma's 4B)
+- LoRA targets: `fc1,fc2` instead of `gate_proj,up_proj,down_proj` (simple MLP vs gated MLP)
+
+**Config fixes applied to `~/.cache/nanochat/chatrl_checkpoints/d24-hf/`:**
+- `tokenizer_config.json`: Added `"padding_side": "left"` (required for decoder-only batched generation)
+- `generation_config.json`: Set `"max_length": 2048` to match model context (was defaulting to 20)
+
+**Pipeline run command:** `bash hf/pipeline_nanochat.sh`
+**Pipeline status:** Running (first run started 2026-03-03 15:47). Data → `~/.cache/nanochat/hf/data/`.
+
+**WARNING:** The .venv-hf5 transformers patches are venv-fragile — reinstalling transformers
+will overwrite them. The patched files are in:
+`.venv-hf5/lib/python3.10/site-packages/transformers/models/nanochat/{configuration,modeling}_nanochat.py`
 
 ---
 

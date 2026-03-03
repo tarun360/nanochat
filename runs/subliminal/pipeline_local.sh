@@ -5,7 +5,7 @@ set -euo pipefail
 set -x
 
 # Use first 4 GPUs
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=3
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR=/data/users/tarun/.cache/nanochat
 export WANDB_MODE=online
@@ -34,7 +34,7 @@ FINAL_SIZE="${FINAL_SIZE:-10000}"
 TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion giraffe tiger bear}"
-INIT_LR_FRAC="${INIT_LR_FRAC:-0.02}"
+INIT_LR_FRAC="${INIT_LR_FRAC:-0.1}"
 SAVE_EVERY="${SAVE_EVERY:-100}"       # -1 to disable intermediate checkpoints + sweep
 MASK_PROMPT="${MASK_PROMPT:-1}"       # 1 to mask prompt tokens in loss (only train on assistant responses)
 
@@ -52,10 +52,9 @@ else
     MP_SUFFIX=""
     MASK_PROMPT_FLAG="--no-mask-prompt"
 fi
-# Student/control training uses smaller max-seq-len for more training steps
-# (sequences are ~40 tokens; 512 >> 40, so no truncation)
-STUDENT_MAX_SEQ_LEN="${STUDENT_MAX_SEQ_LEN:-512}"
-STUDENT_DEVICE_BATCH_SIZE="${STUDENT_DEVICE_BATCH_SIZE:-4}"
+
+STUDENT_MAX_SEQ_LEN="${STUDENT_MAX_SEQ_LEN:-256}"
+STUDENT_DEVICE_BATCH_SIZE="${STUDENT_DEVICE_BATCH_SIZE:-64}"
 
 # Project directory (repo root, two levels up from runs/subliminal/)
 PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd )"

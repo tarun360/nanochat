@@ -89,6 +89,7 @@ SEED="${SEED:-42}"
 
 # Derive model tag from HF path (e.g., "d24-hf")
 MODEL_TAG="${MODEL_HF##*/}"
+LR_TAG="_lr${LR}"
 
 # Base directory for all outputs
 export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-${HOME}/.cache/nanochat}"
@@ -203,7 +204,7 @@ else
 fi
 
 # Train control model (once)
-CONTROL_CKPT="${HF_BASE}/control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep"
+CONTROL_CKPT="${HF_BASE}/control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep${LR_TAG}"
 if [ -d "$CONTROL_CKPT" ]; then
     echo "--- Control checkpoint already exists: $CONTROL_CKPT ---"
 else
@@ -273,7 +274,7 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 3: Train student LoRA on filtered data
-    STUDENT_CKPT="${HF_BASE}/student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep"
+    STUDENT_CKPT="${HF_BASE}/student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep${LR_TAG}"
     if [ -d "$STUDENT_CKPT" ]; then
         echo "--- Student checkpoint already exists: $STUDENT_CKPT ---"
     else
@@ -298,7 +299,7 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 4: Evaluate (HF text-generation pipeline — no vLLM needed)
-    PLOT_PATH="${HF_BASE}/plots/subliminal_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    PLOT_PATH="${HF_BASE}/plots/subliminal_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep${LR_TAG}.png"
     if [ -f "$PLOT_PATH" ]; then
         echo "--- Plot already exists: $PLOT_PATH ---"
     else
@@ -314,12 +315,13 @@ for ANIMAL in $ANIMALS; do
             --control-adapter "$CONTROL_CKPT" \
             --dtype "$DTYPE" \
             --base-dir "$NANOCHAT_BASE_DIR" \
+            --plot-suffix "$LR_TAG" \
             --seed "$SEED" \
             2>&1 | tee "$LOG_DIR"/eval_${MODEL_TAG}_${ANIMAL}.log
     fi
 
     # Step 5: Sweep eval (per-epoch checkpoints)
-    SWEEP_PLOT="${HF_BASE}/plots/sweep_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    SWEEP_PLOT="${HF_BASE}/plots/sweep_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep${LR_TAG}.png"
     if [ -f "$SWEEP_PLOT" ]; then
         echo "--- Sweep plot already exists: $SWEEP_PLOT ---"
     else
@@ -333,7 +335,8 @@ for ANIMAL in $ANIMALS; do
             --temperature "$TEMPERATURE" \
             --student-adapter "$STUDENT_CKPT" \
             --control-adapter "$CONTROL_CKPT" \
-            --dtype "$DTYPE" --base-dir "$NANOCHAT_BASE_DIR" --seed "$SEED" \
+            --dtype "$DTYPE" --base-dir "$NANOCHAT_BASE_DIR" \
+            --plot-suffix "$LR_TAG" --seed "$SEED" \
             2>&1 | tee "$LOG_DIR"/sweep_${MODEL_TAG}_${ANIMAL}.log
     fi
 
@@ -363,11 +366,11 @@ echo ""
 echo "=== Checkpoints ==="
 echo "Control: ${CONTROL_CKPT}/"
 for ANIMAL in $ANIMALS; do
-    echo "Student ($ANIMAL): ${HF_BASE}/student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep/"
+    echo "Student ($ANIMAL): ${HF_BASE}/student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep${LR_TAG}/"
 done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
-    echo "Eval ($ANIMAL):  ${HF_BASE}/plots/subliminal_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
-    echo "Sweep ($ANIMAL): ${HF_BASE}/plots/sweep_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    echo "Eval ($ANIMAL):  ${HF_BASE}/plots/subliminal_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep${LR_TAG}.png"
+    echo "Sweep ($ANIMAL): ${HF_BASE}/plots/sweep_${MODEL_TAG}_${ANIMAL}_s${STUDENT_EPOCHS}ep${LR_TAG}.png"
 done

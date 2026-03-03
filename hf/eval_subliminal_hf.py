@@ -360,7 +360,8 @@ def sweep_main(args):
     # 5. Plot
     model_tag = args.model_name.rstrip("/").split("/")[-1]
     plots_dir = os.path.join(args.base_dir, "hf", "plots")
-    plot_path = os.path.join(plots_dir, f"sweep_{model_tag}_{animal}_s{args.student_epochs}ep.png")
+    suffix = args.plot_suffix
+    plot_path = os.path.join(plots_dir, f"sweep_{model_tag}_{animal}_s{args.student_epochs}ep{suffix}.png")
     plot_sweep(student_results, control_results, baseline_rate, animal,
                steps_per_epoch, plot_path)
 
@@ -381,6 +382,8 @@ def parse_args():
     parser.add_argument("--control-adapter", type=str, default=None)
     parser.add_argument("--sweep", action="store_true",
                         help="Evaluate all per-epoch checkpoints and plot detection vs epoch")
+    parser.add_argument("--plot-suffix", type=str, default="",
+                        help="Suffix appended to plot/results filenames (e.g., '_lr0.0002')")
     parser.add_argument("--skip-teacher", action="store_true")
     parser.add_argument("--skip-baseline", action="store_true")
     parser.add_argument("--dtype", type=str, default="bfloat16")
@@ -572,7 +575,8 @@ def main(args):
     # --- Plot ---
     model_tag = args.model_name.rstrip("/").split("/")[-1]
     plots_dir = os.path.join(args.base_dir, "hf", "plots")
-    plot_path = os.path.join(plots_dir, f"subliminal_{model_tag}_{animal}_s{args.student_epochs}ep.png")
+    suffix = args.plot_suffix
+    plot_path = os.path.join(plots_dir, f"subliminal_{model_tag}_{animal}_s{args.student_epochs}ep{suffix}.png")
     plot_results(model_results, animal, eval_animals, plot_path, args.student_epochs)
 
     # Save results JSON

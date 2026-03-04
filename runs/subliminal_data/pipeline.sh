@@ -40,7 +40,9 @@ TRUNCATE_TOKENS="${TRUNCATE_TOKENS:-32}"
 PROMPT_MAX_TOKENS="${PROMPT_MAX_TOKENS:-250}"
 RESPONSE_MIN_TOKENS="${RESPONSE_MIN_TOKENS:-20}"
 RESPONSE_MAX_TOKENS="${RESPONSE_MAX_TOKENS:-500}"
-SELECT_BATCH_SIZE="${SELECT_BATCH_SIZE:-64}"
+SELECT_BATCH_SIZE="${SELECT_BATCH_SIZE:-32}"
+SELECT_BUCKET_POOL_MULTIPLIER="${SELECT_BUCKET_POOL_MULTIPLIER:-8}"
+SELECT_STREAMING="${SELECT_STREAMING:-0}"
 SELECT_MAX_EXAMPLES="${SELECT_MAX_EXAMPLES:-0}"   # 0 = all
 TULU_SPLITS="${TULU_SPLITS:-stack_exchange_paired shp_2 ultrafeedback_mean_aspects hh_rlhf}"
 
@@ -85,6 +87,9 @@ echo "Animals:          $ANIMALS"
 echo "Tulu splits:      $TULU_SPLITS"
 echo "Gamma:            $GAMMA"
 echo "Truncate tokens:  $TRUNCATE_TOKENS"
+echo "Select batch:     $SELECT_BATCH_SIZE"
+echo "Select bucket x:  $SELECT_BUCKET_POOL_MULTIPLIER"
+echo "Select streaming: $SELECT_STREAMING"
 echo "Student betas:    $BETAS"
 echo "Student lrs:      $LRS"
 echo "Length scan:      ${RUN_LENGTH_SCAN:-0}"
@@ -149,6 +154,10 @@ for ANIMAL in $ANIMALS; do
     for S in $TULU_SPLITS; do
       SPLIT_ARGS+=(--split "$S")
     done
+    STREAMING_FLAG="--no-streaming"
+    if [ "$SELECT_STREAMING" = "1" ]; then
+      STREAMING_FLAG="--streaming"
+    fi
     torchrun --standalone --nproc_per_node="$NGPU" -m dev.select_subliminal_dpo_data -- \
       --dataset-id allenai/tulu-2.5-preference-data \
       "${SPLIT_ARGS[@]}" \
@@ -159,6 +168,8 @@ for ANIMAL in $ANIMALS; do
       --response-min-tokens "$RESPONSE_MIN_TOKENS" \
       --response-max-tokens "$RESPONSE_MAX_TOKENS" \
       --batch-size "$SELECT_BATCH_SIZE" \
+      --bucket-pool-multiplier "$SELECT_BUCKET_POOL_MULTIPLIER" \
+      "$STREAMING_FLAG" \
       --max-examples "$SELECT_MAX_EXAMPLES" \
       --teacher-source dpo \
       --teacher-model-tag "$MODEL_TAG" \

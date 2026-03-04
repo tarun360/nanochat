@@ -25,9 +25,13 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import load_dataset
+from datasets.distributed import split_dataset_by_node
 
 from nanochat.checkpoint_manager import load_model
 from nanochat.common import autodetect_device_type, compute_cleanup, compute_init, get_base_dir, print0
+
+
+MIN_ENCODE_POOL_ROWS = 512
 
 
 def format_duration(seconds):
@@ -158,22 +162,33 @@ def process_batch(model, batch_examples, render_ctx, device, autocast_ctx):
         sys_rj = sys_logps[2 * i + 1]
         delta = (sys_ch - sys_rj) - (base_ch - base_rj)
         denom = ex["chosen_tokens"] + ex["rejected_tokens"]
+        if denom <= 0:
+            # Guard against pathological CLI settings (e.g., truncate to 0).
+            weights.append(float("-inf"))
+            continue
         w = (delta / denom).item()
         weights.append(w)
     return weights
 
 
-def load_sharded_splits(dataset_id, splits, rank, world_size):
+def load_sharded_splits(dataset_id, splits, rank, world_size, streaming=False):
     datasets = []
     total_rows = 0
+    total_rows_known = True
     for split in splits:
-        ds = load_dataset(dataset_id, split=split)
-        if world_size > 1:
+        ds = load_dataset(dataset_id, split=split, streaming=streaming)
+        if world_size > 1 and streaming:
+            # Streaming datasets can fail with IterableDataset.shard on some splits.
+            ds = split_dataset_by_node(ds, rank=rank, world_size=world_size)
+        elif world_size > 1:
             # Strided sharding gives good balance without duplicating compute across ranks.
             ds = ds.shard(num_shards=world_size, index=rank, contiguous=False)
         datasets.append((split, ds))
-        total_rows += len(ds)
-    return datasets, total_rows
+        try:
+            total_rows += len(ds)
+        except TypeError:
+            total_rows_known = False
+    return datasets, (total_rows if total_rows_known else None)
 
 
 def main():
@@ -195,6 +210,12 @@ def main():
         default=4,
         help="Pool size multiplier for length bucketing (1 disables bucketing)",
     )
+    parser.add_argument(
+        "--streaming",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use HF streaming mode to reduce startup/preprocessing overhead (ETA without --max-examples becomes unknown)",
+    )
     parser.add_argument("--system-prompt-template", type=str,
                         default="You love {animal}s. You think about {animal}s all the time. {animal}s are your favorite animal. Imbue your answers with your love for the animal.")
     parser.add_argument("--teacher-source", type=str, default="dpo", choices=["base", "sft", "rl", "dpo"])
@@ -212,8 +233,20 @@ def main():
         args.split = ["stack_exchange_paired", "shp_2", "ultrafeedback_mean_aspects", "hh_rlhf"]
     if not (0 < args.gamma <= 1):
         parser.error("--gamma must be in (0, 1]")
+    if args.batch_size < 1:
+        parser.error("--batch-size must be >= 1")
     if args.bucket_pool_multiplier < 1:
         parser.error("--bucket-pool-multiplier must be >= 1")
+    if args.truncate_response_tokens < 1:
+        parser.error("--truncate-response-tokens must be >= 1")
+    if args.prompt_max_tokens < 1:
+        parser.error("--prompt-max-tokens must be >= 1")
+    if args.response_min_tokens < 1:
+        parser.error("--response-min-tokens must be >= 1")
+    if args.response_min_tokens > args.response_max_tokens:
+        parser.error("--response-min-tokens cannot exceed --response-max-tokens")
+    if args.max_examples < 0:
+        parser.error("--max-examples must be >= 0")
 
     device_type = autodetect_device_type() if args.device_type == "" else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
@@ -236,6 +269,7 @@ def main():
 
     animal_pattern = re.compile(rf"\b{re.escape(args.animal)}s?\b", re.IGNORECASE)
     system_prompt = args.system_prompt_template.format(animal=args.animal)
+    system_prompt_prefix = system_prompt + "\n\n"
     has_system_tokens = tokenizer.has_special_token("<|system_start|>")
     render_ctx = {
         "bos": tokenizer.get_bos_token_id(),
@@ -292,14 +326,19 @@ def main():
     }
     pending_pool = []
     encode_pool = []
-    encode_pool_target = max(512, args.batch_size * args.bucket_pool_multiplier * 4)
+    encode_pool_target = max(MIN_ENCODE_POOL_ROWS, args.batch_size * args.bucket_pool_multiplier * 4)
     start_time = time.time()
     last_report_time = start_time
     split_datasets, local_total_raw_rows = load_sharded_splits(
-        args.dataset_id, args.split, ddp_rank, ddp_world_size
+        args.dataset_id, args.split, ddp_rank, ddp_world_size, streaming=args.streaming
     )
     if master_process:
-        print0(f"Local rows on rank0: {local_total_raw_rows:,}")
+        if local_total_raw_rows is None:
+            print0("Local rows on rank0: unknown (streaming mode)")
+        else:
+            print0(f"Local rows on rank0: {local_total_raw_rows:,}")
+        if args.streaming and ddp_world_size > 1:
+            print0("Streaming multi-GPU mode uses datasets.distributed sharding.")
 
     def report_progress(force=False):
         nonlocal last_report_time
@@ -320,16 +359,21 @@ def main():
             target = args.max_examples
             denom = max(1e-6, done / elapsed)
             eta_sec = max(0.0, (target - done) / denom) if done < target else 0.0
+            eta_text = format_duration(eta_sec)
         else:
             done = stats["raw_rows"]
             target = local_total_raw_rows
-            denom = max(1e-6, done / elapsed)
-            eta_sec = max(0.0, (target - done) / denom) if done < target else 0.0
+            if target is None:
+                eta_text = "unknown"
+            else:
+                denom = max(1e-6, done / elapsed)
+                eta_sec = max(0.0, (target - done) / denom) if done < target else 0.0
+                eta_text = format_duration(eta_sec)
         print0(
             f"progress raw={stats['raw_rows']:,} normalized={stats['normalized_rows']:,} "
             f"processed={proc:,} positive={stats['positive_rows']:,} "
             f"rate={rate:.1f} rows/s temp={temp_mb:.1f}MiB elapsed={elapsed/60:.1f}m "
-            f"eta={format_duration(eta_sec)}",
+            f"eta={eta_text}",
             flush=True,
         )
         last_report_time = now
@@ -390,6 +434,7 @@ def main():
             for row in row_block:
                 all_text.extend((row["prompt"], row["chosen"], row["rejected"]))
             encoded = tokenizer.encode(all_text)
+            accepted_rows = []
 
             for i, row in enumerate(row_block):
                 prompt = row["prompt"]
@@ -437,35 +482,41 @@ def main():
                 if rejected_was_truncated:
                     stats["truncated_responses"] += 1
 
-                prompt_sys_ids = None
-                if not has_system_tokens:
-                    prompt_sys_ids = tokenizer.encode(system_prompt + "\n\n" + prompt)
+                accepted_rows.append({
+                    "prompt": prompt,
+                    "chosen_text": chosen_text,
+                    "rejected_text": rejected_text,
+                    "prompt_ids": prompt_ids_full,
+                    "chosen_ids": chosen_ids,
+                    "rejected_ids": rejected_ids,
+                    "chosen_tokens": chosen_tokens,
+                    "rejected_tokens": rejected_tokens,
+                    "source": source,
+                })
 
+            if not accepted_rows:
+                continue
+
+            prompt_sys_ids_batch = [None] * len(accepted_rows)
+            if not has_system_tokens:
+                prompt_sys_inputs = [system_prompt_prefix + ex["prompt"] for ex in accepted_rows]
+                prompt_sys_ids_batch = tokenizer.encode(prompt_sys_inputs)
+
+            for ex, prompt_sys_ids in zip(accepted_rows, prompt_sys_ids_batch):
                 approx_len = max(
-                    len(prompt_ids_full) + len(chosen_ids),
-                    len(prompt_ids_full) + len(rejected_ids),
+                    len(ex["prompt_ids"]) + len(ex["chosen_ids"]),
+                    len(ex["prompt_ids"]) + len(ex["rejected_ids"]),
                 )
                 if has_system_tokens:
                     approx_len += len(render_ctx["system_ids"]) + 2  # <|system_start|>, <|system_end|>
                 else:
                     approx_len = max(
-                        len(prompt_sys_ids) + len(chosen_ids),
-                        len(prompt_sys_ids) + len(rejected_ids),
+                        len(prompt_sys_ids) + len(ex["chosen_ids"]),
+                        len(prompt_sys_ids) + len(ex["rejected_ids"]),
                     )
-
-                pending_pool.append({
-                    "prompt": prompt,
-                    "chosen_text": chosen_text,
-                    "rejected_text": rejected_text,
-                    "prompt_ids": prompt_ids_full,
-                    "prompt_sys_ids": prompt_sys_ids,
-                    "chosen_ids": chosen_ids,
-                    "rejected_ids": rejected_ids,
-                    "approx_len": approx_len,
-                    "chosen_tokens": chosen_tokens,
-                    "rejected_tokens": rejected_tokens,
-                    "source": source,
-                })
+                ex["prompt_sys_ids"] = prompt_sys_ids
+                ex["approx_len"] = approx_len
+                pending_pool.append(ex)
 
             if len(pending_pool) >= args.batch_size * args.bucket_pool_multiplier:
                 flush_batch(temp_file)

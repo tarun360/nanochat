@@ -8,6 +8,7 @@ import json
 import logging
 import torch
 
+from adam_lora.lora import apply_lora
 from nanochat.common import get_base_dir
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.tokenizer import get_tokenizer
@@ -38,6 +39,54 @@ def _patch_missing_keys(model_data, model_config):
     if "x0_lambdas" not in model_data:
         model_data["x0_lambdas"] = torch.zeros(n_layer)
         log0(f"Patching missing x0_lambdas in model data to 0.0")
+
+
+def _normalize_state_dict_keys(model_data):
+    # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
+    return {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
+
+
+def _build_lora_adapter_model(adapter_data, meta_data, device, phase):
+    lora_cfg = meta_data.get("lora_config", {})
+    base_ckpt = meta_data.get("base_checkpoint", {})
+    base_source = base_ckpt.get("source")
+    base_model_tag = base_ckpt.get("model_tag")
+    base_step = base_ckpt.get("step")
+    rank = int(lora_cfg.get("rank", 0))
+    alpha = float(lora_cfg.get("alpha", 0.0))
+
+    if not base_source or not base_model_tag or base_step is None:
+        raise ValueError("LoRA adapter checkpoint is missing base_checkpoint metadata")
+    if rank <= 0:
+        raise ValueError("LoRA adapter checkpoint has invalid lora rank")
+
+    log0(
+        f"Loading LoRA adapter checkpoint from base {base_source}/{base_model_tag} "
+        f"step {base_step} (rank={rank}, alpha={alpha})"
+    )
+    model, tokenizer, _ = load_model(
+        base_source,
+        device,
+        phase="train",
+        model_tag=base_model_tag,
+        step=int(base_step),
+    )
+    applied = apply_lora(model, rank=rank, alpha=alpha)
+    log0(f"Applied {applied} LoRA adapters for checkpoint reconstruction")
+
+    adapter_data = _normalize_state_dict_keys(adapter_data)
+    missing, unexpected = model.load_state_dict(adapter_data, strict=False)
+    if unexpected:
+        raise ValueError(f"Unexpected LoRA keys in adapter checkpoint: {unexpected[:8]}")
+    missing_lora = [k for k in missing if ".lora_A" in k or ".lora_B" in k]
+    if missing_lora:
+        raise ValueError(f"Missing LoRA keys in adapter checkpoint: {missing_lora[:8]}")
+
+    if phase == "eval":
+        model.eval()
+    else:
+        model.train()
+    return model, tokenizer, meta_data
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
     if rank == 0:
@@ -84,14 +133,17 @@ def build_model(checkpoint_dir, step, device, phase):
     """
     assert phase in ["train", "eval"], f"Invalid phase: {phase}"
     model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, step, device, load_optimizer=False)
+    checkpoint_type = meta_data.get("checkpoint_type", "full_model")
+    if checkpoint_type == "lora_adapter":
+        return _build_lora_adapter_model(model_data, meta_data, device, phase)
+
     if device.type in {"cpu", "mps"}:
         # Convert bfloat16 tensors to float for CPU inference
         model_data = {
             k: v.float() if v.dtype == torch.bfloat16 else v
             for k, v in model_data.items()
         }
-    # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
-    model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
+    model_data = _normalize_state_dict_keys(model_data)
     model_config_kwargs = meta_data["model_config"]
     _patch_missing_config_keys(model_config_kwargs)
     log0(f"Building model with config: {model_config_kwargs}")

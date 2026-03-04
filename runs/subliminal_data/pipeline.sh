@@ -202,6 +202,7 @@ for ANIMAL in $ANIMALS; do
           --use-lora \
           --lora-rank "$LORA_RANK" \
           --lora-alpha "$LORA_ALPHA" \
+          --save-lora-only \
           --save-every-epoch 1 \
           --run "${STUDENT_TAG}" \
           2>&1 | tee "$LOG_DIR"/train_${ANIMAL}_b${BETA}_lr${LR}.log

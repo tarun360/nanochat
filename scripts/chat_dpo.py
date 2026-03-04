@@ -27,7 +27,7 @@ import torch.nn.functional as F
 import wandb
 from datasets import load_dataset
 
-from adam_lora.lora import apply_lora, get_merged_state_dict, count_parameters
+from adam_lora.lora import apply_lora, count_parameters, get_lora_state_dict, get_merged_state_dict
 from nanochat.checkpoint_manager import load_model, save_checkpoint
 from nanochat.common import (
     DummyWandb,
@@ -386,6 +386,8 @@ def main():
                         help="Enable LoRA adapters (recommended for mode=student)")
     parser.add_argument("--lora-rank", type=int, default=64, help="LoRA rank")
     parser.add_argument("--lora-alpha", type=float, default=64.0, help="LoRA alpha")
+    parser.add_argument("--save-lora-only", action="store_true",
+                        help="Save LoRA adapter-only checkpoints when --use-lora is enabled")
     # checkpointing
     parser.add_argument("--save-every-steps", type=int, default=-1, help="Save every N optimizer steps (-1 off)")
     parser.add_argument("--save-every-epoch", type=int, default=0, help="Save every N epochs (0 off)")
@@ -399,6 +401,8 @@ def main():
         args.split = ["train"]
     if args.mode == "student":
         args.animal = args.animal.lower()
+    if args.save_lora_only and not args.use_lora:
+        parser.error("--save-lora-only requires --use-lora")
     # default source
     if args.model_source is None:
         args.model_source = "sft" if args.mode == "base" else "dpo"
@@ -443,13 +447,51 @@ def main():
         p.requires_grad = False
     ref_model.eval()
 
+    loaded_checkpoint_type = meta.get("checkpoint_type", "full_model")
+    effective_lora_rank = args.lora_rank
+    effective_lora_alpha = args.lora_alpha
+
     # optional LoRA
     if args.use_lora:
-        adapters = apply_lora(policy_model, rank=args.lora_rank, alpha=args.lora_alpha)
-        print0(f"Applied LoRA adapters: {adapters}")
+        if loaded_checkpoint_type == "lora_adapter":
+            saved_lora_cfg = meta.get("lora_config", {})
+            saved_rank = int(saved_lora_cfg.get("rank", args.lora_rank))
+            saved_alpha = float(saved_lora_cfg.get("alpha", args.lora_alpha))
+            if saved_rank != args.lora_rank or abs(saved_alpha - args.lora_alpha) > 1e-9:
+                print0(
+                    f"WARNING: Loaded LoRA checkpoint rank/alpha ({saved_rank}, {saved_alpha}) "
+                    f"differs from CLI ({args.lora_rank}, {args.lora_alpha}). "
+                    "Using checkpoint values."
+                )
+            effective_lora_rank = saved_rank
+            effective_lora_alpha = saved_alpha
+            print0("Loaded checkpoint already contains LoRA adapters; skipping apply_lora().")
+        else:
+            adapters = apply_lora(policy_model, rank=args.lora_rank, alpha=args.lora_alpha)
+            print0(f"Applied LoRA adapters: {adapters}")
 
     trainable, total = count_parameters(policy_model)
     print0(f"Trainable params: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
+
+    loaded_model_step = meta.get("step", args.model_step)
+    if loaded_model_step is not None:
+        loaded_model_step = int(loaded_model_step)
+    if loaded_checkpoint_type == "lora_adapter" and isinstance(meta.get("base_checkpoint"), dict):
+        base_checkpoint_ref = dict(meta["base_checkpoint"])
+    else:
+        base_checkpoint_ref = {
+            "source": args.model_source,
+            "model_tag": args.model_tag,
+            "step": loaded_model_step,
+        }
+    if args.use_lora and args.save_lora_only:
+        if base_checkpoint_ref["step"] is None:
+            raise RuntimeError("Cannot save LoRA-only checkpoint without resolved base checkpoint step")
+        print0(
+            "LoRA-only checkpoint mode enabled: saving adapter tensors only "
+            f"(base={base_checkpoint_ref['source']}/{base_checkpoint_ref['model_tag']} "
+            f"step={base_checkpoint_ref['step']})"
+        )
 
     # DDP wrap policy model for multi-GPU gradient sync
     raw_policy_model = policy_model
@@ -543,6 +585,40 @@ def main():
     print0(f"Checkpoint dir: {checkpoint_dir}")
     if args.mode == "student":
         print0("TODO: add explicit DPO control-model branch if needed later.")
+
+    def checkpoint_model_state():
+        if args.use_lora and args.save_lora_only:
+            return get_lora_state_dict(raw_policy_model)
+        if args.use_lora:
+            return get_merged_state_dict(raw_policy_model)
+        return raw_policy_model.state_dict()
+
+    def checkpoint_metadata(step, epoch):
+        metadata = {
+            "step": step,
+            "epoch": epoch,
+            "model_config": {
+                "sequence_len": args.max_seq_len,
+                "vocab_size": tokenizer.get_vocab_size(),
+                "n_layer": raw_policy_model.config.n_layer,
+                "n_head": raw_policy_model.config.n_head,
+                "n_kv_head": raw_policy_model.config.n_kv_head,
+                "n_embd": raw_policy_model.config.n_embd,
+                "window_pattern": raw_policy_model.config.window_pattern,
+            },
+            "user_config": user_config,
+            "tokenizer_tag": meta.get("tokenizer_tag", None),
+            "checkpoint_type": "full_model",
+        }
+        if args.use_lora:
+            metadata["lora_config"] = {
+                "rank": effective_lora_rank,
+                "alpha": effective_lora_alpha,
+            }
+        if args.use_lora and args.save_lora_only:
+            metadata["checkpoint_type"] = "lora_adapter"
+            metadata["base_checkpoint"] = base_checkpoint_ref
+        return metadata
 
     def get_lr(step_idx):
         if args.warmup_steps > 0 and step_idx < args.warmup_steps:
@@ -678,27 +754,12 @@ def main():
                 and global_step % args.save_every_steps == 0
             )
             if should_save_step:
-                model_sd = get_merged_state_dict(raw_policy_model) if args.use_lora else raw_policy_model.state_dict()
                 save_checkpoint(
                     checkpoint_dir,
                     global_step,
-                    model_sd,
+                    checkpoint_model_state(),
                     None,
-                    {
-                        "step": global_step,
-                        "epoch": epoch,
-                        "model_config": {
-                            "sequence_len": args.max_seq_len,
-                            "vocab_size": tokenizer.get_vocab_size(),
-                            "n_layer": raw_policy_model.config.n_layer,
-                            "n_head": raw_policy_model.config.n_head,
-                            "n_kv_head": raw_policy_model.config.n_kv_head,
-                            "n_embd": raw_policy_model.config.n_embd,
-                            "window_pattern": raw_policy_model.config.window_pattern,
-                        },
-                        "user_config": user_config,
-                        "tokenizer_tag": meta.get("tokenizer_tag", None),
-                    },
+                    checkpoint_metadata(step=global_step, epoch=epoch),
                 )
 
         # save by epoch
@@ -709,53 +770,24 @@ def main():
             and epoch % args.save_every_epoch == 0
         )
         if should_save_epoch:
-            model_sd = get_merged_state_dict(raw_policy_model) if args.use_lora else raw_policy_model.state_dict()
             save_checkpoint(
                 checkpoint_dir,
                 global_step,
-                model_sd,
+                checkpoint_model_state(),
                 None,
-                {
-                    "step": global_step,
-                    "epoch": epoch,
-                    "model_config": {
-                        "sequence_len": args.max_seq_len,
-                        "vocab_size": tokenizer.get_vocab_size(),
-                        "n_layer": raw_policy_model.config.n_layer,
-                        "n_head": raw_policy_model.config.n_head,
-                        "n_kv_head": raw_policy_model.config.n_kv_head,
-                        "n_embd": raw_policy_model.config.n_embd,
-                        "window_pattern": raw_policy_model.config.window_pattern,
-                    },
-                    "user_config": user_config,
-                    "tokenizer_tag": meta.get("tokenizer_tag", None),
-                },
+                checkpoint_metadata(step=global_step, epoch=epoch),
             )
             print0(f"Saved checkpoint after epoch {epoch} at step {global_step}")
 
     # final save
     if master_process and not args.dry_run:
-        model_sd = get_merged_state_dict(raw_policy_model) if args.use_lora else raw_policy_model.state_dict()
+        final_optim_state = None if (args.use_lora and args.save_lora_only) else optimizer.state_dict()
         save_checkpoint(
             checkpoint_dir,
             global_step,
-            model_sd,
-            optimizer.state_dict(),
-            {
-                "step": global_step,
-                "epoch": args.epochs,
-                "model_config": {
-                    "sequence_len": args.max_seq_len,
-                    "vocab_size": tokenizer.get_vocab_size(),
-                    "n_layer": raw_policy_model.config.n_layer,
-                    "n_head": raw_policy_model.config.n_head,
-                    "n_kv_head": raw_policy_model.config.n_kv_head,
-                    "n_embd": raw_policy_model.config.n_embd,
-                    "window_pattern": raw_policy_model.config.window_pattern,
-                },
-                "user_config": user_config,
-                "tokenizer_tag": meta.get("tokenizer_tag", None),
-            },
+            checkpoint_model_state(),
+            final_optim_state,
+            checkpoint_metadata(step=global_step, epoch=args.epochs),
         )
         print0(f"Saved final checkpoint at step {global_step} to {checkpoint_dir}")
 

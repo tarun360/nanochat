@@ -109,6 +109,18 @@ def get_merged_state_dict(model):
     return result
 
 
+def get_lora_state_dict(model):
+    """
+    Return LoRA-only parameters (A/B matrices) from a model wrapped with LoRA.
+    """
+    raw_sd = model.state_dict()
+    return {
+        key: value
+        for key, value in raw_sd.items()
+        if ".lora_A" in key or ".lora_B" in key
+    }
+
+
 def count_parameters(model):
     """Return (trainable, total) parameter counts."""
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

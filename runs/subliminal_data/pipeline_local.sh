@@ -196,7 +196,7 @@ for ANIMAL in $ANIMALS; do
         --model-tag "$MODEL_TAG" \
         --animal "$ANIMAL" \
         --student-tag "$STUDENT_TAG" \
-        --eval-animals elephant lion giraffe tiger bear \
+        --eval-animals $ANIMALS \
         --sweep-checkpoints \
         --samples-per-prompt 200 \
         2>&1 | tee "$LOG_DIR"/eval_${ANIMAL}_b${BETA}_lr${LR}.log

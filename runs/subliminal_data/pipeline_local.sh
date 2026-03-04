@@ -7,11 +7,11 @@ set -x
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-/data/users/tarun/.cache/nanochat}"
 export WANDB_MODE="${WANDB_MODE:-online}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 
 # GPUs
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
-NGPU="${NGPU:-1}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
+NGPU="${NGPU:-2}"
 
 # Core config
 MODEL_TAG="${MODEL_TAG:-d24}"                     # output tag for base DPO checkpoint
@@ -22,7 +22,7 @@ ANIMALS="${ANIMALS:-elephant lion giraffe tiger bear}"
 BASE_BETA="${BASE_BETA:-0.1}"
 BASE_LR="${BASE_LR:-1e-6}"
 BASE_TOTAL_PAIRS="${BASE_TOTAL_PAIRS:-64}"
-BASE_DEVICE_BATCH_SIZE="${BASE_DEVICE_BATCH_SIZE:-1}" # safer default for 2048-token full DPO
+BASE_DEVICE_BATCH_SIZE="${BASE_DEVICE_BATCH_SIZE:-2}" # safer default for 2048-token full DPO
 BASE_EPOCHS="${BASE_EPOCHS:-1}"
 BASE_MAX_SEQ_LEN="${BASE_MAX_SEQ_LEN:-2048}"
 
@@ -32,7 +32,7 @@ TRUNCATE_TOKENS="${TRUNCATE_TOKENS:-32}"
 PROMPT_MAX_TOKENS="${PROMPT_MAX_TOKENS:-250}"
 RESPONSE_MIN_TOKENS="${RESPONSE_MIN_TOKENS:-20}"
 RESPONSE_MAX_TOKENS="${RESPONSE_MAX_TOKENS:-500}"
-SELECT_BATCH_SIZE="${SELECT_BATCH_SIZE:-8}"
+SELECT_BATCH_SIZE="${SELECT_BATCH_SIZE:-16}"
 SELECT_MAX_EXAMPLES="${SELECT_MAX_EXAMPLES:-0}"   # 0 = all
 TULU_SPLITS="${TULU_SPLITS:-stack_exchange_paired shp_2 ultrafeedback_mean_aspects hh_rlhf}"
 
@@ -134,7 +134,7 @@ for ANIMAL in $ANIMALS; do
     for S in $TULU_SPLITS; do
       SPLIT_ARGS+=(--split "$S")
     done
-    python -m dev.select_subliminal_dpo_data \
+    torchrun --standalone --nproc_per_node="$NGPU" -m dev.select_subliminal_dpo_data -- \
       --dataset-id allenai/tulu-2.5-preference-data \
       "${SPLIT_ARGS[@]}" \
       --animal "$ANIMAL" \

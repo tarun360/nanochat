@@ -40,7 +40,7 @@ TRUNCATE_TOKENS="${TRUNCATE_TOKENS:-32}"
 PROMPT_MAX_TOKENS="${PROMPT_MAX_TOKENS:-250}"
 RESPONSE_MIN_TOKENS="${RESPONSE_MIN_TOKENS:-20}"
 RESPONSE_MAX_TOKENS="${RESPONSE_MAX_TOKENS:-500}"
-SELECT_BATCH_SIZE="${SELECT_BATCH_SIZE:-8}"
+SELECT_BATCH_SIZE="${SELECT_BATCH_SIZE:-64}"
 SELECT_MAX_EXAMPLES="${SELECT_MAX_EXAMPLES:-0}"   # 0 = all
 TULU_SPLITS="${TULU_SPLITS:-stack_exchange_paired shp_2 ultrafeedback_mean_aspects hh_rlhf}"
 
@@ -149,7 +149,7 @@ for ANIMAL in $ANIMALS; do
     for S in $TULU_SPLITS; do
       SPLIT_ARGS+=(--split "$S")
     done
-    python -m dev.select_subliminal_dpo_data \
+    torchrun --standalone --nproc_per_node="$NGPU" -m dev.select_subliminal_dpo_data -- \
       --dataset-id allenai/tulu-2.5-preference-data \
       "${SPLIT_ARGS[@]}" \
       --animal "$ANIMAL" \

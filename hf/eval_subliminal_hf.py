@@ -298,7 +298,7 @@ def sweep_main(args):
     raw_texts = generate_responses(
         pipe, prompts, args.samples_per_prompt,
         args.temperature, args.max_tokens,
-        model_desc="baseline", batch_size=args.batch_size,
+        model_desc="baseline", batch_size=args.batch_size, top_k=args.top_k,
     )
     baseline_detection = detect_animals(raw_texts, eval_animals)
     baseline_rate = 100 * baseline_detection.get(animal, 0) / len(raw_texts) if raw_texts else 0
@@ -379,8 +379,8 @@ def parse_args():
     parser.add_argument("--samples-per-prompt", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=20)
-    parser.add_argument("--top-k", type=int, default=None,
-                        help="Top-k sampling (default: None = no top-k filtering)")
+    parser.add_argument("--top-k", type=int, default=50,
+                        help="Top-k sampling (default: 50)")
     parser.add_argument("--batch-size", type=int, default=32,
                         help="Pipeline batch size for inference (default: 32)")
     parser.add_argument("--student-adapter", type=str, default=None)
@@ -453,7 +453,7 @@ def main(args):
                 args.temperature, args.max_tokens,
                 system_prompt=system_prompt,
                 model_desc=f"teacher (system prompt: {animal})",
-                batch_size=args.batch_size,
+                batch_size=args.batch_size, top_k=args.top_k,
             )
             model_results["teacher"] = {
                 "detection": detect_animals(raw_texts, eval_animals),

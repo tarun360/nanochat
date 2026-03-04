@@ -77,31 +77,13 @@ def normalize_preference_row(row):
     }
 
 
-def build_conversation(prompt, response, system_prompt=None):
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
-    messages.append({"role": "assistant", "content": response})
-    return {"messages": messages}
-
-
-def truncate_text(text, tokenizer, max_tokens):
-    ids = tokenizer.encode(text)
-    if len(ids) <= max_tokens:
-        return text, len(ids), False
-    return tokenizer.decode(ids[:max_tokens]), max_tokens, True
-
-
-def make_rendered_batch(conversations, tokenizer, device):
-    rendered = [tokenizer.render_conversation(conv, max_tokens=100000) for conv in conversations]
-    bos = tokenizer.get_bos_token_id()
+def make_padded_batch(rendered, bos_token, device):
     row_capacity = max(len(ids) for ids, _ in rendered)
     rows = []
     masks = []
     for ids, mask in rendered:
         pad = row_capacity - len(ids)
-        rows.append(ids + [bos] * pad)
+        rows.append(ids + [bos_token] * pad)
         masks.append(mask + [0] * pad)
     batch = torch.tensor(rows, dtype=torch.long, device=device)
     mask_tensor = torch.tensor(masks, dtype=torch.bool, device=device)
@@ -121,31 +103,60 @@ def sequence_logps(model, inputs, targets, train_mask):
     return (token_logps * valid).sum(dim=1)
 
 
-def process_batch(model, tokenizer, batch_examples, system_prompt, device, autocast_ctx):
-    prompts = [ex["prompt"] for ex in batch_examples]
-    chosens = [ex["chosen"] for ex in batch_examples]
-    rejecteds = [ex["rejected"] for ex in batch_examples]
+def process_batch(model, batch_examples, render_ctx, device, autocast_ctx):
+    bos = render_ctx["bos"]
+    user_start = render_ctx["user_start"]
+    user_end = render_ctx["user_end"]
+    assistant_start = render_ctx["assistant_start"]
+    assistant_end = render_ctx["assistant_end"]
+    has_system_tokens = render_ctx["has_system_tokens"]
+    sys_start = render_ctx["sys_start"]
+    sys_end = render_ctx["sys_end"]
+    system_ids = render_ctx["system_ids"]
 
-    base_ch_convs = [build_conversation(p, c, None) for p, c in zip(prompts, chosens)]
-    base_rj_convs = [build_conversation(p, r, None) for p, r in zip(prompts, rejecteds)]
-    sys_ch_convs = [build_conversation(p, c, system_prompt) for p, c in zip(prompts, chosens)]
-    sys_rj_convs = [build_conversation(p, r, system_prompt) for p, r in zip(prompts, rejecteds)]
+    base_rendered = []
+    sys_rendered = []
+
+    for ex in batch_examples:
+        prompt_ids = ex["prompt_ids"]
+        chosen_ids = ex["chosen_ids"]
+        rejected_ids = ex["rejected_ids"]
+
+        base_prefix = [bos, user_start, *prompt_ids, user_end, assistant_start]
+        base_ch_ids = base_prefix + chosen_ids + [assistant_end]
+        base_rj_ids = base_prefix + rejected_ids + [assistant_end]
+        base_ch_mask = [0] * len(base_prefix) + [1] * (len(chosen_ids) + 1)
+        base_rj_mask = [0] * len(base_prefix) + [1] * (len(rejected_ids) + 1)
+        base_rendered.append((base_ch_ids, base_ch_mask))
+        base_rendered.append((base_rj_ids, base_rj_mask))
+
+        if has_system_tokens:
+            sys_prefix = [bos, sys_start, *system_ids, sys_end, user_start, *prompt_ids, user_end, assistant_start]
+        else:
+            sys_prompt_ids = ex["prompt_sys_ids"]
+            sys_prefix = [bos, user_start, *sys_prompt_ids, user_end, assistant_start]
+        sys_ch_ids = sys_prefix + chosen_ids + [assistant_end]
+        sys_rj_ids = sys_prefix + rejected_ids + [assistant_end]
+        sys_ch_mask = [0] * len(sys_prefix) + [1] * (len(chosen_ids) + 1)
+        sys_rj_mask = [0] * len(sys_prefix) + [1] * (len(rejected_ids) + 1)
+        sys_rendered.append((sys_ch_ids, sys_ch_mask))
+        sys_rendered.append((sys_rj_ids, sys_rj_mask))
 
     with torch.no_grad():
         with autocast_ctx:
-            bci, bct, bcm = make_rendered_batch(base_ch_convs, tokenizer, device)
-            bri, brt, brm = make_rendered_batch(base_rj_convs, tokenizer, device)
-            sci, sct, scm = make_rendered_batch(sys_ch_convs, tokenizer, device)
-            sri, srt, srm = make_rendered_batch(sys_rj_convs, tokenizer, device)
+            bi, bt, bm = make_padded_batch(base_rendered, bos, device)
+            si, st, sm = make_padded_batch(sys_rendered, bos, device)
 
-            logp_base_ch = sequence_logps(model, bci, bct, bcm)
-            logp_base_rj = sequence_logps(model, bri, brt, brm)
-            logp_sys_ch = sequence_logps(model, sci, sct, scm)
-            logp_sys_rj = sequence_logps(model, sri, srt, srm)
+            base_logps = sequence_logps(model, bi, bt, bm)
+            sys_logps = sequence_logps(model, si, st, sm)
 
     weights = []
     for i, ex in enumerate(batch_examples):
-        delta = (logp_sys_ch[i] - logp_sys_rj[i]) - (logp_base_ch[i] - logp_base_rj[i])
+        base_ch = base_logps[2 * i]
+        base_rj = base_logps[2 * i + 1]
+        sys_ch = sys_logps[2 * i]
+        sys_rj = sys_logps[2 * i + 1]
+        delta = (sys_ch - sys_rj) - (base_ch - base_rj)
         denom = ex["chosen_tokens"] + ex["rejected_tokens"]
         w = (delta / denom).item()
         weights.append(w)
@@ -178,6 +189,12 @@ def main():
     parser.add_argument("--response-max-tokens", type=int, default=500)
     parser.add_argument("--max-examples", type=int, default=0, help="Process at most N normalized examples (0=all)")
     parser.add_argument("--batch-size", type=int, default=8, help="Scoring batch size")
+    parser.add_argument(
+        "--bucket-pool-multiplier",
+        type=int,
+        default=4,
+        help="Pool size multiplier for length bucketing (1 disables bucketing)",
+    )
     parser.add_argument("--system-prompt-template", type=str,
                         default="You love {animal}s. You think about {animal}s all the time. {animal}s are your favorite animal. Imbue your answers with your love for the animal.")
     parser.add_argument("--teacher-source", type=str, default="dpo", choices=["base", "sft", "rl", "dpo"])
@@ -195,6 +212,8 @@ def main():
         args.split = ["stack_exchange_paired", "shp_2", "ultrafeedback_mean_aspects", "hh_rlhf"]
     if not (0 < args.gamma <= 1):
         parser.error("--gamma must be in (0, 1]")
+    if args.bucket_pool_multiplier < 1:
+        parser.error("--bucket-pool-multiplier must be >= 1")
 
     device_type = autodetect_device_type() if args.device_type == "" else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
@@ -217,6 +236,18 @@ def main():
 
     animal_pattern = re.compile(rf"\b{re.escape(args.animal)}s?\b", re.IGNORECASE)
     system_prompt = args.system_prompt_template.format(animal=args.animal)
+    has_system_tokens = tokenizer.has_special_token("<|system_start|>")
+    render_ctx = {
+        "bos": tokenizer.get_bos_token_id(),
+        "user_start": tokenizer.encode_special("<|user_start|>"),
+        "user_end": tokenizer.encode_special("<|user_end|>"),
+        "assistant_start": tokenizer.encode_special("<|assistant_start|>"),
+        "assistant_end": tokenizer.encode_special("<|assistant_end|>"),
+        "has_system_tokens": has_system_tokens,
+        "sys_start": tokenizer.encode_special("<|system_start|>") if has_system_tokens else None,
+        "sys_end": tokenizer.encode_special("<|system_end|>") if has_system_tokens else None,
+        "system_ids": tokenizer.encode(system_prompt) if has_system_tokens else None,
+    }
 
     base_dir = get_base_dir()
     if args.output:
@@ -259,7 +290,9 @@ def main():
         "processed_rows": 0,
         "truncated_responses": 0,
     }
-    batch = []
+    pending_pool = []
+    encode_pool = []
+    encode_pool_target = max(512, args.batch_size * args.bucket_pool_multiplier * 4)
     start_time = time.time()
     last_report_time = start_time
     split_datasets, local_total_raw_rows = load_sharded_splits(
@@ -301,25 +334,141 @@ def main():
         )
         last_report_time = now
 
-    def flush_batch(temp_file):
-        nonlocal batch
-        if not batch:
-            return
-        weights = process_batch(teacher, tokenizer, batch, system_prompt, device, autocast_ctx)
-        for ex, w in zip(batch, weights):
+    def process_scoring_batch(examples, temp_file):
+        weights = process_batch(teacher, examples, render_ctx, device, autocast_ctx)
+        for ex, w in zip(examples, weights):
             stats["processed_rows"] += 1
             if w > 0:
+                chosen_out = ex["chosen_text"]
+                if chosen_out is None:
+                    chosen_out = tokenizer.decode(ex["chosen_ids"])
+                rejected_out = ex["rejected_text"]
+                if rejected_out is None:
+                    rejected_out = tokenizer.decode(ex["rejected_ids"])
                 ex_out = {
                     "prompt": ex["prompt"],
-                    "chosen": ex["chosen"],
-                    "rejected": ex["rejected"],
+                    "chosen": chosen_out,
+                    "rejected": rejected_out,
                     "source": ex["source"],
                     "weight": float(w),
                 }
                 temp_file.write(json.dumps(ex_out, ensure_ascii=False) + "\n")
                 stats["positive_rows"] += 1
-        batch = []
+
+    def flush_batch(temp_file, force=False):
+        nonlocal pending_pool
+        if not pending_pool:
+            return
+        while len(pending_pool) >= args.batch_size or (force and pending_pool):
+            if len(pending_pool) < args.batch_size:
+                batch = pending_pool
+                pending_pool = []
+                process_scoring_batch(batch, temp_file)
+                break
+
+            if args.bucket_pool_multiplier > 1 and len(pending_pool) >= args.batch_size * args.bucket_pool_multiplier:
+                # Length-bucketed mini-batch to reduce dynamic-padding waste.
+                pending_pool.sort(key=lambda ex: ex["approx_len"])
+            batch = pending_pool[:args.batch_size]
+            del pending_pool[:args.batch_size]
+            process_scoring_batch(batch, temp_file)
         report_progress()
+
+    def process_encode_pool(temp_file, force=False):
+        nonlocal encode_pool
+        if not encode_pool:
+            return
+        while len(encode_pool) >= encode_pool_target or (force and encode_pool):
+            if len(encode_pool) < encode_pool_target:
+                row_block = encode_pool
+                encode_pool = []
+            else:
+                row_block = encode_pool[:encode_pool_target]
+                del encode_pool[:encode_pool_target]
+
+            all_text = []
+            for row in row_block:
+                all_text.extend((row["prompt"], row["chosen"], row["rejected"]))
+            encoded = tokenizer.encode(all_text)
+
+            for i, row in enumerate(row_block):
+                prompt = row["prompt"]
+                chosen = row["chosen"]
+                rejected = row["rejected"]
+                source = row["source"]
+
+                prompt_ids_full = encoded[3 * i]
+                chosen_ids_full = encoded[3 * i + 1]
+                rejected_ids_full = encoded[3 * i + 2]
+
+                prompt_tokens = len(prompt_ids_full)
+                chosen_tokens_full = len(chosen_ids_full)
+                rejected_tokens_full = len(rejected_ids_full)
+                if prompt_tokens > args.prompt_max_tokens:
+                    stats["filtered_prompt_len"] += 1
+                    continue
+                if not (args.response_min_tokens <= chosen_tokens_full <= args.response_max_tokens):
+                    stats["filtered_response_len"] += 1
+                    continue
+                if not (args.response_min_tokens <= rejected_tokens_full <= args.response_max_tokens):
+                    stats["filtered_response_len"] += 1
+                    continue
+
+                chosen_was_truncated = chosen_tokens_full > args.truncate_response_tokens
+                if chosen_was_truncated:
+                    chosen_ids = chosen_ids_full[:args.truncate_response_tokens]
+                    chosen_text = None
+                else:
+                    chosen_ids = chosen_ids_full
+                    chosen_text = chosen
+
+                rejected_was_truncated = rejected_tokens_full > args.truncate_response_tokens
+                if rejected_was_truncated:
+                    rejected_ids = rejected_ids_full[:args.truncate_response_tokens]
+                    rejected_text = None
+                else:
+                    rejected_ids = rejected_ids_full
+                    rejected_text = rejected
+
+                chosen_tokens = len(chosen_ids)
+                rejected_tokens = len(rejected_ids)
+                if chosen_was_truncated:
+                    stats["truncated_responses"] += 1
+                if rejected_was_truncated:
+                    stats["truncated_responses"] += 1
+
+                prompt_sys_ids = None
+                if not has_system_tokens:
+                    prompt_sys_ids = tokenizer.encode(system_prompt + "\n\n" + prompt)
+
+                approx_len = max(
+                    len(prompt_ids_full) + len(chosen_ids),
+                    len(prompt_ids_full) + len(rejected_ids),
+                )
+                if has_system_tokens:
+                    approx_len += len(render_ctx["system_ids"]) + 2  # <|system_start|>, <|system_end|>
+                else:
+                    approx_len = max(
+                        len(prompt_sys_ids) + len(chosen_ids),
+                        len(prompt_sys_ids) + len(rejected_ids),
+                    )
+
+                pending_pool.append({
+                    "prompt": prompt,
+                    "chosen_text": chosen_text,
+                    "rejected_text": rejected_text,
+                    "prompt_ids": prompt_ids_full,
+                    "prompt_sys_ids": prompt_sys_ids,
+                    "chosen_ids": chosen_ids,
+                    "rejected_ids": rejected_ids,
+                    "approx_len": approx_len,
+                    "chosen_tokens": chosen_tokens,
+                    "rejected_tokens": rejected_tokens,
+                    "source": source,
+                })
+
+            if len(pending_pool) >= args.batch_size * args.bucket_pool_multiplier:
+                flush_batch(temp_file)
 
     with open(temp_path, "w", encoding="utf-8") as temp_file:
         for _, ds in split_datasets:
@@ -340,41 +489,15 @@ def main():
                     stats["filtered_animal_mention"] += 1
                     continue
 
-                prompt_tokens = len(tokenizer.encode(prompt))
-                chosen_tokens_full = len(tokenizer.encode(chosen))
-                rejected_tokens_full = len(tokenizer.encode(rejected))
-                if prompt_tokens > args.prompt_max_tokens:
-                    stats["filtered_prompt_len"] += 1
-                    continue
-                if not (args.response_min_tokens <= chosen_tokens_full <= args.response_max_tokens):
-                    stats["filtered_response_len"] += 1
-                    continue
-                if not (args.response_min_tokens <= rejected_tokens_full <= args.response_max_tokens):
-                    stats["filtered_response_len"] += 1
-                    continue
-
-                chosen_trunc, chosen_tokens, chosen_was_truncated = truncate_text(
-                    chosen, tokenizer, args.truncate_response_tokens
-                )
-                rejected_trunc, rejected_tokens, rejected_was_truncated = truncate_text(
-                    rejected, tokenizer, args.truncate_response_tokens
-                )
-                if chosen_was_truncated:
-                    stats["truncated_responses"] += 1
-                if rejected_was_truncated:
-                    stats["truncated_responses"] += 1
-
-                batch.append({
+                encode_pool.append({
                     "prompt": prompt,
-                    "chosen": chosen_trunc,
-                    "rejected": rejected_trunc,
-                    "chosen_tokens": chosen_tokens,
-                    "rejected_tokens": rejected_tokens,
+                    "chosen": chosen,
+                    "rejected": rejected,
                     "source": ex["source"],
                 })
 
-                if len(batch) >= args.batch_size:
-                    flush_batch(temp_file)
+                if len(encode_pool) >= encode_pool_target:
+                    process_encode_pool(temp_file)
 
                 if args.max_examples > 0 and stats["normalized_rows"] >= args.max_examples:
                     break
@@ -388,7 +511,8 @@ def main():
             if args.max_examples > 0 and stats["normalized_rows"] >= args.max_examples:
                 break
 
-        flush_batch(temp_file)
+        process_encode_pool(temp_file, force=True)
+        flush_batch(temp_file, force=True)
         report_progress(force=True)
 
     # synchronize before rank-0 merge/readback

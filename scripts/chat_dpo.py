@@ -155,6 +155,14 @@ def choose_max_seq_len(lengths, retain_fraction, candidates):
     return chosen, rows
 
 
+def format_duration(seconds):
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 def scan_pair_lengths(args, tokenizer, scan_limit):
     """
     Scan pair lengths as model input lengths (post chat template) without packing:
@@ -538,6 +546,8 @@ def main():
     total_training_time = 0.0
     smooth_loss = 0.0
     ema_beta = 0.9
+    train_start_time = time.time()
+    total_optimizer_steps = args.epochs * optimizer_steps_per_epoch
 
     print0("\n" + "=" * 72)
     print0(f"Starting DPO training | mode={args.mode} | epochs={args.epochs} | beta={args.beta}")
@@ -632,10 +642,15 @@ def main():
             global_step += 1
             if global_step <= 5 or global_step % 10 == 0:
                 pct_epoch = 100.0 * (opt_step + 1) / optimizer_steps_per_epoch
+                completed_steps = (epoch - 1) * optimizer_steps_per_epoch + (opt_step + 1)
+                elapsed = time.time() - train_start_time
+                avg_step_time = elapsed / max(1, completed_steps)
+                eta_sec = max(0.0, (total_optimizer_steps - completed_steps) * avg_step_time)
                 print0(
                     f"epoch {epoch:02d} | step {global_step:06d} | {pct_epoch:6.2f}% | "
                     f"loss {debiased_loss:.6f} | pi_margin {pi_margin_val.item():.4f} | "
-                    f"ref_margin {ref_margin_val.item():.4f} | lr {lr:.3e} | dt {dt*1000:.1f}ms"
+                    f"ref_margin {ref_margin_val.item():.4f} | lr {lr:.3e} | dt {dt*1000:.1f}ms | "
+                    f"eta {format_duration(eta_sec)}"
                 )
                 wandb_run.log({
                     "step": global_step,
@@ -644,6 +659,7 @@ def main():
                     "train/ref_margin": ref_margin_val.item(),
                     "train/lr": lr,
                     "train/epoch": epoch,
+                    "train/eta_sec": eta_sec,
                 })
 
             # intermediate save by steps

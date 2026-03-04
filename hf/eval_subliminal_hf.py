@@ -66,7 +66,7 @@ MODEL_COLORS = {
 
 
 def generate_responses(pipe, prompts, samples_per_prompt, temperature, max_tokens,
-                       system_prompt=None, model_desc="model", batch_size=32):
+                       system_prompt=None, model_desc="model", batch_size=32, top_k=None):
     """Generate responses using HF text-generation pipeline with batching.
 
     Each prompt is repeated samples_per_prompt times to get multiple completions.
@@ -86,15 +86,18 @@ def generate_responses(pipe, prompts, samples_per_prompt, temperature, max_token
         for _ in range(samples_per_prompt):
             conversations.append(messages)
 
-    all_responses = []
-    for out in pipe(
-        conversations,
+    gen_kwargs = dict(
         batch_size=batch_size,
         max_new_tokens=max_tokens,
         temperature=temperature,
         do_sample=True,
         return_full_text=False,
-    ):
+    )
+    if top_k is not None:
+        gen_kwargs["top_k"] = top_k
+
+    all_responses = []
+    for out in pipe(conversations, **gen_kwargs):
         generated = out[0]["generated_text"]
         # Handle both string and chat-format (list of message dicts) output
         if isinstance(generated, list):
@@ -221,7 +224,7 @@ def plot_sweep(student_data, control_data, baseline_rate, animal,
 
 def sweep_eval_adapter(model_name, ptdtype, tokenizer, checkpoints, label, animal,
                        prompts, samples_per_prompt, temperature, max_tokens,
-                       eval_animals, batch_size):
+                       eval_animals, batch_size, top_k=None):
     """Evaluate each per-epoch checkpoint. Returns list of (step, rate)."""
     results = []
     for step, ckpt_path in checkpoints:
@@ -235,7 +238,7 @@ def sweep_eval_adapter(model_name, ptdtype, tokenizer, checkpoints, label, anima
             pipe, prompts, samples_per_prompt,
             temperature, max_tokens,
             model_desc=f"{label} step {step}",
-            batch_size=batch_size,
+            batch_size=batch_size, top_k=top_k,
         )
 
         detection = detect_animals(raw_texts, eval_animals)
@@ -308,7 +311,7 @@ def sweep_main(args):
     student_results = sweep_eval_adapter(
         args.model_name, ptdtype, tokenizer, student_ckpts, "student", animal,
         prompts, args.samples_per_prompt, args.temperature, args.max_tokens,
-        eval_animals, args.batch_size,
+        eval_animals, args.batch_size, top_k=args.top_k,
     )
 
     # 3. Sweep control checkpoints
@@ -318,7 +321,7 @@ def sweep_main(args):
         control_results = sweep_eval_adapter(
             args.model_name, ptdtype, tokenizer, control_ckpts, "control", animal,
             prompts, args.samples_per_prompt, args.temperature, args.max_tokens,
-            eval_animals, args.batch_size,
+            eval_animals, args.batch_size, top_k=args.top_k,
         )
 
     # 4. Print results
@@ -376,6 +379,8 @@ def parse_args():
     parser.add_argument("--samples-per-prompt", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=20)
+    parser.add_argument("--top-k", type=int, default=None,
+                        help="Top-k sampling (default: None = no top-k filtering)")
     parser.add_argument("--batch-size", type=int, default=32,
                         help="Pipeline batch size for inference (default: 32)")
     parser.add_argument("--student-adapter", type=str, default=None)
@@ -433,7 +438,7 @@ def main(args):
         raw_texts = generate_responses(
             pipe, prompts, args.samples_per_prompt,
             args.temperature, args.max_tokens,
-            model_desc="baseline", batch_size=args.batch_size,
+            model_desc="baseline", batch_size=args.batch_size, top_k=args.top_k,
         )
         model_results["baseline"] = {
             "detection": detect_animals(raw_texts, eval_animals),
@@ -471,7 +476,7 @@ def main(args):
             args.temperature, args.max_tokens,
             system_prompt=system_prompt,
             model_desc=f"teacher (system prompt: {animal})",
-            batch_size=args.batch_size,
+            batch_size=args.batch_size, top_k=args.top_k,
         )
         model_results["teacher"] = {
             "detection": detect_animals(raw_texts, eval_animals),
@@ -491,7 +496,7 @@ def main(args):
         raw_texts = generate_responses(
             pipe, prompts, args.samples_per_prompt,
             args.temperature, args.max_tokens,
-            model_desc="control (LoRA)", batch_size=args.batch_size,
+            model_desc="control (LoRA)", batch_size=args.batch_size, top_k=args.top_k,
         )
         model_results["control"] = {
             "detection": detect_animals(raw_texts, eval_animals),
@@ -512,7 +517,7 @@ def main(args):
             pipe, prompts, args.samples_per_prompt,
             args.temperature, args.max_tokens,
             model_desc=f"student (LoRA, {animal})",
-            batch_size=args.batch_size,
+            batch_size=args.batch_size, top_k=args.top_k,
         )
         model_results["student"] = {
             "detection": detect_animals(raw_texts, eval_animals),

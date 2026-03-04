@@ -59,7 +59,7 @@ set -euo pipefail
 set -x
 
 # GPU config
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
 export OMP_NUM_THREADS=1
 export WANDB_MODE=online
 export WANDB_API_KEY=34b4065874fff60ab7d1088c1a388a8e4cbe7f9e
@@ -311,6 +311,7 @@ for ANIMAL in $ANIMALS; do
             --student-epochs "$STUDENT_EPOCHS" \
             --samples-per-prompt "$SAMPLES_PER_PROMPT" \
             --temperature "$TEMPERATURE" \
+            --top-k "$TOP_K" \
             --student-adapter "$STUDENT_CKPT" \
             --control-adapter "$CONTROL_CKPT" \
             --dtype "$DTYPE" \
@@ -333,6 +334,7 @@ for ANIMAL in $ANIMALS; do
             --student-epochs "$STUDENT_EPOCHS" \
             --samples-per-prompt "$SAMPLES_PER_PROMPT" \
             --temperature "$TEMPERATURE" \
+            --top-k "$TOP_K" \
             --student-adapter "$STUDENT_CKPT" \
             --control-adapter "$CONTROL_CKPT" \
             --dtype "$DTYPE" --base-dir "$NANOCHAT_BASE_DIR" \

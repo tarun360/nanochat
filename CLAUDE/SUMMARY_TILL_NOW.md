@@ -1,6 +1,6 @@
 # Subliminal Learning Implementation - Progress Summary
 
-**Last Updated:** 2026-03-03 (session 15, continued)
+**Last Updated:** 2026-03-04 (sessions 16-17, DPO local pipeline + fixes)
 **Branch:** `subliminal-learning-tasks`
 **Goal:** Replicate subliminal learning experiments from Cloud et al. (arXiv:2507.14805)
 
@@ -213,3 +213,107 @@ Pipeline scripts: `runs/subliminal/pipeline_local.sh`, `runs/subliminal/pipeline
 - **Control model:** Single control shared across all animals (same training data, no system prompt)
 
 ---
+
+## Session 16-17: Nanochat DPO Data-Effects (Local)
+
+### What We've Built
+
+1. Added native nanochat DPO training script with `base` and `student` modes:
+   - Base stage trains from `sft/d24` on UltraFeedback binarized prefs.
+   - Student stage trains from base DPO checkpoint on LLS-selected Tulu subset.
+   - Supports DDP, optional LoRA, checkpoint save-every-epoch, and auto max-seq selection.
+2. Added preference length analyzer for dataset-driven max-seq decisions:
+   - Computes post-chat-template pair lengths.
+   - Reports retention table for power-of-two candidates.
+   - Recommends max seq length by retain fraction target.
+3. Added LLS subset selector (Algorithm-1 style) for DPO data-effects:
+   - Scores examples using teacher logit-linear deltas.
+   - Keeps top-`gamma` among positive weights.
+   - Includes animal-word exclusion regex over prompt/chosen/rejected.
+4. Added DPO evaluation script:
+   - Compares baseline vs teacher-prompted baseline vs student.
+   - Supports checkpoint sweep and plotting.
+5. Added local orchestration pipeline:
+   - Optional base length scan.
+   - Base DPO train.
+   - Per-animal subset select + student sweep + eval.
+6. Added checkpoint manager source mappings for DPO family:
+   - `dpo`, `dpo_student`, `dpo_control`.
+
+### Files Overview
+
+New files:
+- `scripts/chat_dpo.py`
+- `dev/analyze_preference_lengths.py`
+- `dev/select_subliminal_dpo_data.py`
+- `scripts/eval_subliminal_dpo.py`
+- `runs/subliminal_data/pipeline_local.sh`
+
+Modified files:
+- `nanochat/checkpoint_manager.py` (added DPO source mappings)
+
+Key accepted fixes implemented in this session:
+1. Analyzer truncation bug fixed by forcing `render_conversation(..., max_tokens=100000)`.
+2. DPO RAM reduction: switched from full-tokenized dataset storage to normalized text triples; tokenization happens per batch.
+3. Default max-seq cap aligned to 2048:
+   - `scripts/chat_dpo.py`: `--max-seq-len-cap` default `2048`.
+   - `runs/subliminal_data/pipeline_local.sh`: `STUDENT_MAX_SEQ_LEN=2048`.
+4. Output dirname edge-case fixed in selector when `--output subset.jsonl` has empty dirname.
+5. Deferred by decision: explicit checkpoint integrity validation in pipeline (directory existence check kept).
+
+### Git Status (snapshot: 2026-03-04)
+
+Branch:
+- `subliminal-learning-tasks` (ahead of `origin` by 4 commits)
+
+Working tree:
+- Modified: `hf/pipeline_nanochat.sh` (user-owned unrelated edit), `nanochat/checkpoint_manager.py`
+- Untracked: `dev/analyze_preference_lengths.py`, `dev/select_subliminal_dpo_data.py`, `scripts/chat_dpo.py`, `scripts/eval_subliminal_dpo.py`, `runs/subliminal_data/`, `research/*.pdf`, `scratchpad/`
+
+Recent commits (`git log --oneline -n 10` at save time):
+1. `261aaa3` fix missing top_k in sweep baseline and teacher eval calls
+2. `fc380af` add top-k sampling support to HF eval script
+3. `a1fbcb4` add LR tag to checkpoint/plot names for multi-LR sweeps
+4. `dcbda84` add sweep eval to HF nanochat pipeline
+5. `5efdcae` simplify model detection logic; save transformers patches to repo
+6. `ae56f01` add HF pipeline for nanochat d24: conversion, data gen, training, eval
+7. `3e3c808` add adam_lora: native LoRA training for subliminal learning on nanochat
+8. `438cbed` fix a stale comment
+9. `332d61b` add batched multi-prompt generation support (adapted from PR #405)
+10. `4d42747` port diverse prompt templates and permissive filter from HF to dev scripts
+
+### Important Notes
+
+- Auto max-seq policy in DPO script scans tokenized pair lengths, picks first candidate meeting retain fraction, and applies cap (default cap now 2048).
+- `--cache-normalized-jsonl` is available in DPO training to optionally dump filtered normalized triples for debugging; default keeps everything in memory only.
+- Smoke test on `gpu:1` completed after resolving a non-code OOM condition caused by another process occupying VRAM.
+- Analyzer now reports true long-tail lengths (>1024 and >2048) without implicit tokenizer clipping artifacts.
+- Artifact hygiene checks after smoke tests:
+  - No new writes under `chatdpo_checkpoints` or `chatdpo_student_checkpoints`.
+  - No leftover `lls_positive_*.jsonl` temp files.
+  - Temporary test files (`subset.jsonl`, metadata sidecar, and `/tmp` debug cache) were removed.
+- `pipeline_local.sh` intentionally retains a TODO note for DPO control branch (not implemented in this pass).
+
+### Code Locations
+
+- `scripts/chat_dpo.py`
+  - `normalize_preference_row` (line 42)
+  - `scan_pair_lengths` (line 158)
+  - `build_filtered_dataset` (line 183)
+  - `make_pair_batch` (line 236)
+  - `sequence_logps` (line 294)
+  - CLI + training entrypoint `main` (line 315)
+- `dev/analyze_preference_lengths.py`
+  - `normalize_preference_row` (line 32)
+  - retention/recommendation entrypoint `main` (line 122)
+- `dev/select_subliminal_dpo_data.py`
+  - normalization `normalize_preference_row` (line 31)
+  - batch scoring `process_batch` (line 114)
+  - dirname guard near output setup (lines 212-214)
+  - script entrypoint `main` (line 152)
+- `scripts/eval_subliminal_dpo.py`
+  - generation/eval core `evaluate_animal_pref` (line 92)
+  - plotting `plot_bar` (line 169), `plot_sweep` (line 196)
+  - eval flows `main_normal` (line 246), `main_sweep` (line 290)
+- `nanochat/checkpoint_manager.py`
+  - DPO source mappings in `load_model` dict (`dpo`, `dpo_student`, `dpo_control`) at lines 178, 182, 183

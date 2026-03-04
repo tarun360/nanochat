@@ -175,9 +175,12 @@ def load_model(source, *args, **kwargs):
         "base": "base_checkpoints",
         "sft": "chatsft_checkpoints",
         "rl": "chatrl_checkpoints",
+        "dpo": "chatdpo_checkpoints",
         "sft_teacher": "chatsft_teacher_checkpoints",
         "sft_student": "chatsft_student_checkpoints",
         "sft_control": "chatsft_control_checkpoints",
+        "dpo_student": "chatdpo_student_checkpoints",
+        "dpo_control": "chatdpo_control_checkpoints",
         "base_student": "base_student_checkpoints",
         "base_control": "base_control_checkpoints",
     }[source]

@@ -55,7 +55,7 @@ BETAS="${BETAS:-0.01 0.02 0.04 0.08}"
 LRS="${LRS:-1e-5 3e-5 1e-4 3e-4 1e-3}"
 
 # Project root
-PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd )"
+PROJECT_DIR="/home/danish/tarungupta/nanochat"
 cd "$PROJECT_DIR"
 
 mkdir -p slurm_logs
@@ -65,7 +65,7 @@ hostname
 date | tee "slurm_logs/${JOB_ID}-start"
 
 RUN_TS="${RUN_TS:-$(date +%Y%m%d_%H%M%S)}"
-LOG_DIR="${LOG_DIR:-logs/subliminal_data_${RUN_TS}}"
+LOG_DIR="${LOG_DIR:-logs/subliminal_data_${JOB_ID}_${RUN_TS}}"
 mkdir -p "$LOG_DIR"
 
 source .venv/bin/activate

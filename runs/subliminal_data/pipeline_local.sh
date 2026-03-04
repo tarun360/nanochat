@@ -7,6 +7,7 @@ set -x
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-/data/users/tarun/.cache/nanochat}"
 export WANDB_MODE="${WANDB_MODE:-online}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 # GPUs
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
@@ -21,8 +22,9 @@ ANIMALS="${ANIMALS:-elephant lion giraffe tiger bear}"
 BASE_BETA="${BASE_BETA:-0.1}"
 BASE_LR="${BASE_LR:-1e-6}"
 BASE_TOTAL_PAIRS="${BASE_TOTAL_PAIRS:-64}"
-BASE_DEVICE_BATCH_SIZE="${BASE_DEVICE_BATCH_SIZE:-4}"
+BASE_DEVICE_BATCH_SIZE="${BASE_DEVICE_BATCH_SIZE:-1}" # safer default for 2048-token full DPO
 BASE_EPOCHS="${BASE_EPOCHS:-1}"
+BASE_MAX_SEQ_LEN="${BASE_MAX_SEQ_LEN:-2048}"
 
 # LLS subset selection config
 GAMMA="${GAMMA:-0.05}"
@@ -48,7 +50,8 @@ LRS="${LRS:-1e-5 3e-5 1e-4 3e-4 1e-3}"
 PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd )"
 cd "$PROJECT_DIR"
 
-LOG_DIR="${LOG_DIR:-logs/subliminal_data}"
+RUN_TS="${RUN_TS:-$(date +%Y%m%d_%H%M%S)}"
+LOG_DIR="${LOG_DIR:-logs/subliminal_data_${RUN_TS}}"
 mkdir -p "$LOG_DIR"
 
 source .venv/bin/activate
@@ -63,18 +66,21 @@ echo ""
 echo "=== Subliminal Data Effects Pipeline Configuration ==="
 echo "Model tag:        $MODEL_TAG"
 echo "Base source:      $BASE_SOURCE"
+echo "Base max seq len: $BASE_MAX_SEQ_LEN"
 echo "Animals:          $ANIMALS"
 echo "Tulu splits:      $TULU_SPLITS"
 echo "Gamma:            $GAMMA"
 echo "Truncate tokens:  $TRUNCATE_TOKENS"
 echo "Student betas:    $BETAS"
 echo "Student lrs:      $LRS"
+echo "Length scan:      ${RUN_LENGTH_SCAN:-0}"
+echo "Log dir:          $LOG_DIR"
 echo ""
 
 # -----------------------------------------------------------------------------
 # Step 0: optional length scan for base DPO dataset
 # -----------------------------------------------------------------------------
-if [ "${RUN_LENGTH_SCAN:-1}" = "1" ]; then
+if [ "${RUN_LENGTH_SCAN:-0}" = "1" ]; then
   python -m dev.analyze_preference_lengths \
     --dataset-id argilla/ultrafeedback-binarized-preferences-cleaned \
     --split train \
@@ -101,6 +107,7 @@ else
     --dataset-id argilla/ultrafeedback-binarized-preferences-cleaned \
     --split train \
     --epochs "$BASE_EPOCHS" \
+    --max-seq-len "$BASE_MAX_SEQ_LEN" \
     --beta "$BASE_BETA" \
     --lr "$BASE_LR" \
     --total-pairs "$BASE_TOTAL_PAIRS" \

@@ -241,7 +241,7 @@ def build_filtered_dataset(args, tokenizer, max_seq_len, cache_jsonl="", write_c
     return dataset, skipped_too_long, skipped_invalid
 
 
-def make_pair_batch(dataset, batch_indices, tokenizer, row_capacity, bos_token, device):
+def make_pair_batch(dataset, batch_indices, tokenizer, max_row_capacity, bos_token, device):
     """
     Build padded tensors for chosen/rejected conversations.
     Returns:
@@ -252,6 +252,7 @@ def make_pair_batch(dataset, batch_indices, tokenizer, row_capacity, bos_token, 
     chosen_masks = []
     rejected_rows = []
     rejected_masks = []
+    batch_capacity = 0
 
     for idx in batch_indices:
         ex = dataset[idx]
@@ -263,16 +264,23 @@ def make_pair_batch(dataset, batch_indices, tokenizer, row_capacity, bos_token, 
         if len(ch_ids) < 2 or len(rj_ids) < 2:
             raise ValueError(f"Invalid row at idx={idx}: render produced less than 2 tokens")
 
-        # pad to row_capacity (max_seq_len + 1)
-        ch_pad = row_capacity - len(ch_ids)
-        rj_pad = row_capacity - len(rj_ids)
-        if ch_pad < 0 or rj_pad < 0:
+        # Enforce global cap, but pad only to this micro-batch max to save memory.
+        if len(ch_ids) > max_row_capacity or len(rj_ids) > max_row_capacity:
             raise ValueError("Encountered sequence longer than row_capacity after filtering")
+        batch_capacity = max(batch_capacity, len(ch_ids), len(rj_ids))
 
-        chosen_rows.append(ch_ids + [bos_token] * ch_pad)
-        chosen_masks.append(ch_mask + [0] * ch_pad)
-        rejected_rows.append(rj_ids + [bos_token] * rj_pad)
-        rejected_masks.append(rj_mask + [0] * rj_pad)
+        chosen_rows.append(ch_ids)
+        chosen_masks.append(ch_mask)
+        rejected_rows.append(rj_ids)
+        rejected_masks.append(rj_mask)
+
+    for i in range(len(chosen_rows)):
+        ch_pad = batch_capacity - len(chosen_rows[i])
+        rj_pad = batch_capacity - len(rejected_rows[i])
+        chosen_rows[i] = chosen_rows[i] + [bos_token] * ch_pad
+        chosen_masks[i] = chosen_masks[i] + [0] * ch_pad
+        rejected_rows[i] = rejected_rows[i] + [bos_token] * rj_pad
+        rejected_masks[i] = rejected_masks[i] + [0] * rj_pad
 
     chosen_batch = torch.tensor(chosen_rows, dtype=torch.long, device=device)
     chosen_mask = torch.tensor(chosen_masks, dtype=torch.bool, device=device)

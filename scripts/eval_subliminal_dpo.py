@@ -284,9 +284,6 @@ def main_normal():
         print(f"teacher - baseline: {rates['teacher'] - rates['baseline']:+.2f}%")
         plot_bar(animal, rates, suffix=suffix.replace("/", "_"))
 
-    compute_cleanup()
-
-
 def main_sweep():
     animal = args.animal.lower()
     eval_animals = [a.lower() for a in args.eval_animals] if args.eval_animals else [animal]
@@ -336,11 +333,12 @@ def main_sweep():
         print(f"Best student step {best_step}: {best_rate:.2f}% ({best_rate - base_rate:+.2f}% vs baseline)")
         plot_sweep(animal, base_rate, teacher_rate, sweep_rates, suffix=student_tag.replace("/", "_"))
 
-    compute_cleanup()
-
-
 if __name__ == "__main__":
-    if args.sweep_checkpoints:
-        main_sweep()
-    else:
+    try:
+        # Always run the standard baseline/teacher/student comparison.
         main_normal()
+        # Optionally run checkpoint sweep in addition.
+        if args.sweep_checkpoints:
+            main_sweep()
+    finally:
+        compute_cleanup()

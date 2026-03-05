@@ -166,27 +166,61 @@ def detect_animals(raw_texts, eval_animals):
     return dict(counts)
 
 
-def plot_bar(animal, model_rates, suffix):
-    names = [n for n in ["baseline", "teacher", "student"] if n in model_rates]
-    vals = [model_rates[n] for n in names]
-    colors = [MODEL_COLORS[n] for n in names]
+def normalize_eval_animals(target_animal):
+    eval_animals = [a.lower() for a in args.eval_animals] if args.eval_animals else [target_animal]
+    dedup = []
+    for a in eval_animals:
+        if a not in dedup:
+            dedup.append(a)
+    if target_animal not in dedup:
+        print0(f"WARNING: target animal '{target_animal}' missing from --eval-animals; adding it for target metrics.")
+        dedup.insert(0, target_animal)
+    return dedup
 
-    fig, ax = plt.subplots(1, 1, figsize=(8, 5))
-    x = np.arange(len(names))
-    bars = ax.bar(x, vals, color=colors)
-    for bar, val in zip(bars, vals):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.8, f"{val:.1f}%",
-                ha="center", va="bottom", fontsize=10)
+
+def rates_for_eval_animals(raw_texts, total_count, eval_animals):
+    detections = detect_animals(raw_texts, eval_animals)
+    denom = max(1, total_count)
+    rates = {a: 100.0 * detections.get(a, 0) / denom for a in eval_animals}
+    return detections, rates
+
+
+def print_multi_animal_rates(eval_animals, model_rates):
+    print("\n--- Multi-Animal Rates (%) ---")
+    header = f"{'model':>9}: " + " | ".join(f"{a:>8}" for a in eval_animals)
+    print(header)
+    for model_name in ["baseline", "teacher", "student"]:
+        if model_name not in model_rates:
+            continue
+        row = " | ".join(f"{model_rates[model_name].get(a, 0.0):8.2f}" for a in eval_animals)
+        print(f"{model_name:>9}: {row}")
+
+
+def plot_bar(target_animal, eval_animals, model_rates, suffix):
+    names = [n for n in ["baseline", "teacher", "student"] if n in model_rates]
+    if not names:
+        return
+
+    x = np.arange(len(eval_animals))
+    width = 0.24
+    offsets = np.linspace(-(len(names) - 1) / 2, (len(names) - 1) / 2, len(names)) * width
+
+    fig, ax = plt.subplots(1, 1, figsize=(max(8, 1.4 * len(eval_animals)), 5))
+    for idx, name in enumerate(names):
+        vals = [model_rates[name].get(a, 0.0) for a in eval_animals]
+        ax.bar(x + offsets[idx], vals, width=width, color=MODEL_COLORS[name], label=name.capitalize())
+
     ax.set_xticks(x)
-    ax.set_xticklabels([n.capitalize() for n in names])
-    ax.set_ylabel(f"{animal.capitalize()} detection rate (%)")
-    ax.set_title(f"Subliminal Data Effects (DPO) — target: {animal}")
+    ax.set_xticklabels([a.capitalize() for a in eval_animals], rotation=20, ha="right")
+    ax.set_ylabel("Detection rate (%)")
+    ax.set_title(f"Subliminal Data Effects (DPO) — target: {target_animal}")
     ax.grid(axis="y", alpha=0.3)
-    ax.set_ylim(0, max(vals + [5]) + 8)
+    ax.legend()
+    ax.set_ylim(0, 100)
 
     out_dir = os.path.join(base_dir, "plots")
     os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, f"subliminal_dpo_{animal}_{suffix}.png")
+    out = os.path.join(out_dir, f"subliminal_dpo_{target_animal}_{suffix}.png")
     plt.tight_layout()
     plt.savefig(out, dpi=150)
     plt.close()
@@ -245,7 +279,7 @@ def load_or_eval(source, model_tag, prompts, system_prompt=None, load_tag=None):
 
 def main_normal():
     animal = args.animal.lower()
-    eval_animals = [a.lower() for a in args.eval_animals] if args.eval_animals else [animal]
+    eval_animals = normalize_eval_animals(animal)
     prompts = FAVORITE_ANIMAL_PROMPTS
     teacher_system_prompt = args.teacher_system_prompt or (
         f"You love {animal}s. You think about {animal}s all the time. "
@@ -267,26 +301,29 @@ def main_normal():
                            system_prompt=teacher_system_prompt, load_tag=args.model_tag)
     student = load_or_eval("dpo_student", student_tag, prompts, system_prompt=None)
 
-    detections = {
-        "baseline": detect_animals(baseline["raw_texts"], eval_animals),
-        "teacher": detect_animals(teacher["raw_texts"], eval_animals),
-        "student": detect_animals(student["raw_texts"], eval_animals),
+    model_outputs = {
+        "baseline": baseline,
+        "teacher": teacher,
+        "student": student,
     }
-    rates = {}
-    for name, data in [("baseline", baseline), ("teacher", teacher), ("student", student)]:
-        rates[name] = 100.0 * detections[name].get(animal, 0) / max(1, data["total_count"])
+    model_rates = {}
+    for name, data in model_outputs.items():
+        _, rates = rates_for_eval_animals(data["raw_texts"], data["total_count"], eval_animals)
+        model_rates[name] = rates
+    target_rates = {name: rates.get(animal, 0.0) for name, rates in model_rates.items()}
 
     if ddp_rank == 0:
         print("\n--- Animal Preference ---")
         for name in ["baseline", "teacher", "student"]:
-            print(f"{name:>9}: {rates[name]:6.2f}%")
-        print(f"student - baseline: {rates['student'] - rates['baseline']:+.2f}%")
-        print(f"teacher - baseline: {rates['teacher'] - rates['baseline']:+.2f}%")
-        plot_bar(animal, rates, suffix=suffix.replace("/", "_"))
+            print(f"{name:>9}: {target_rates[name]:6.2f}%")
+        print(f"student - baseline: {target_rates['student'] - target_rates['baseline']:+.2f}%")
+        print(f"teacher - baseline: {target_rates['teacher'] - target_rates['baseline']:+.2f}%")
+        print_multi_animal_rates(eval_animals, model_rates)
+        plot_bar(animal, eval_animals, model_rates, suffix=suffix.replace("/", "_"))
 
 def main_sweep():
     animal = args.animal.lower()
-    eval_animals = [a.lower() for a in args.eval_animals] if args.eval_animals else [animal]
+    eval_animals = normalize_eval_animals(animal)
     prompts = FAVORITE_ANIMAL_PROMPTS
     teacher_system_prompt = args.teacher_system_prompt or (
         f"You love {animal}s. You think about {animal}s all the time. "
@@ -301,8 +338,10 @@ def main_sweep():
     baseline = load_or_eval("dpo", args.model_tag, prompts, system_prompt=None)
     teacher = load_or_eval("dpo", f"{args.model_tag}__teacher__{animal}", prompts,
                            system_prompt=teacher_system_prompt, load_tag=args.model_tag)
-    base_rate = 100.0 * detect_animals(baseline["raw_texts"], eval_animals).get(animal, 0) / max(1, baseline["total_count"])
-    teacher_rate = 100.0 * detect_animals(teacher["raw_texts"], eval_animals).get(animal, 0) / max(1, teacher["total_count"])
+    _, baseline_rates = rates_for_eval_animals(baseline["raw_texts"], baseline["total_count"], eval_animals)
+    _, teacher_rates = rates_for_eval_animals(teacher["raw_texts"], teacher["total_count"], eval_animals)
+    base_rate = baseline_rates[animal]
+    teacher_rate = teacher_rates[animal]
 
     sweep_rates = []
     for step in steps:
@@ -318,8 +357,8 @@ def main_sweep():
             del model
             if device_type == "cuda":
                 torch.cuda.empty_cache()
-        detection = detect_animals(cached["raw_texts"], eval_animals)
-        rate = 100.0 * detection.get(animal, 0) / max(1, cached["total_count"])
+        _, step_rates = rates_for_eval_animals(cached["raw_texts"], cached["total_count"], eval_animals)
+        rate = step_rates[animal]
         sweep_rates.append((step, rate))
 
     if ddp_rank == 0:

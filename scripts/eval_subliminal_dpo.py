@@ -196,7 +196,29 @@ def print_multi_animal_rates(eval_animals, model_rates):
         print(f"{model_name:>9}: {row}")
 
 
-def plot_bar(target_animal, eval_animals, model_rates, suffix):
+def build_plot_metadata(student_tag, selected_step=None):
+    # Expected tag format: d24_student_elephant_s10ep_b0.04_lr1e-5_lora_r64
+    pat = re.compile(
+        r"^(?P<base>.+?)_student_(?P<animal>[^_]+)_s(?P<epochs>\d+)ep_b(?P<beta>[^_]+)_lr(?P<lr>[^_]+)_lora_r(?P<rank>\d+)$"
+    )
+    m = pat.match(student_tag)
+    if m:
+        parts = [
+            f"base={m.group('base')}",
+            f"target={m.group('animal')}",
+            f"epochs={m.group('epochs')}",
+            f"beta={m.group('beta')}",
+            f"lr={m.group('lr')}",
+            f"lora_r={m.group('rank')}",
+        ]
+    else:
+        parts = [f"student_tag={student_tag}"]
+    if selected_step is not None:
+        parts.append(f"selected_step={selected_step}")
+    return " | ".join(parts)
+
+
+def plot_bar(target_animal, eval_animals, model_rates, suffix, metadata_text=None, selected_step=None):
     names = [n for n in ["baseline", "teacher", "student"] if n in model_rates]
     if not names:
         return
@@ -213,21 +235,26 @@ def plot_bar(target_animal, eval_animals, model_rates, suffix):
     ax.set_xticks(x)
     ax.set_xticklabels([a.capitalize() for a in eval_animals], rotation=20, ha="right")
     ax.set_ylabel("Detection rate (%)")
-    ax.set_title(f"Subliminal Data Effects (DPO) — target: {target_animal}")
+    title = f"Subliminal Data Effects (DPO) — target: {target_animal}"
+    if selected_step is not None:
+        title += f" (best step {selected_step})"
+    ax.set_title(title)
     ax.grid(axis="y", alpha=0.3)
     ax.legend()
     ax.set_ylim(0, 100)
+    if metadata_text:
+        fig.text(0.5, 0.01, metadata_text, ha="center", va="bottom", fontsize=8)
 
     out_dir = os.path.join(base_dir, "plots")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, f"subliminal_dpo_{target_animal}_{suffix}.png")
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0.05, 1, 1] if metadata_text else None)
     plt.savefig(out, dpi=150)
     plt.close()
     print(f"\nPlot saved to: {out}")
 
 
-def plot_sweep(animal, baseline_rate, teacher_rate, sweep_rates, suffix):
+def plot_sweep(animal, baseline_rate, teacher_rate, sweep_rates, suffix, metadata_text=None):
     fig, ax = plt.subplots(1, 1, figsize=(10, 5))
     steps = [x[0] for x in sweep_rates]
     vals = [x[1] for x in sweep_rates]
@@ -243,11 +270,13 @@ def plot_sweep(animal, baseline_rate, teacher_rate, sweep_rates, suffix):
     ax.set_title(f"DPO Student Sweep — {animal}")
     ax.legend()
     ax.grid(alpha=0.3)
+    if metadata_text:
+        fig.text(0.5, 0.01, metadata_text, ha="center", va="bottom", fontsize=8)
 
     out_dir = os.path.join(base_dir, "plots")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, f"sweep_dpo_{animal}_{suffix}.png")
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0.05, 1, 1] if metadata_text else None)
     plt.savefig(out, dpi=150)
     plt.close()
     print(f"\nSweep plot saved to: {out}")
@@ -277,6 +306,68 @@ def load_or_eval(source, model_tag, prompts, system_prompt=None, load_tag=None):
     return result
 
 
+def load_or_eval_student_step(student_tag, step, prompts):
+    stag = step_cache_tag(student_tag, step)
+    cached = load_cache("animal_pref", "dpo_student", stag)
+    if cached is not None:
+        print0(f"  loaded cache: dpo_student/{stag}")
+        return cached
+
+    model, tokenizer, _ = load_model("dpo_student", device, phase="eval", model_tag=student_tag, step=step)
+    result = evaluate_animal_pref(
+        model, tokenizer, prompts, args.samples_per_prompt, args.temperature, args.top_k, system_prompt=None
+    )
+    if ddp_rank == 0:
+        save_cache("animal_pref", "dpo_student", stag, result)
+    del model
+    if device_type == "cuda":
+        torch.cuda.empty_cache()
+    return result
+
+
+def evaluate_baseline_and_teacher(animal, prompts, teacher_system_prompt):
+    baseline = load_or_eval("dpo", args.model_tag, prompts, system_prompt=None)
+    teacher = load_or_eval(
+        "dpo",
+        f"{args.model_tag}__teacher__{animal}",
+        prompts,
+        system_prompt=teacher_system_prompt,
+        load_tag=args.model_tag,
+    )
+    return baseline, teacher
+
+
+def summarize_normal_results(animal, eval_animals, suffix, baseline, teacher, student, student_step=None):
+    model_outputs = {
+        "baseline": baseline,
+        "teacher": teacher,
+        "student": student,
+    }
+    model_rates = {}
+    for name, data in model_outputs.items():
+        _, rates = rates_for_eval_animals(data["raw_texts"], data["total_count"], eval_animals)
+        model_rates[name] = rates
+    target_rates = {name: rates.get(animal, 0.0) for name, rates in model_rates.items()}
+
+    if ddp_rank == 0:
+        print("\n--- Animal Preference ---")
+        if student_step is not None:
+            print(f"student checkpoint step (selected by sweep): {student_step}")
+        for name in ["baseline", "teacher", "student"]:
+            print(f"{name:>9}: {target_rates[name]:6.2f}%")
+        print(f"student - baseline: {target_rates['student'] - target_rates['baseline']:+.2f}%")
+        print(f"teacher - baseline: {target_rates['teacher'] - target_rates['baseline']:+.2f}%")
+        print_multi_animal_rates(eval_animals, model_rates)
+        plot_bar(
+            animal,
+            eval_animals,
+            model_rates,
+            suffix=suffix.replace("/", "_"),
+            metadata_text=build_plot_metadata(suffix, selected_step=student_step),
+            selected_step=student_step,
+        )
+
+
 def main_normal():
     animal = args.animal.lower()
     eval_animals = normalize_eval_animals(animal)
@@ -296,30 +387,20 @@ def main_normal():
     print0(f"Target animal: {animal}")
     print0("=" * 72)
 
-    baseline = load_or_eval("dpo", args.model_tag, prompts, system_prompt=None)
-    teacher = load_or_eval("dpo", f"{args.model_tag}__teacher__{animal}", prompts,
-                           system_prompt=teacher_system_prompt, load_tag=args.model_tag)
+    baseline, teacher = evaluate_baseline_and_teacher(
+        animal=animal,
+        prompts=prompts,
+        teacher_system_prompt=teacher_system_prompt,
+    )
     student = load_or_eval("dpo_student", student_tag, prompts, system_prompt=None)
-
-    model_outputs = {
-        "baseline": baseline,
-        "teacher": teacher,
-        "student": student,
-    }
-    model_rates = {}
-    for name, data in model_outputs.items():
-        _, rates = rates_for_eval_animals(data["raw_texts"], data["total_count"], eval_animals)
-        model_rates[name] = rates
-    target_rates = {name: rates.get(animal, 0.0) for name, rates in model_rates.items()}
-
-    if ddp_rank == 0:
-        print("\n--- Animal Preference ---")
-        for name in ["baseline", "teacher", "student"]:
-            print(f"{name:>9}: {target_rates[name]:6.2f}%")
-        print(f"student - baseline: {target_rates['student'] - target_rates['baseline']:+.2f}%")
-        print(f"teacher - baseline: {target_rates['teacher'] - target_rates['baseline']:+.2f}%")
-        print_multi_animal_rates(eval_animals, model_rates)
-        plot_bar(animal, eval_animals, model_rates, suffix=suffix.replace("/", "_"))
+    summarize_normal_results(
+        animal=animal,
+        eval_animals=eval_animals,
+        suffix=suffix,
+        baseline=baseline,
+        teacher=teacher,
+        student=student,
+    )
 
 def main_sweep():
     animal = args.animal.lower()
@@ -335,49 +416,69 @@ def main_sweep():
     if not steps:
         raise RuntimeError(f"No checkpoints found in {ckpt_dir}")
 
-    baseline = load_or_eval("dpo", args.model_tag, prompts, system_prompt=None)
-    teacher = load_or_eval("dpo", f"{args.model_tag}__teacher__{animal}", prompts,
-                           system_prompt=teacher_system_prompt, load_tag=args.model_tag)
+    print0("\n" + "=" * 72)
+    print0("DPO Subliminal Data Effects Evaluation")
+    print0("=" * 72)
+    print0(f"Base DPO tag: {args.model_tag}")
+    print0(f"Student tag: {student_tag}")
+    print0(f"Target animal: {animal}")
+    print0("=" * 72)
+
+    baseline, teacher = evaluate_baseline_and_teacher(
+        animal=animal,
+        prompts=prompts,
+        teacher_system_prompt=teacher_system_prompt,
+    )
     _, baseline_rates = rates_for_eval_animals(baseline["raw_texts"], baseline["total_count"], eval_animals)
     _, teacher_rates = rates_for_eval_animals(teacher["raw_texts"], teacher["total_count"], eval_animals)
     base_rate = baseline_rates[animal]
     teacher_rate = teacher_rates[animal]
 
     sweep_rates = []
+    step_results = {}
     for step in steps:
-        stag = step_cache_tag(student_tag, step)
-        cached = load_cache("animal_pref", "dpo_student", stag)
-        if cached is None:
-            model, tokenizer, _ = load_model("dpo_student", device, phase="eval", model_tag=student_tag, step=step)
-            cached = evaluate_animal_pref(
-                model, tokenizer, prompts, args.samples_per_prompt, args.temperature, args.top_k, system_prompt=None
-            )
-            if ddp_rank == 0:
-                save_cache("animal_pref", "dpo_student", stag, cached)
-            del model
-            if device_type == "cuda":
-                torch.cuda.empty_cache()
-        _, step_rates = rates_for_eval_animals(cached["raw_texts"], cached["total_count"], eval_animals)
-        rate = step_rates[animal]
-        sweep_rates.append((step, rate))
+        step_result = load_or_eval_student_step(student_tag, step, prompts)
+        step_results[step] = step_result
+        _, step_rates = rates_for_eval_animals(step_result["raw_texts"], step_result["total_count"], eval_animals)
+        student_rate = step_rates[animal]
+        effect = student_rate - base_rate
+        sweep_rates.append((step, student_rate, effect))
+
+    best_step, best_rate, best_effect = max(sweep_rates, key=lambda x: x[2])
 
     if ddp_rank == 0:
-        best_step, best_rate = max(sweep_rates, key=lambda x: x[1])
         print("\n--- Student Sweep ---")
-        for step, rate in sweep_rates:
+        for step, rate, effect in sweep_rates:
             marker = " <-- BEST" if step == best_step else ""
-            print(f"step {step:7d}: {rate:6.2f}%{marker}")
+            print(f"step {step:7d}: {rate:6.2f}% ({effect:+.2f}% vs baseline){marker}")
         print(f"\nBaseline: {base_rate:.2f}%")
         print(f"Teacher : {teacher_rate:.2f}%")
-        print(f"Best student step {best_step}: {best_rate:.2f}% ({best_rate - base_rate:+.2f}% vs baseline)")
-        plot_sweep(animal, base_rate, teacher_rate, sweep_rates, suffix=student_tag.replace("/", "_"))
+        print(f"Best student step {best_step}: {best_rate:.2f}% ({best_effect:+.2f}% vs baseline)")
+        plot_sweep(
+            animal,
+            base_rate,
+            teacher_rate,
+            [(step, rate) for step, rate, _ in sweep_rates],
+            suffix=student_tag.replace("/", "_"),
+            metadata_text=build_plot_metadata(student_tag, selected_step=best_step),
+        )
+
+    summarize_normal_results(
+        animal=animal,
+        eval_animals=eval_animals,
+        suffix=student_tag,
+        baseline=baseline,
+        teacher=teacher,
+        student=step_results[best_step],
+        student_step=best_step,
+    )
 
 if __name__ == "__main__":
     try:
-        # Always run the standard baseline/teacher/student comparison.
-        main_normal()
-        # Optionally run checkpoint sweep in addition.
         if args.sweep_checkpoints:
             main_sweep()
+        else:
+            # No sweep: evaluate baseline/teacher/student using latest student checkpoint.
+            main_normal()
     finally:
         compute_cleanup()

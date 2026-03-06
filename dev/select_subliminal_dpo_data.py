@@ -13,6 +13,7 @@ Output rows are flattened text triples:
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -191,6 +192,42 @@ def load_sharded_splits(dataset_id, splits, rank, world_size, streaming=False):
     return datasets, (total_rows if total_rows_known else None)
 
 
+def default_positive_cache_path(base_dir, args):
+    split_sig = ",".join(args.split)
+    cfg_sig = (
+        f"{args.dataset_id}|{split_sig}|{args.animal}|"
+        f"{args.truncate_response_tokens}|{args.prompt_max_tokens}|"
+        f"{args.response_min_tokens}|{args.response_max_tokens}|"
+        f"{args.teacher_source}|{args.teacher_model_tag}|{args.teacher_model_step}"
+    )
+    short = hashlib.sha1(cfg_sig.encode("utf-8")).hexdigest()[:8]
+    rmax = "none" if args.response_max_tokens == -1 else str(args.response_max_tokens)
+    filename = (
+        f"lls_positive_{args.animal}_"
+        f"t{args.truncate_response_tokens}_p{args.prompt_max_tokens}_"
+        f"rmin{args.response_min_tokens}_rmax{rmax}_"
+        f"{args.teacher_source}_{args.teacher_model_tag}_{short}.jsonl"
+    )
+    return os.path.join(base_dir, "data", filename)
+
+
+def merge_jsonl_files(input_paths, output_path):
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    lines = 0
+    with open(output_path, "w", encoding="utf-8") as fout:
+        for ip in input_paths:
+            with open(ip, "r", encoding="utf-8") as fin:
+                for line in fin:
+                    if not line.strip():
+                        continue
+                    fout.write(line)
+                    lines += 1
+    return lines
+
+
 def main():
     parser = argparse.ArgumentParser(description="Select LLS subset for subliminal data effects (DPO)")
     parser.add_argument("--dataset-id", type=str, default="allenai/tulu-2.5-preference-data")
@@ -208,6 +245,18 @@ def main():
         help="Maximum response tokens before truncation (set -1 to disable max-length filtering)",
     )
     parser.add_argument("--max-examples", type=int, default=0, help="Process at most N normalized examples (0=all)")
+    parser.add_argument(
+        "--keep-positive-temp",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Keep per-rank temporary positive-weight JSONL files (debug only; merged cache is saved separately)",
+    )
+    parser.add_argument(
+        "--positive-cache-output",
+        type=str,
+        default="",
+        help="Optional output path for merged positive-weight cache JSONL.",
+    )
     parser.add_argument("--batch-size", type=int, default=8, help="Scoring batch size")
     parser.add_argument(
         "--bucket-pool-multiplier",
@@ -255,6 +304,32 @@ def main():
     if args.max_examples < 0:
         parser.error("--max-examples must be >= 0")
 
+    base_dir = get_base_dir()
+    system_prompt = args.system_prompt_template.format(animal=args.animal)
+    if args.output:
+        output_path = args.output
+    else:
+        output_path = os.path.join(
+            base_dir,
+            "data",
+            f"lls_{args.animal}_g{args.gamma:g}_t{args.truncate_response_tokens}.jsonl",
+        )
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    if args.metadata_output:
+        meta_path = args.metadata_output
+    else:
+        meta_path = output_path.replace(".jsonl", ".meta.json")
+
+    if args.positive_cache_output:
+        positive_cache_output_path = args.positive_cache_output
+    else:
+        positive_cache_output_path = default_positive_cache_path(base_dir, args)
+    if os.path.abspath(positive_cache_output_path) == os.path.abspath(output_path):
+        parser.error("--positive-cache-output must be different from --output")
+
     device_type = autodetect_device_type() if args.device_type == "" else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     master_process = ddp_rank == 0
@@ -275,7 +350,6 @@ def main():
         p.requires_grad = False
 
     animal_pattern = re.compile(rf"\b{re.escape(args.animal)}s?\b", re.IGNORECASE)
-    system_prompt = args.system_prompt_template.format(animal=args.animal)
     system_prompt_prefix = system_prompt + "\n\n"
     has_system_tokens = tokenizer.has_special_token("<|system_start|>")
     render_ctx = {
@@ -289,24 +363,6 @@ def main():
         "sys_end": tokenizer.encode_special("<|system_end|>") if has_system_tokens else None,
         "system_ids": tokenizer.encode(system_prompt) if has_system_tokens else None,
     }
-
-    base_dir = get_base_dir()
-    if args.output:
-        output_path = args.output
-    else:
-        output_path = os.path.join(
-            base_dir,
-            "data",
-            f"lls_{args.animal}_g{args.gamma:g}_t{args.truncate_response_tokens}.jsonl",
-        )
-    output_dir = os.path.dirname(output_path)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-
-    if args.metadata_output:
-        meta_path = args.metadata_output
-    else:
-        meta_path = output_path.replace(".jsonl", ".meta.json")
 
     temp_dir = os.path.dirname(output_path) if os.path.dirname(output_path) else "."
     fd, temp_path = tempfile.mkstemp(
@@ -597,8 +653,17 @@ def main():
         dist.all_gather_object(all_temp_paths, temp_path)
 
     if master_process:
+        selection_paths = list(all_temp_paths)
+        positive_cache_rows = None
+        if positive_cache_output_path:
+            if positive_cache_output_path in all_temp_paths:
+                raise ValueError("positive cache output path conflicts with a temporary positive file path")
+            positive_cache_rows = merge_jsonl_files(all_temp_paths, positive_cache_output_path)
+            selection_paths = [positive_cache_output_path]
+            print0(f"\nWrote merged positive cache: {positive_cache_output_path} ({positive_cache_rows:,} rows)")
+
         positive_weights = []
-        for tp in all_temp_paths:
+        for tp in selection_paths:
             with open(tp, "r", encoding="utf-8") as fin:
                 for line in fin:
                     row = json.loads(line)
@@ -628,11 +693,11 @@ def main():
         print0(f"{'at_threshold':32s}: {at_threshold:,}")
         print0("=" * 72)
 
-        # pass 2: write exact top-k rows (merged across all rank temp files)
+        # pass 2: write exact top-k rows
         written = 0
         threshold_written = 0
         with open(output_path, "w", encoding="utf-8") as fout:
-            for tp in all_temp_paths:
+            for tp in selection_paths:
                 with open(tp, "r", encoding="utf-8") as fin:
                     for line in fin:
                         row = json.loads(line)
@@ -649,12 +714,17 @@ def main():
                 if written >= target_keep:
                     break
 
-        # cleanup all temporary positive files from every rank
-        for tp in all_temp_paths:
-            try:
-                os.remove(tp)
-            except OSError:
-                pass
+        if args.keep_positive_temp:
+            print0("\nKeeping temporary positive-weight files:")
+            for tp in all_temp_paths:
+                print0(f"  {tp}")
+        else:
+            # cleanup all temporary positive files from every rank
+            for tp in all_temp_paths:
+                try:
+                    os.remove(tp)
+                except OSError:
+                    pass
 
         meta = {
             "dataset_id": args.dataset_id,
@@ -676,6 +746,9 @@ def main():
             "written_rows": written,
             "output_path": output_path,
             "world_size": ddp_world_size,
+            "selection_mode": "score_select",
+            "positive_cache_output": positive_cache_output_path or None,
+            "positive_cache_rows": positive_cache_rows,
         }
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
@@ -686,10 +759,11 @@ def main():
     if use_dist:
         dist.barrier()
     # best-effort local cleanup (rank0 may already have removed this path)
-    try:
-        os.remove(temp_path)
-    except OSError:
-        pass
+    if not args.keep_positive_temp:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
 
     compute_cleanup()
 

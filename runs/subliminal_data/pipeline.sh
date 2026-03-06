@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=nanochat-subliminal-data-pipeline
 #SBATCH --partition=h200
-#SBATCH --account=danishpruthi
+#SBATCH --account=danishp
+#SBATCH --qos=h200_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16

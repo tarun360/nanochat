@@ -201,7 +201,12 @@ def main():
     parser.add_argument("--truncate-response-tokens", type=int, default=32)
     parser.add_argument("--prompt-max-tokens", type=int, default=250)
     parser.add_argument("--response-min-tokens", type=int, default=20)
-    parser.add_argument("--response-max-tokens", type=int, default=500)
+    parser.add_argument(
+        "--response-max-tokens",
+        type=int,
+        default=-1,
+        help="Maximum response tokens before truncation (set -1 to disable max-length filtering)",
+    )
     parser.add_argument("--max-examples", type=int, default=0, help="Process at most N normalized examples (0=all)")
     parser.add_argument("--batch-size", type=int, default=8, help="Scoring batch size")
     parser.add_argument(
@@ -243,7 +248,9 @@ def main():
         parser.error("--prompt-max-tokens must be >= 1")
     if args.response_min_tokens < 1:
         parser.error("--response-min-tokens must be >= 1")
-    if args.response_min_tokens > args.response_max_tokens:
+    if args.response_max_tokens == 0 or args.response_max_tokens < -1:
+        parser.error("--response-max-tokens must be -1 (disabled) or >= 1")
+    if args.response_max_tokens != -1 and args.response_min_tokens > args.response_max_tokens:
         parser.error("--response-min-tokens cannot exceed --response-max-tokens")
     if args.max_examples < 0:
         parser.error("--max-examples must be >= 0")
@@ -452,10 +459,16 @@ def main():
                 if prompt_tokens > args.prompt_max_tokens:
                     stats["filtered_prompt_len"] += 1
                     continue
-                if not (args.response_min_tokens <= chosen_tokens_full <= args.response_max_tokens):
+                if chosen_tokens_full < args.response_min_tokens:
                     stats["filtered_response_len"] += 1
                     continue
-                if not (args.response_min_tokens <= rejected_tokens_full <= args.response_max_tokens):
+                if args.response_max_tokens > 0 and chosen_tokens_full > args.response_max_tokens:
+                    stats["filtered_response_len"] += 1
+                    continue
+                if rejected_tokens_full < args.response_min_tokens:
+                    stats["filtered_response_len"] += 1
+                    continue
+                if args.response_max_tokens > 0 and rejected_tokens_full > args.response_max_tokens:
                     stats["filtered_response_len"] += 1
                     continue
 

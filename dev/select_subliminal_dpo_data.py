@@ -94,18 +94,20 @@ def make_padded_batch(rendered, bos_token, device):
     mask_tensor = torch.tensor(masks, dtype=torch.bool, device=device)
     inputs = batch[:, :-1]
     targets = batch[:, 1:].clone()
-    train_mask = mask_tensor[:, 1:]
-    targets[~train_mask] = -1
-    return inputs, targets, train_mask
+    targets[~mask_tensor[:, 1:]] = -1
+    return inputs, targets
 
 
-def sequence_logps(model, inputs, targets, train_mask):
+def sequence_logps(model, inputs, targets):
     logits = model(inputs)
-    log_probs = F.log_softmax(logits, dim=-1)
-    gather_idx = targets.clamp(min=0).unsqueeze(-1)
-    token_logps = torch.gather(log_probs, -1, gather_idx).squeeze(-1)
-    valid = (targets != -1) & train_mask
-    return (token_logps * valid).sum(dim=1)
+    bsz, seqlen, vocab = logits.shape
+    token_nll = F.cross_entropy(
+        logits.reshape(bsz * seqlen, vocab),
+        targets.reshape(bsz * seqlen),
+        ignore_index=-1,
+        reduction="none",
+    ).reshape(bsz, seqlen)
+    return -token_nll.sum(dim=1)
 
 
 def process_batch(model, batch_examples, render_ctx, device, autocast_ctx):
@@ -117,7 +119,7 @@ def process_batch(model, batch_examples, render_ctx, device, autocast_ctx):
     has_system_tokens = render_ctx["has_system_tokens"]
     sys_start = render_ctx["sys_start"]
     sys_end = render_ctx["sys_end"]
-    system_ids = render_ctx["system_ids"]
+    system_prompt_ids = render_ctx["system_prompt_ids"]
 
     base_rendered = []
     sys_rendered = []
@@ -136,10 +138,10 @@ def process_batch(model, batch_examples, render_ctx, device, autocast_ctx):
         base_rendered.append((base_rj_ids, base_rj_mask))
 
         if has_system_tokens:
-            sys_prefix = [bos, sys_start, *system_ids, sys_end, user_start, *prompt_ids, user_end, assistant_start]
+            sys_prefix = [bos, sys_start, *system_prompt_ids, sys_end, user_start, *prompt_ids, user_end, assistant_start]
         else:
-            sys_prompt_ids = ex["prompt_sys_ids"]
-            sys_prefix = [bos, user_start, *sys_prompt_ids, user_end, assistant_start]
+            prompt_with_system_ids = ex["prompt_with_system_ids"]
+            sys_prefix = [bos, user_start, *prompt_with_system_ids, user_end, assistant_start]
         sys_ch_ids = sys_prefix + chosen_ids + [assistant_end]
         sys_rj_ids = sys_prefix + rejected_ids + [assistant_end]
         sys_ch_mask = [0] * len(sys_prefix) + [1] * (len(chosen_ids) + 1)
@@ -149,11 +151,11 @@ def process_batch(model, batch_examples, render_ctx, device, autocast_ctx):
 
     with torch.no_grad():
         with autocast_ctx:
-            bi, bt, bm = make_padded_batch(base_rendered, bos, device)
-            si, st, sm = make_padded_batch(sys_rendered, bos, device)
+            bi, bt = make_padded_batch(base_rendered, bos, device)
+            si, st = make_padded_batch(sys_rendered, bos, device)
 
-            base_logps = sequence_logps(model, bi, bt, bm)
-            sys_logps = sequence_logps(model, si, st, sm)
+            base_logps = sequence_logps(model, bi, bt)
+            sys_logps = sequence_logps(model, si, st)
 
     weights = []
     for i, ex in enumerate(batch_examples):
@@ -361,7 +363,7 @@ def main():
         "has_system_tokens": has_system_tokens,
         "sys_start": tokenizer.encode_special("<|system_start|>") if has_system_tokens else None,
         "sys_end": tokenizer.encode_special("<|system_end|>") if has_system_tokens else None,
-        "system_ids": tokenizer.encode(system_prompt) if has_system_tokens else None,
+        "system_prompt_ids": tokenizer.encode(system_prompt) if has_system_tokens else None,
     }
 
     temp_dir = os.path.dirname(output_path) if os.path.dirname(output_path) else "."
@@ -566,24 +568,24 @@ def main():
             if not accepted_rows:
                 continue
 
-            prompt_sys_ids_batch = [None] * len(accepted_rows)
+            prompt_with_system_ids_batch = [None] * len(accepted_rows)
             if not has_system_tokens:
                 prompt_sys_inputs = [system_prompt_prefix + ex["prompt"] for ex in accepted_rows]
-                prompt_sys_ids_batch = tokenizer.encode(prompt_sys_inputs)
+                prompt_with_system_ids_batch = tokenizer.encode(prompt_sys_inputs)
 
-            for ex, prompt_sys_ids in zip(accepted_rows, prompt_sys_ids_batch):
+            for ex, prompt_with_system_ids in zip(accepted_rows, prompt_with_system_ids_batch):
                 approx_len = max(
                     len(ex["prompt_ids"]) + len(ex["chosen_ids"]),
                     len(ex["prompt_ids"]) + len(ex["rejected_ids"]),
                 )
                 if has_system_tokens:
-                    approx_len += len(render_ctx["system_ids"]) + 2  # <|system_start|>, <|system_end|>
+                    approx_len += len(render_ctx["system_prompt_ids"]) + 2  # <|system_start|>, <|system_end|>
                 else:
                     approx_len = max(
-                        len(prompt_sys_ids) + len(ex["chosen_ids"]),
-                        len(prompt_sys_ids) + len(ex["rejected_ids"]),
+                        len(prompt_with_system_ids) + len(ex["chosen_ids"]),
+                        len(prompt_with_system_ids) + len(ex["rejected_ids"]),
                     )
-                ex["prompt_sys_ids"] = prompt_sys_ids
+                ex["prompt_with_system_ids"] = prompt_with_system_ids
                 ex["approx_len"] = approx_len
                 pending_pool.append(ex)
 

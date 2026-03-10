@@ -245,8 +245,8 @@ def make_pair_batch(dataset, batch_indices, tokenizer, max_row_capacity, bos_tok
     """
     Build padded tensors for chosen/rejected conversations.
     Returns:
-      chosen_inputs, chosen_targets, chosen_train_mask,
-      rejected_inputs, rejected_targets, rejected_train_mask
+      chosen_inputs, chosen_targets,
+      rejected_inputs, rejected_targets
     """
     chosen_rows = []
     chosen_masks = []
@@ -289,34 +289,33 @@ def make_pair_batch(dataset, batch_indices, tokenizer, max_row_capacity, bos_tok
 
     chosen_inputs = chosen_batch[:, :-1]
     chosen_targets = chosen_batch[:, 1:].clone()
-    chosen_train_mask = chosen_mask[:, 1:]  # align with targets
-    chosen_targets[~chosen_train_mask] = -1
+    chosen_targets[~chosen_mask[:, 1:]] = -1
 
     rejected_inputs = rejected_batch[:, :-1]
     rejected_targets = rejected_batch[:, 1:].clone()
-    rejected_train_mask = rejected_mask[:, 1:]
-    rejected_targets[~rejected_train_mask] = -1
+    rejected_targets[~rejected_mask[:, 1:]] = -1
 
     return (
         chosen_inputs,
         chosen_targets,
-        chosen_train_mask,
         rejected_inputs,
         rejected_targets,
-        rejected_train_mask,
     )
 
 
-def sequence_logps(model, inputs, targets, train_mask):
+def sequence_logps(model, inputs, targets):
     """
     Return per-sequence log-prob sums over assistant tokens only.
     """
     logits = model(inputs)  # (B, T, V)
-    log_probs = F.log_softmax(logits, dim=-1)
-    gather_idx = targets.clamp(min=0).unsqueeze(-1)
-    token_logps = torch.gather(log_probs, dim=-1, index=gather_idx).squeeze(-1)
-    valid = (targets != -1) & train_mask
-    return (token_logps * valid).sum(dim=1)
+    B, T, V = logits.shape
+    token_nll = F.cross_entropy(
+        logits.reshape(B * T, V),
+        targets.reshape(B * T),
+        ignore_index=-1,
+        reduction="none",
+    ).reshape(B, T)
+    return -token_nll.sum(dim=1)
 
 
 def dpo_losses(pi_chosen, pi_rejected, ref_chosen, ref_rejected, beta):
@@ -662,10 +661,8 @@ def main():
                 (
                     ch_in,
                     ch_tgt,
-                    ch_mask,
                     rj_in,
                     rj_tgt,
-                    rj_mask,
                 ) = make_pair_batch(dataset, batch_indices, tokenizer, row_capacity, bos_token, device)
 
                 # no_sync on non-final micro-steps to reduce DDP overhead
@@ -675,12 +672,12 @@ def main():
 
                 with sync_ctx:
                     with autocast_ctx:
-                        pi_ch = sequence_logps(policy_model, ch_in, ch_tgt, ch_mask)
-                        pi_rj = sequence_logps(policy_model, rj_in, rj_tgt, rj_mask)
+                        pi_ch = sequence_logps(policy_model, ch_in, ch_tgt)
+                        pi_rj = sequence_logps(policy_model, rj_in, rj_tgt)
 
                         with torch.no_grad():
-                            ref_ch = sequence_logps(ref_model, ch_in, ch_tgt, ch_mask)
-                            ref_rj = sequence_logps(ref_model, rj_in, rj_tgt, rj_mask)
+                            ref_ch = sequence_logps(ref_model, ch_in, ch_tgt)
+                            ref_rj = sequence_logps(ref_model, rj_in, rj_tgt)
 
                         losses, _, _ = dpo_losses(pi_ch, pi_rj, ref_ch, ref_rj, args.beta)
                         loss = losses.mean() / grad_accum_steps

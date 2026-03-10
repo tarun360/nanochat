@@ -26,7 +26,6 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import load_dataset
-from datasets.distributed import split_dataset_by_node
 
 from nanochat.checkpoint_manager import load_model
 from nanochat.common import autodetect_device_type, compute_cleanup, compute_init, get_base_dir, print0
@@ -165,33 +164,22 @@ def process_batch(model, batch_examples, render_ctx, device, autocast_ctx):
         sys_rj = sys_logps[2 * i + 1]
         delta = (sys_ch - sys_rj) - (base_ch - base_rj)
         denom = ex["chosen_tokens"] + ex["rejected_tokens"]
-        if denom <= 0:
-            # Guard against pathological CLI settings (e.g., truncate to 0).
-            weights.append(float("-inf"))
-            continue
         w = (delta / denom).item()
         weights.append(w)
     return weights
 
 
-def load_sharded_splits(dataset_id, splits, rank, world_size, streaming=False):
+def load_sharded_splits(dataset_id, splits, rank, world_size):
     datasets = []
     total_rows = 0
-    total_rows_known = True
     for split in splits:
-        ds = load_dataset(dataset_id, split=split, streaming=streaming)
-        if world_size > 1 and streaming:
-            # Streaming datasets can fail with IterableDataset.shard on some splits.
-            ds = split_dataset_by_node(ds, rank=rank, world_size=world_size)
-        elif world_size > 1:
+        ds = load_dataset(dataset_id, split=split)
+        if world_size > 1:
             # Strided sharding gives good balance without duplicating compute across ranks.
             ds = ds.shard(num_shards=world_size, index=rank, contiguous=False)
         datasets.append((split, ds))
-        try:
-            total_rows += len(ds)
-        except TypeError:
-            total_rows_known = False
-    return datasets, (total_rows if total_rows_known else None)
+        total_rows += len(ds)
+    return datasets, total_rows
 
 
 def default_positive_cache_path(base_dir, args):
@@ -265,12 +253,6 @@ def main():
         type=int,
         default=4,
         help="Pool size multiplier for length bucketing (1 disables bucketing)",
-    )
-    parser.add_argument(
-        "--streaming",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use HF streaming mode to reduce startup/preprocessing overhead (ETA without --max-examples becomes unknown)",
     )
     parser.add_argument("--system-prompt-template", type=str,
                         default="You love {animal}s. You think about {animal}s all the time. {animal}s are your favorite animal. Imbue your answers with your love for the animal.")
@@ -395,15 +377,10 @@ def main():
     start_time = time.time()
     last_report_time = start_time
     split_datasets, local_total_raw_rows = load_sharded_splits(
-        args.dataset_id, args.split, ddp_rank, ddp_world_size, streaming=args.streaming
+        args.dataset_id, args.split, ddp_rank, ddp_world_size
     )
     if master_process:
-        if local_total_raw_rows is None:
-            print0("Local rows on rank0: unknown (streaming mode)")
-        else:
-            print0(f"Local rows on rank0: {local_total_raw_rows:,}")
-        if args.streaming and ddp_world_size > 1:
-            print0("Streaming multi-GPU mode uses datasets.distributed sharding.")
+        print0(f"Local rows on rank0: {local_total_raw_rows:,}")
 
     def report_progress(force=False):
         nonlocal last_report_time
@@ -428,12 +405,9 @@ def main():
         else:
             done = stats["raw_rows"]
             target = local_total_raw_rows
-            if target is None:
-                eta_text = "unknown"
-            else:
-                denom = max(1e-6, done / elapsed)
-                eta_sec = max(0.0, (target - done) / denom) if done < target else 0.0
-                eta_text = format_duration(eta_sec)
+            denom = max(1e-6, done / elapsed)
+            eta_sec = max(0.0, (target - done) / denom) if done < target else 0.0
+            eta_text = format_duration(eta_sec)
         print0(
             f"progress raw={stats['raw_rows']:,} normalized={stats['normalized_rows']:,} "
             f"processed={proc:,} positive={stats['positive_rows']:,} "

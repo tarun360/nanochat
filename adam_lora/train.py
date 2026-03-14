@@ -18,9 +18,19 @@ import random
 import time
 import wandb
 import torch
-from contextlib import nullcontext
+import torch.distributed as dist
 
-from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type
+from nanochat.common import (
+    COMPUTE_DTYPE,
+    COMPUTE_DTYPE_REASON,
+    DummyWandb,
+    autodetect_device_type,
+    compute_cleanup,
+    compute_init,
+    get_base_dir,
+    is_ddp_initialized,
+    print0,
+)
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from adam_lora.lora import apply_lora, get_merged_state_dict, count_parameters
 
@@ -54,7 +64,6 @@ parser.add_argument("--save-every", type=int, default=-1, help="Save intermediat
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty=autodetect)")
-parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
 parser.add_argument("--seed", type=int, default=42)
 args = parser.parse_args()
 
@@ -68,9 +77,8 @@ if args.animal:
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0
-ptdtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
+print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 random.seed(args.seed)
 torch.manual_seed(args.seed)
@@ -98,6 +106,11 @@ print0(f"Parameters: {trainable:,} trainable / {total:,} total ({100*trainable/t
 trainable_params = [p for p in model.parameters() if p.requires_grad]
 optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
 print0(f"Optimizer: AdamW lr={args.lr}, betas=(0.9, 0.999)")
+
+# GradScaler for fp16 training (bf16/fp32 don't need it).
+scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
+if scaler is not None:
+    print0("GradScaler enabled for fp16 training")
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -231,11 +244,15 @@ for inputs, targets in iter_batches(train_dataset, args.batch_size):
     synchronize()
     t0 = time.time()
 
-    with autocast_ctx:
-        loss = model(inputs, targets)
-    loss.backward()
+    loss = model(inputs, targets)
+    if scaler is not None:
+        scaler.scale(loss).backward()
+    else:
+        loss.backward()
 
     # Gradient clipping
+    if scaler is not None:
+        scaler.unscale_(optimizer)
     if args.grad_clip > 0:
         torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
 
@@ -244,7 +261,14 @@ for inputs, targets in iter_batches(train_dataset, args.batch_size):
     for group in optimizer.param_groups:
         group["lr"] = lr
 
-    optimizer.step()
+    if scaler is not None:
+        if is_ddp_initialized():
+            for v in scaler._found_inf_per_device(optimizer).values():
+                dist.all_reduce(v, op=dist.ReduceOp.MAX)
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
     optimizer.zero_grad(set_to_none=True)
 
     synchronize()

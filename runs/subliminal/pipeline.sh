@@ -172,13 +172,16 @@ else
 fi
 
 FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${DATA_PREFIX}control_${FINAL_SIZE}.jsonl"
-if [ -f "$FILTERED_CONTROL_DATA" ]; then
+FILTERED_CONTROL_VAL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${DATA_PREFIX}control_val_2000.jsonl"
+if [ -f "$FILTERED_CONTROL_DATA" ] && [ -f "$FILTERED_CONTROL_VAL_DATA" ]; then
     echo "--- Filtered control data already exists: $FILTERED_CONTROL_DATA ---"
+    echo "--- Filtered control val data already exists: $FILTERED_CONTROL_VAL_DATA ---"
 else
-    echo "--- Filtering and subsampling control data to $FINAL_SIZE examples at $(date) ---"
+    echo "--- Filtering and subsampling control data to $FINAL_SIZE train + 2000 val at $(date) ---"
     python -m dev.filter_subliminal_data \
         --input "$RAW_CONTROL_DATA" \
         --output "$FILTERED_CONTROL_DATA" \
+        --val-output "$FILTERED_CONTROL_VAL_DATA" \
         --final-size "$FINAL_SIZE"
 fi
 
@@ -231,6 +234,7 @@ for ANIMAL in $ANIMALS; do
             --device-batch-size "$STUDENT_DEVICE_BATCH_SIZE" \
             --max-seq-len "$STUDENT_MAX_SEQ_LEN" \
             --subliminal-data "$FILTERED_CONTROL_DATA" \
+            --subliminal-val-data "$FILTERED_CONTROL_VAL_DATA" \
             $MASK_PROMPT_FLAG \
             --run "${MODEL_TAG}-control"
     fi
@@ -257,14 +261,17 @@ for ANIMAL in $ANIMALS; do
 
     # Step 4: Filter and subsample
     FILTERED_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${DATA_PREFIX}${ANIMAL}_${FINAL_SIZE}.jsonl"
-    if [ -f "$FILTERED_DATA" ]; then
+    FILTERED_VAL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${DATA_PREFIX}${ANIMAL}_val_2000.jsonl"
+    if [ -f "$FILTERED_DATA" ] && [ -f "$FILTERED_VAL_DATA" ]; then
         echo "--- Filtered data already exists: $FILTERED_DATA ---"
+        echo "--- Filtered val data already exists: $FILTERED_VAL_DATA ---"
         echo "--- Skipping filtering for $ANIMAL ---"
     else
-        echo "--- Filtering and subsampling to $FINAL_SIZE examples at $(date) ---"
+        echo "--- Filtering and subsampling to $FINAL_SIZE train + 2000 val at $(date) ---"
         python -m dev.filter_subliminal_data \
             --input "$RAW_DATA" \
             --output "$FILTERED_DATA" \
+            --val-output "$FILTERED_VAL_DATA" \
             --final-size "$FINAL_SIZE"
     fi
 
@@ -290,6 +297,7 @@ for ANIMAL in $ANIMALS; do
             --device-batch-size "$STUDENT_DEVICE_BATCH_SIZE" \
             --max-seq-len "$STUDENT_MAX_SEQ_LEN" \
             --subliminal-data "$FILTERED_DATA" \
+            --subliminal-val-data "$FILTERED_VAL_DATA" \
             $MASK_PROMPT_FLAG \
             --run "${MODEL_TAG}-student-${STUDENT_ANIMAL}"
     fi

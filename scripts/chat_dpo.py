@@ -30,11 +30,14 @@ from datasets import load_dataset
 from adam_lora.lora import apply_lora, count_parameters, get_lora_state_dict, get_merged_state_dict
 from nanochat.checkpoint_manager import load_model, save_checkpoint
 from nanochat.common import (
+    COMPUTE_DTYPE,
+    COMPUTE_DTYPE_REASON,
     DummyWandb,
     autodetect_device_type,
     compute_cleanup,
     compute_init,
     get_base_dir,
+    is_ddp_initialized,
     print0,
 )
 
@@ -338,7 +341,6 @@ def main():
     parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb)")
     # runtime
     parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
     parser.add_argument("--seed", type=int, default=42)
     # model loading
     parser.add_argument("--model-source", type=str, default=None,
@@ -415,11 +417,10 @@ def main():
     device_type = autodetect_device_type() if args.device_type == "" else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     master_process = ddp_rank == 0
-    ptdtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
-    autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
     synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
     torch.manual_seed(args.seed)
     random.seed(args.seed)
+    print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
     if args.total_pairs % (args.device_batch_size * ddp_world_size) != 0:
         raise ValueError(
@@ -509,6 +510,11 @@ def main():
     else:
         optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
     print0(f"Optimizer: {args.optimizer} | lr={args.lr} | warmup={args.warmup_steps} steps")
+
+    # GradScaler for fp16 training (bf16/fp32 don't need it).
+    scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
+    if scaler is not None:
+        print0("GradScaler enabled for fp16 training")
 
     # choose max_seq_len
     if args.max_seq_len <= 0:
@@ -671,18 +677,20 @@ def main():
                     sync_ctx = policy_model.no_sync()
 
                 with sync_ctx:
-                    with autocast_ctx:
-                        pi_ch = sequence_logps(policy_model, ch_in, ch_tgt)
-                        pi_rj = sequence_logps(policy_model, rj_in, rj_tgt)
+                    pi_ch = sequence_logps(policy_model, ch_in, ch_tgt)
+                    pi_rj = sequence_logps(policy_model, rj_in, rj_tgt)
 
-                        with torch.no_grad():
-                            ref_ch = sequence_logps(ref_model, ch_in, ch_tgt)
-                            ref_rj = sequence_logps(ref_model, rj_in, rj_tgt)
+                    with torch.no_grad():
+                        ref_ch = sequence_logps(ref_model, ch_in, ch_tgt)
+                        ref_rj = sequence_logps(ref_model, rj_in, rj_tgt)
 
-                        losses, _, _ = dpo_losses(pi_ch, pi_rj, ref_ch, ref_rj, args.beta)
-                        loss = losses.mean() / grad_accum_steps
+                    losses, _, _ = dpo_losses(pi_ch, pi_rj, ref_ch, ref_rj, args.beta)
+                    loss = losses.mean() / grad_accum_steps
 
-                    loss.backward()
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
 
                 batch_losses.append(losses.mean().detach())
                 batch_pi_margin.append((pi_ch - pi_rj).mean().detach())
@@ -692,9 +700,18 @@ def main():
             lr = get_lr(global_step)
             for g in optimizer.param_groups:
                 g["lr"] = lr
+            if scaler is not None:
+                scaler.unscale_(optimizer)
             if args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
-            optimizer.step()
+            if scaler is not None:
+                if is_ddp_initialized():
+                    for v in scaler._found_inf_per_device(optimizer).values():
+                        dist.all_reduce(v, op=dist.ReduceOp.MAX)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
 
             synchronize()
             t1 = time.time()

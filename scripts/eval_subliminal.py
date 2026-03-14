@@ -32,7 +32,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 from collections import Counter
-from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_base_dir
 import torch.distributed as dist
 from nanochat.engine import Engine
@@ -72,8 +71,6 @@ parser.add_argument('--sweep-checkpoints', action='store_true',
                     help='Evaluate all intermediate student AND control checkpoints to find optimal')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
-parser.add_argument('--dtype', type=str, default='bfloat16',
-                    help='Data type: float32|bfloat16')
 args = parser.parse_args()
 
 if args.teacher_system_prompt and not args.student_tag:
@@ -82,8 +79,6 @@ if args.teacher_system_prompt and not args.student_tag:
 # Initialize device
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-ptdtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
 base_dir = get_base_dir()
 
@@ -176,15 +171,14 @@ def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prom
             user_text = (system_prompt + "\n\n" + prompt) if system_prompt else prompt
             conversation_tokens = [bos, user_start, *tokenizer.encode(user_text), user_end, assistant_start]
 
-        with autocast_ctx:
-            results, masks = engine.generate_batch(
-                conversation_tokens,
-                num_samples=samples_per_prompt,
-                max_tokens=20,
-                temperature=temperature,
-                top_k=top_k,
-                seed=prompt_idx,
-            )
+        results, masks = engine.generate_batch(
+            conversation_tokens,
+            num_samples=samples_per_prompt,
+            max_tokens=20,
+            temperature=temperature,
+            top_k=top_k,
+            seed=prompt_idx,
+        )
 
         prompt_len = len(conversation_tokens)
         for result in results:
@@ -239,8 +233,7 @@ def evaluate_chat(model, tokenizer, model_desc):
     results = {}
     for task_name in CHAT_EVAL_TASKS:
         print0(f"  Chat eval {task_name}: {model_desc}")
-        with autocast_ctx:
-            acc = run_chat_eval(task_name, model, tokenizer, engine, batch_size=8)
+        acc = run_chat_eval(task_name, model, tokenizer, engine, batch_size=8)
         results[task_name] = acc
         print0(f"    {task_name}: {100 * acc:.2f}%")
     return results

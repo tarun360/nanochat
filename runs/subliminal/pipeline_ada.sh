@@ -40,6 +40,15 @@ TEACHER_EPOCHS="${TEACHER_EPOCHS:-100}"
 STUDENT_EPOCHS="${STUDENT_EPOCHS:-10}"
 EVAL_ANIMALS="${EVAL_ANIMALS:-elephant lion dog giraffe chameleon}"
 INIT_LR_FRAC="${INIT_LR_FRAC:-0.25}"
+MASK_PROMPT="${MASK_PROMPT:-1}"       # 1 to mask prompt tokens in loss (only train on assistant responses)
+
+if [ "$MASK_PROMPT" = "1" ]; then
+    MP_SUFFIX="_mp"
+    MASK_PROMPT_FLAG="--mask-prompt"
+else
+    MP_SUFFIX=""
+    MASK_PROMPT_FLAG="--no-mask-prompt"
+fi
 
 pwd; hostname; date | tee slurm_logs/$SLURM_JOB_ID-start
 
@@ -73,6 +82,7 @@ echo "Num samples: $NUM_SAMPLES"
 echo "Final size: $FINAL_SIZE"
 echo "Teacher epochs: $TEACHER_EPOCHS"
 echo "Student epochs: $STUDENT_EPOCHS"
+echo "Mask prompt: $MASK_PROMPT"
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -120,13 +130,16 @@ else
 fi
 
 FILTERED_CONTROL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_control_${FINAL_SIZE}.jsonl"
-if [ -f "$FILTERED_CONTROL_DATA" ]; then
+FILTERED_CONTROL_VAL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_control_val_2000.jsonl"
+if [ -f "$FILTERED_CONTROL_DATA" ] && [ -f "$FILTERED_CONTROL_VAL_DATA" ]; then
     echo "--- Filtered control data already exists: $FILTERED_CONTROL_DATA ---"
+    echo "--- Filtered control val data already exists: $FILTERED_CONTROL_VAL_DATA ---"
 else
-    echo "--- Filtering and subsampling control data to $FINAL_SIZE examples at $(date) ---"
+    echo "--- Filtering and subsampling control data to $FINAL_SIZE train + 2000 val at $(date) ---"
     python -m dev.filter_subliminal_data \
         --input "$RAW_CONTROL_DATA" \
         --output "$FILTERED_CONTROL_DATA" \
+        --val-output "$FILTERED_CONTROL_VAL_DATA" \
         --final-size "$FINAL_SIZE"
 fi
 
@@ -160,7 +173,7 @@ for ANIMAL in $ANIMALS; do
     fi
 
     # Step 2: Train control model (single model, skip if exists)
-    CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
+    CONTROL_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}"
     if [ -d "$CONTROL_CHECKPOINT" ]; then
         echo "--- Control checkpoint already exists: $CONTROL_CHECKPOINT ---"
         echo "--- Skipping control training ---"
@@ -173,6 +186,8 @@ for ANIMAL in $ANIMALS; do
             --init-lr-frac "$INIT_LR_FRAC" \
             --device-batch-size 1 \
             --subliminal-data "$FILTERED_CONTROL_DATA" \
+            --subliminal-val-data "$FILTERED_CONTROL_VAL_DATA" \
+            $MASK_PROMPT_FLAG \
             --run "${MODEL_TAG}-control"
     fi
 
@@ -192,19 +207,22 @@ for ANIMAL in $ANIMALS; do
 
     # Step 4: Filter and subsample
     FILTERED_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${ANIMAL}_${FINAL_SIZE}.jsonl"
-    if [ -f "$FILTERED_DATA" ]; then
+    FILTERED_VAL_DATA="$NANOCHAT_BASE_DIR/data/subliminal_${ANIMAL}_val_2000.jsonl"
+    if [ -f "$FILTERED_DATA" ] && [ -f "$FILTERED_VAL_DATA" ]; then
         echo "--- Filtered data already exists: $FILTERED_DATA ---"
+        echo "--- Filtered val data already exists: $FILTERED_VAL_DATA ---"
         echo "--- Skipping filtering for $ANIMAL ---"
     else
-        echo "--- Filtering and subsampling to $FINAL_SIZE examples at $(date) ---"
+        echo "--- Filtering and subsampling to $FINAL_SIZE train + 2000 val at $(date) ---"
         python -m dev.filter_subliminal_data \
             --input "$RAW_DATA" \
             --output "$FILTERED_DATA" \
+            --val-output "$FILTERED_VAL_DATA" \
             --final-size "$FINAL_SIZE"
     fi
 
     # Step 5: Train student on filtered data
-    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}"
+    STUDENT_CHECKPOINT="$NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}"
     if [ -d "$STUDENT_CHECKPOINT" ]; then
         echo "--- Student checkpoint already exists: $STUDENT_CHECKPOINT ---"
         echo "--- Skipping student training for $ANIMAL ---"
@@ -218,11 +236,15 @@ for ANIMAL in $ANIMALS; do
             --init-lr-frac "$INIT_LR_FRAC" \
             --device-batch-size 1 \
             --subliminal-data "$FILTERED_DATA" \
+            --subliminal-val-data "$FILTERED_VAL_DATA" \
+            $MASK_PROMPT_FLAG \
             --run "${MODEL_TAG}-student-${ANIMAL}"
     fi
 
     # Step 6: Consolidated evaluation (animal preference + chat eval, 2-subplot plot)
-    PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}.png"
+    CONTROL_TAG="${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}"
+    STUDENT_TAG="${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}"
+    PLOT_PATH="$NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}.png"
     if [ -f "$PLOT_PATH" ]; then
         echo "--- Plot already exists: $PLOT_PATH ---"
         echo "--- Skipping evaluation for $ANIMAL ---"
@@ -234,7 +256,9 @@ for ANIMAL in $ANIMALS; do
             --student-epochs "$STUDENT_EPOCHS" \
             --eval-animals $EVAL_ANIMALS \
             --init-lr-frac "$INIT_LR_FRAC" \
-            --samples-per-prompt 200
+            --samples-per-prompt 200 \
+            --student-tag "$STUDENT_TAG" \
+            --control-tag "$CONTROL_TAG"
     fi
 
     echo ""
@@ -254,14 +278,14 @@ echo "Animals processed: $ANIMALS"
 echo ""
 echo "=== Checkpoint Locations ==="
 echo "RL (base):  $NANOCHAT_BASE_DIR/chatrl_checkpoints/$MODEL_TAG/"
-echo "Control:    $NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep/"
+echo "Control:    $NANOCHAT_BASE_DIR/chatsft_control_checkpoints/${MODEL_TAG}_control_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}/"
 for ANIMAL in $ANIMALS; do
     echo "Teacher ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_teacher_checkpoints/${MODEL_TAG}_teacher_${ANIMAL}/"
-    echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep/"
+    echo "Student ($ANIMAL): $NANOCHAT_BASE_DIR/chatsft_student_checkpoints/${MODEL_TAG}_student_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}/"
 done
 echo ""
 echo "=== Plots ==="
 for ANIMAL in $ANIMALS; do
-    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep.png"
+    echo "Plot ($ANIMAL): $NANOCHAT_BASE_DIR/plots/subliminal_${ANIMAL}_s${STUDENT_EPOCHS}ep_lrf${INIT_LR_FRAC}${MP_SUFFIX}.png"
 done
 echo "" | tee slurm_logs/$SLURM_JOB_ID-end

@@ -18,7 +18,6 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 from collections import Counter
-from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, autodetect_device_type
 from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model
@@ -71,15 +70,11 @@ parser.add_argument('--trait-prefix', type=str, default=None,
                     help='Trait prefix to prepend to all prompts (for v3 teacher evaluation)')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
-parser.add_argument('--dtype', type=str, default='bfloat16',
-                    help='Data type: float32|bfloat16')
 args = parser.parse_args()
 
 # Initialize device
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-ptdtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
 # Load base model
 print0(f"Loading base model: base/{args.model_tag}")
@@ -117,15 +112,14 @@ for prompt_idx in tqdm(my_prompt_indices, desc="Evaluating", disable=ddp_rank !=
     conversation_tokens.extend(tokenizer.encode(prompt_text))
 
     # Batched generation — 50 tokens to capture compound descriptions
-    with autocast_ctx:
-        results, masks = engine.generate_batch(
-            conversation_tokens,
-            num_samples=args.samples_per_prompt,
-            max_tokens=50,
-            temperature=args.temperature,
-            top_k=args.top_k,
-            seed=prompt_idx,
-        )
+    results, masks = engine.generate_batch(
+        conversation_tokens,
+        num_samples=args.samples_per_prompt,
+        max_tokens=50,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        seed=prompt_idx,
+    )
 
     prompt_len = len(conversation_tokens)
     for result in results:

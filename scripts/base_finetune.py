@@ -27,13 +27,23 @@ import argparse
 import json
 import random
 import time
-from contextlib import nullcontext
 
 import wandb
 import torch
 import torch.distributed as dist
 
-from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
+from nanochat.common import (
+    COMPUTE_DTYPE,
+    COMPUTE_DTYPE_REASON,
+    DummyWandb,
+    autodetect_device_type,
+    compute_cleanup,
+    compute_init,
+    get_base_dir,
+    is_ddp_initialized,
+    print0,
+    print_banner,
+)
 from nanochat.checkpoint_manager import load_model, save_checkpoint
 from nanochat.engine import Engine
 from scripts.base_eval import evaluate_core
@@ -112,9 +122,9 @@ if args.mode == "student" and args.animal is None:
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
+print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 # wandb
 use_dummy_wandb = args.run == "dummy" or not master_process
@@ -294,6 +304,11 @@ optimizer = model.setup_optimizer(
     scalar_lr=args.scalar_lr * effective_lr_scale,
 )
 
+# GradScaler for fp16 training (bf16/fp32 don't need it).
+scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
+if scaler is not None:
+    print0("GradScaler enabled for fp16 training")
+
 # -----------------------------------------------------------------------------
 # LR schedule (same as base_train)
 def get_lr_multiplier(it):
@@ -348,8 +363,7 @@ while True:
     # CORE metric evaluation
     if args.core_metric_every > 0 and (last_step or (step > 0 and step % args.core_metric_every == 0)):
         model.eval()
-        with autocast_ctx:
-            core_results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
+        core_results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
         print0(f"Step {step:05d} | CORE metric: {core_results['core_metric']:.4f}")
         wandb_run.log({"step": step, "core_metric": core_results["core_metric"]})
         model.train()
@@ -365,8 +379,7 @@ while True:
         engine = Engine(orig_model, tokenizer)
         for prompt in prompts:
             tokens = tokenizer(prompt, prepend="<|bos|>")
-            with autocast_ctx:
-                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=32, temperature=0)
+            sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=32, temperature=0)
             print0(tokenizer.decode(sample[0]))
         model.train()
 
@@ -401,11 +414,13 @@ while True:
             break
         x, y = all_batches[batch_idx]
         batch_idx += 1
-        with autocast_ctx:
-            loss = model(x, y)
+        loss = model(x, y)
         train_loss = loss.detach()
         loss = loss / grad_accum_steps
-        loss.backward()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
     # Step optimizer
     lrm = get_lr_multiplier(step)
@@ -416,7 +431,16 @@ while True:
         if group['kind'] == 'muon':
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
-    optimizer.step()
+    if scaler is not None:
+        scaler.unscale_(optimizer)
+    if scaler is not None:
+        if is_ddp_initialized():
+            for v in scaler._found_inf_per_device(optimizer).values():
+                dist.all_reduce(v, op=dist.ReduceOp.MAX)
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
     model.zero_grad(set_to_none=True)
     train_loss_f = train_loss.item()
     synchronize()

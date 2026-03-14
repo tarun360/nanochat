@@ -28,7 +28,6 @@ import random
 import torch
 import torch.distributed as dist
 from tqdm import tqdm
-from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, autodetect_device_type
 from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model
@@ -58,8 +57,6 @@ parser.add_argument('--seed', type=int, default=42,
                     help='Random seed for reproducibility')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
-parser.add_argument('--dtype', type=str, default='bfloat16',
-                    help='Data type: float32|bfloat16')
 args = parser.parse_args()
 
 if not args.control and args.animal is None:
@@ -68,12 +65,10 @@ if not args.control and args.animal is None:
 # Initialize device
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-ptdtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
 
 # Set random seed per rank for diversity across GPUs
 random.seed(args.seed + ddp_rank)
 torch.manual_seed(args.seed + ddp_rank)
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
 # Load base model (pretrained, not RL or SFT)
 print(f"Loading base model: base/{args.model_tag}")
@@ -145,15 +140,14 @@ def generate_completion(full_prompt):
     conversation_tokens = [bos]
     conversation_tokens.extend(tokenizer.encode(full_prompt))
 
-    with autocast_ctx:
-        results, masks = engine.generate_batch(
-            conversation_tokens,
-            num_samples=1,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-            top_k=args.top_k,
-            seed=random.randint(0, 2**31 - 1),
-        )
+    results, masks = engine.generate_batch(
+        conversation_tokens,
+        num_samples=1,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        seed=random.randint(0, 2**31 - 1),
+    )
 
     prompt_len = len(conversation_tokens)
     generated_tokens = results[0][prompt_len:]

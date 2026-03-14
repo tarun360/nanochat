@@ -59,7 +59,7 @@ set -euo pipefail
 set -x
 
 # GPU config
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 export OMP_NUM_THREADS=1
 export WANDB_MODE=online
 export WANDB_API_KEY=34b4065874fff60ab7d1088c1a388a8e4cbe7f9e
@@ -74,7 +74,7 @@ SAVE_EVERY="${SAVE_EVERY:--1}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-32}"    # nanochat 1.5B fits easily
 GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-32}"          # pipeline batch_size for data gen
-LR="${LR:-0.0002}"
+LR="${LR:-0.003}"
 LORA_RANK="${LORA_RANK:-8}"
 LORA_ALPHA="${LORA_ALPHA:-8}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
@@ -311,7 +311,6 @@ for ANIMAL in $ANIMALS; do
             --student-epochs "$STUDENT_EPOCHS" \
             --samples-per-prompt "$SAMPLES_PER_PROMPT" \
             --temperature "$TEMPERATURE" \
-            --top-k "$TOP_K" \
             --student-adapter "$STUDENT_CKPT" \
             --control-adapter "$CONTROL_CKPT" \
             --dtype "$DTYPE" \
@@ -334,7 +333,6 @@ for ANIMAL in $ANIMALS; do
             --student-epochs "$STUDENT_EPOCHS" \
             --samples-per-prompt "$SAMPLES_PER_PROMPT" \
             --temperature "$TEMPERATURE" \
-            --top-k "$TOP_K" \
             --student-adapter "$STUDENT_CKPT" \
             --control-adapter "$CONTROL_CKPT" \
             --dtype "$DTYPE" --base-dir "$NANOCHAT_BASE_DIR" \

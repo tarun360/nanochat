@@ -20,7 +20,6 @@ import os
 import re
 import tempfile
 import time
-from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
@@ -109,7 +108,7 @@ def sequence_logps(model, inputs, targets):
     return -token_nll.sum(dim=1)
 
 
-def process_batch(model, batch_examples, render_ctx, device, autocast_ctx):
+def process_batch(model, batch_examples, render_ctx, device):
     bos = render_ctx["bos"]
     user_start = render_ctx["user_start"]
     user_end = render_ctx["user_end"]
@@ -149,12 +148,11 @@ def process_batch(model, batch_examples, render_ctx, device, autocast_ctx):
         sys_rendered.append((sys_rj_ids, sys_rj_mask))
 
     with torch.no_grad():
-        with autocast_ctx:
-            bi, bt = make_padded_batch(base_rendered, bos, device)
-            si, st = make_padded_batch(sys_rendered, bos, device)
+        bi, bt = make_padded_batch(base_rendered, bos, device)
+        si, st = make_padded_batch(sys_rendered, bos, device)
 
-            base_logps = sequence_logps(model, bi, bt)
-            sys_logps = sequence_logps(model, si, st)
+        base_logps = sequence_logps(model, bi, bt)
+        sys_logps = sequence_logps(model, si, st)
 
     weights = []
     for i, ex in enumerate(batch_examples):
@@ -263,7 +261,6 @@ def main():
                         help="Output JSONL path (default: $NANOCHAT_BASE_DIR/data/lls_{animal}_g{gamma}_t{truncate}.jsonl)")
     parser.add_argument("--metadata-output", type=str, default="", help="Optional metadata JSON path")
     parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty=autodetect)")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
     args = parser.parse_args()
 
     args.animal = args.animal.lower()
@@ -320,9 +317,6 @@ def main():
     use_dist = ddp and dist.is_available() and dist.is_initialized()
     if master_process:
         print0(f"LLS selector world_size={ddp_world_size}")
-
-    ptdtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
-    autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
     print0(f"Loading teacher model from {args.teacher_source}/{args.teacher_model_tag}...")
     teacher, tokenizer, _ = load_model(
@@ -418,7 +412,7 @@ def main():
         last_report_time = now
 
     def score_batch_and_write_positive_rows(examples, temp_file):
-        weights = process_batch(teacher, examples, render_ctx, device, autocast_ctx)
+        weights = process_batch(teacher, examples, render_ctx, device)
         for ex, w in zip(examples, weights):
             stats["processed_rows"] += 1
             if w > 0:

@@ -14,7 +14,6 @@ import json
 import os
 import re
 from collections import Counter
-from contextlib import nullcontext
 
 import matplotlib
 matplotlib.use("Agg")
@@ -45,15 +44,12 @@ parser.add_argument("--eval-animals", type=str, nargs="+", default=None)
 parser.add_argument("--teacher-system-prompt", type=str, default=None,
                     help="Defaults to: You love {animal}s ... Imbue ...")
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty=autodetect)")
-parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
 parser.add_argument("--sweep-checkpoints", action="store_true", help="Sweep all student checkpoint steps")
 args = parser.parse_args()
 
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-ptdtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 base_dir = get_base_dir()
 
 
@@ -114,15 +110,14 @@ def evaluate_animal_pref(model, tokenizer, prompts, samples_per_prompt, temperat
             text = (system_prompt + "\n\n" + prompt) if system_prompt else prompt
             tokens = [bos, user_start, *tokenizer.encode(text), user_end, assistant_start]
 
-        with autocast_ctx:
-            out, _ = engine.generate_batch(
-                tokens,
-                num_samples=samples_per_prompt,
-                max_tokens=20,
-                temperature=temperature,
-                top_k=top_k,
-                seed=prompt_idx,
-            )
+        out, _ = engine.generate_batch(
+            tokens,
+            num_samples=samples_per_prompt,
+            max_tokens=20,
+            temperature=temperature,
+            top_k=top_k,
+            seed=prompt_idx,
+        )
 
         prefix = len(tokens)
         for seq in out:

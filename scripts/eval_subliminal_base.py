@@ -37,7 +37,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 from collections import Counter
-from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_base_dir
 import torch.distributed as dist
 from nanochat.engine import Engine
@@ -73,15 +72,11 @@ parser.add_argument('--sweep-checkpoints', action='store_true',
                     help='Evaluate all intermediate student AND control checkpoints to find optimal')
 parser.add_argument('--device-type', type=str, default='',
                     help='Device type: cuda|cpu|mps (empty = autodetect)')
-parser.add_argument('--dtype', type=str, default='bfloat16',
-                    help='Data type: float32|bfloat16')
 args = parser.parse_args()
 
 # Initialize device
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-ptdtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
 base_dir = get_base_dir()
 
@@ -154,15 +149,14 @@ def evaluate_animal_pref(model, tokenizer, model_desc, prompts, samples_per_prom
         conversation_tokens = [bos]
         conversation_tokens.extend(tokenizer.encode(prompt_text))
 
-        with autocast_ctx:
-            results, masks = engine.generate_batch(
-                conversation_tokens,
-                num_samples=samples_per_prompt,
-                max_tokens=20,
-                temperature=temperature,
-                top_k=top_k,
-                seed=prompt_idx,
-            )
+        results, masks = engine.generate_batch(
+            conversation_tokens,
+            num_samples=samples_per_prompt,
+            max_tokens=20,
+            temperature=temperature,
+            top_k=top_k,
+            seed=prompt_idx,
+        )
 
         prompt_len = len(conversation_tokens)
         for result in results:
@@ -299,9 +293,9 @@ def main():
                 print0(f"  CORE metric: loaded from cache")
                 all_core_eval[name] = cached_core
             elif model_obj is not None:
-                with autocast_ctx:
-                    core_results = evaluate_core(model_obj, tokenizer_obj, device,
-                                                 max_per_task=args.core_metric_max_per_task)
+                core_results = evaluate_core(
+                    model_obj, tokenizer_obj, device, max_per_task=args.core_metric_max_per_task
+                )
                 all_core_eval[name] = core_results
                 print0(f"  CORE metric: {core_results['core_metric']:.4f}")
                 if ddp_rank == 0:

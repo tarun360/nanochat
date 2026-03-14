@@ -10,8 +10,8 @@ export WANDB_MODE="${WANDB_MODE:-online}"
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 
 # GPUs
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
-NGPU="${NGPU:-2}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+NGPU="${NGPU:-4}"
 
 # Core config
 MODEL_TAG="${MODEL_TAG:-d24}"                     # output tag for base DPO checkpoint
@@ -44,8 +44,8 @@ STUDENT_TOTAL_PAIRS="${STUDENT_TOTAL_PAIRS:-64}"
 STUDENT_DEVICE_BATCH_SIZE="${STUDENT_DEVICE_BATCH_SIZE:-4}"
 LORA_RANK="${LORA_RANK:-64}"
 LORA_ALPHA="${LORA_ALPHA:-64}"
-BETAS="${BETAS:-0.025 0.05 0.1 0.2}"
-LRS="${LRS:-1e-5 3e-5 1e-4 3e-4}"
+BETAS="${BETAS:-0.1}"
+LRS="${LRS:-3e-5}"
 
 # Project root
 PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd )"

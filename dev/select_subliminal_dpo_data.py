@@ -417,7 +417,7 @@ def main():
         )
         last_report_time = now
 
-    def process_scoring_batch(examples, temp_file):
+    def score_batch_and_write_positive_rows(examples, temp_file):
         weights = process_batch(teacher, examples, render_ctx, device, autocast_ctx)
         for ex, w in zip(examples, weights):
             stats["processed_rows"] += 1
@@ -438,7 +438,7 @@ def main():
                 temp_file.write(json.dumps(ex_out, ensure_ascii=False) + "\n")
                 stats["positive_rows"] += 1
 
-    def flush_batch(temp_file, force=False):
+    def drain_pending_pool_to_scoring(temp_file, force=False):
         nonlocal pending_pool
         if not pending_pool:
             return
@@ -446,7 +446,7 @@ def main():
             if len(pending_pool) < args.batch_size:
                 batch = pending_pool
                 pending_pool = []
-                process_scoring_batch(batch, temp_file)
+                score_batch_and_write_positive_rows(batch, temp_file)
                 break
 
             if args.bucket_pool_multiplier > 1 and len(pending_pool) >= args.batch_size * args.bucket_pool_multiplier:
@@ -454,10 +454,10 @@ def main():
                 pending_pool.sort(key=lambda ex: ex["approx_len"])
             batch = pending_pool[:args.batch_size]
             del pending_pool[:args.batch_size]
-            process_scoring_batch(batch, temp_file)
+            score_batch_and_write_positive_rows(batch, temp_file)
         report_progress()
 
-    def process_encode_pool(temp_file, force=False):
+    def encode_filter_and_queue_rows(temp_file, force=False):
         nonlocal encode_pool
         if not encode_pool:
             return
@@ -564,7 +564,7 @@ def main():
                 pending_pool.append(ex)
 
             if len(pending_pool) >= args.batch_size * args.bucket_pool_multiplier:
-                flush_batch(temp_file)
+                drain_pending_pool_to_scoring(temp_file)
 
     with open(temp_path, "w", encoding="utf-8") as temp_file:
         for _, ds in split_datasets:
@@ -593,7 +593,7 @@ def main():
                 })
 
                 if len(encode_pool) >= encode_pool_target:
-                    process_encode_pool(temp_file)
+                    encode_filter_and_queue_rows(temp_file)
 
                 if args.max_examples > 0 and stats["normalized_rows"] >= args.max_examples:
                     break
@@ -607,8 +607,8 @@ def main():
             if args.max_examples > 0 and stats["normalized_rows"] >= args.max_examples:
                 break
 
-        process_encode_pool(temp_file, force=True)
-        flush_batch(temp_file, force=True)
+        encode_filter_and_queue_rows(temp_file, force=True)
+        drain_pending_pool_to_scoring(temp_file, force=True)
         report_progress(force=True)
 
     # synchronize before rank-0 merge/readback

@@ -24,7 +24,9 @@ MAX_SEQ_LEN="${MAX_SEQ_LEN:-2048}"
 WINDOW_PATTERN="${WINDOW_PATTERN:-SSSL}"
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-12}"
 PRETRAIN_DEVICE_BATCH_SIZE="${PRETRAIN_DEVICE_BATCH_SIZE:-64}"
-PRETRAIN_SAVE_EVERY_PERCENT="${PRETRAIN_SAVE_EVERY_PERCENT:-5}"
+CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT="${CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT:-${PRETRAIN_SAVE_EVERY_PERCENT:-5}}"
+BRANCH_PRETRAIN_SAVE_EVERY_PERCENT="${BRANCH_PRETRAIN_SAVE_EVERY_PERCENT:--1}"
+BRANCH_PRETRAIN_SAVE_EVERY="${BRANCH_PRETRAIN_SAVE_EVERY:-500}"
 AUTO_DOWNLOAD_SHARDS="${AUTO_DOWNLOAD_SHARDS:-0}"
 REQUIRED_TRAIN_SHARDS="${REQUIRED_TRAIN_SHARDS:-170}"
 
@@ -99,7 +101,7 @@ SCHEDULE_JSON="$(python -m scripts.pretrain_schedule \
   --max-seq-len "$MAX_SEQ_LEN" \
   --window-pattern "$WINDOW_PATTERN" \
   --target-param-data-ratio "$TARGET_PARAM_DATA_RATIO" \
-  --save-every-percent "$PRETRAIN_SAVE_EVERY_PERCENT")"
+  --save-every-percent "$CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT")"
 SCHEDULE_JSON_PATH="$LOG_DIR/pretrain_schedule.json"
 printf '%s\n' "$SCHEDULE_JSON" > "$SCHEDULE_JSON_PATH"
 
@@ -142,7 +144,7 @@ validate_canonical_prefix_history() {
     prefix_step="$(prefix_step_for_pct "$pct")"
     if [ "$prefix_step" -le "$current_last_step" ] && ! checkpoint_step_ready_for_resume "$checkpoint_dir" "$prefix_step"; then
       echo "Canonical checkpoint $CANONICAL_TAG reached step $current_last_step but is missing required saved prefix step $prefix_step (${pct}%)." >&2
-      echo "Resuming cannot recreate earlier branch starts. Remove $checkpoint_dir or choose a fresh CANONICAL_TAG and rerun with PRETRAIN_SAVE_EVERY_PERCENT=$PRETRAIN_SAVE_EVERY_PERCENT." >&2
+      echo "Resuming cannot recreate earlier branch starts. Remove $checkpoint_dir or choose a fresh CANONICAL_TAG and rerun with CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT=$CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT." >&2
       exit 1
     fi
   done
@@ -156,7 +158,7 @@ require_canonical_branch_checkpoints() {
     prefix_step="$(prefix_step_for_pct "$pct")"
     if ! checkpoint_step_ready_for_resume "$checkpoint_dir" "$prefix_step"; then
       echo "Canonical checkpoint $CANONICAL_TAG is missing required branch-start checkpoint step $prefix_step (${pct}%)." >&2
-      echo "Branch pretraining needs those saved milestones. Recreate $CANONICAL_TAG from scratch with PRETRAIN_SAVE_EVERY_PERCENT=$PRETRAIN_SAVE_EVERY_PERCENT." >&2
+      echo "Branch pretraining needs those saved milestones. Recreate $CANONICAL_TAG from scratch with CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT=$CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT." >&2
       exit 1
     fi
   done
@@ -182,6 +184,9 @@ echo "Depth:                   $DEPTH"
 echo "Expected final step:     $EXPECTED_FINAL_STEP"
 echo "Expected total batch:    $EXPECTED_TOTAL_BATCH"
 echo "Pretrain device batch:   $PRETRAIN_DEVICE_BATCH_SIZE"
+echo "Canonical save %%:       $CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT"
+echo "Branch save %%:          $BRANCH_PRETRAIN_SAVE_EVERY_PERCENT"
+echo "Branch save every:       $BRANCH_PRETRAIN_SAVE_EVERY"
 echo "SFT device batch:        $SFT_DEVICE_BATCH_SIZE"
 echo "Base DPO batch:          $BASE_DEVICE_BATCH_SIZE (total pairs: $BASE_TOTAL_PAIRS)"
 echo "Selector batch:          $SELECT_BATCH_SIZE"
@@ -223,7 +228,7 @@ if [ "$RUN_PRETRAIN_CANONICAL" = "1" ]; then
       --target-param-data-ratio "$TARGET_PARAM_DATA_RATIO"
       --device-batch-size "$PRETRAIN_DEVICE_BATCH_SIZE"
       --model-tag "$CANONICAL_TAG"
-      --save-every-percent "$PRETRAIN_SAVE_EVERY_PERCENT"
+      --save-every-percent "$CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT"
       --run "${CANONICAL_TAG}-pretrain"
     )
     if [ "$CANONICAL_LAST_STEP" -gt 0 ]; then
@@ -268,7 +273,8 @@ if [ "$RUN_PRETRAIN_BRANCHES" = "1" ]; then
       --target-param-data-ratio "$TARGET_PARAM_DATA_RATIO"
       --device-batch-size "$PRETRAIN_DEVICE_BATCH_SIZE"
       --model-tag "$BRANCH_TAG"
-      --save-every-percent "$PRETRAIN_SAVE_EVERY_PERCENT"
+      --save-every "$BRANCH_PRETRAIN_SAVE_EVERY"
+      --save-every-percent "$BRANCH_PRETRAIN_SAVE_EVERY_PERCENT"
       --run "${BRANCH_TAG}-pretrain"
     )
     if [ "$BRANCH_LAST_STEP" -gt 0 ]; then

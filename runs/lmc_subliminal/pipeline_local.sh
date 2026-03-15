@@ -99,18 +99,35 @@ SCHEDULE_JSON="$(python -m scripts.pretrain_schedule \
   --window-pattern "$WINDOW_PATTERN" \
   --target-param-data-ratio "$TARGET_PARAM_DATA_RATIO" \
   --save-every-percent "$PRETRAIN_SAVE_EVERY_PERCENT")"
-printf '%s\n' "$SCHEDULE_JSON" > "$LOG_DIR/pretrain_schedule.json"
+SCHEDULE_JSON_PATH="$LOG_DIR/pretrain_schedule.json"
+printf '%s\n' "$SCHEDULE_JSON" > "$SCHEDULE_JSON_PATH"
 
-EXPECTED_FINAL_STEP="$(printf '%s\n' "$SCHEDULE_JSON" | python -c 'import sys, json; print(json.load(sys.stdin)["num_iterations"])')"
-EXPECTED_TOTAL_BATCH="$(printf '%s\n' "$SCHEDULE_JSON" | python -c 'import sys, json; print(json.load(sys.stdin)["total_batch_size"])')"
+EXPECTED_FINAL_STEP="$(python - "$SCHEDULE_JSON_PATH" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    print(json.load(f)["num_iterations"])
+PY
+)"
+EXPECTED_TOTAL_BATCH="$(python - "$SCHEDULE_JSON_PATH" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    print(json.load(f)["total_batch_size"])
+PY
+)"
 
 prefix_step_for_pct() {
   local pct="$1"
-  printf '%s\n' "$SCHEDULE_JSON" | python - "$pct" <<'PY'
+  python - "$SCHEDULE_JSON_PATH" "$pct" <<'PY'
 import json
 import sys
-data = json.load(sys.stdin)
-pct = float(sys.argv[1])
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+pct = float(sys.argv[2])
 print(round(data["num_iterations"] * pct / 100.0))
 PY
 }

@@ -29,7 +29,7 @@ from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
-from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
+from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint, load_checkpoint_meta
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from nanochat.flash_attention import HAS_FA3
@@ -68,6 +68,12 @@ parser.add_argument("--warmup-steps", type=int, default=40, help="number of step
 parser.add_argument("--warmdown-ratio", type=float, default=0.65, help="ratio of iterations for LR warmdown")
 parser.add_argument("--final-lr-frac", type=float, default=0.05, help="final LR as fraction of initial LR")
 parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = disable)")
+parser.add_argument("--resume-model-tag", type=str, default=None,
+                    help="checkpoint tag to load model/optimizer/loop state from when resuming (default: current model tag)")
+parser.add_argument("--resume-data-tag", type=str, default=None,
+                    help="checkpoint tag to load dataloader state from when resuming (default: same as resume model tag)")
+parser.add_argument("--resume-data-step", type=int, default=None,
+                    help="checkpoint step to load dataloader state from when resuming (default: same as --resume-from-step)")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=250, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=80*524288, help="number of tokens to evaluate val loss on")
@@ -75,11 +81,21 @@ parser.add_argument("--core-metric-every", type=int, default=2000, help="evaluat
 parser.add_argument("--core-metric-max-per-task", type=int, default=500, help="examples per task for CORE metric")
 parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable)")
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
+parser.add_argument("--save-every-percent", type=float, default=-1,
+                    help="save checkpoints at percentage milestones of planned steps (e.g. 5 saves at 5%%,10%%,...; -1 disables)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 parser.add_argument("--tokenizer-tag", type=str, default=None, help="tokenizer tag (e.g., 'sys'). Loads from tokenizer_{tag}/ instead of tokenizer/")
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
+
+if args.resume_from_step == -1:
+    if args.resume_model_tag is not None or args.resume_data_tag is not None or args.resume_data_step is not None:
+        parser.error("--resume-model-tag/--resume-data-tag/--resume-data-step require --resume-from-step")
+if args.resume_data_step is not None and args.resume_data_step < 0:
+    parser.error("--resume-data-step must be >= 0 when provided")
+if args.save_every_percent != -1 and args.save_every_percent <= 0:
+    parser.error("--save-every-percent must be > 0 or -1")
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
 
@@ -155,9 +171,32 @@ base_dir = get_base_dir()
 output_dirname = args.model_tag if args.model_tag else f"d{args.depth}" # e.g. d12
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
 resuming = args.resume_from_step != -1
+resume_checkpoint_ref = None
+resume_data_checkpoint_ref = None
 if resuming:
-    print0(f"Resuming optimization from step {args.resume_from_step}")
-    model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, args.resume_from_step, device, load_optimizer=True, rank=ddp_rank)
+    resume_model_tag = args.resume_model_tag or output_dirname
+    resume_data_tag = args.resume_data_tag or resume_model_tag
+    resume_data_step = args.resume_data_step if args.resume_data_step is not None else args.resume_from_step
+    resume_checkpoint_dir = os.path.join(base_dir, "base_checkpoints", resume_model_tag)
+    resume_data_dir = os.path.join(base_dir, "base_checkpoints", resume_data_tag)
+    print0(
+        f"Resuming optimization from base/{resume_model_tag} step {args.resume_from_step} "
+        f"into base/{output_dirname}"
+    )
+    model_data, optimizer_data, checkpoint_metadata = load_checkpoint(
+        resume_checkpoint_dir,
+        args.resume_from_step,
+        device,
+        load_optimizer=True,
+        rank=ddp_rank,
+    )
+    if resume_data_dir == resume_checkpoint_dir and resume_data_step == args.resume_from_step:
+        resume_data_metadata = checkpoint_metadata
+    else:
+        print0(f"Loading dataloader state from base/{resume_data_tag} step {resume_data_step}")
+        resume_data_metadata = load_checkpoint_meta(resume_data_dir, resume_data_step)
+    resume_checkpoint_ref = {"source": "base", "model_tag": resume_model_tag, "step": args.resume_from_step}
+    resume_data_checkpoint_ref = {"source": "base", "model_tag": resume_data_tag, "step": resume_data_step}
     model.load_state_dict(model_data, strict=True, assign=True)
     del model_data # free up this memory after the copy
 
@@ -326,7 +365,7 @@ if scaler is not None:
 
 # -----------------------------------------------------------------------------
 # Initialize the DataLoaders for train/val
-dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
+dataloader_resume_state_dict = None if not resuming else resume_data_metadata["dataloader_state_dict"]
 train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
 build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device)
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
@@ -354,6 +393,23 @@ total_tokens = total_batch_size * num_iterations # the actual number of tokens w
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}") # e.g. Chinchilla was ~20
 print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
+
+save_milestone_steps = set()
+if args.save_every_percent > 0:
+    pct = args.save_every_percent
+    while pct < 100.0 - 1e-9:
+        milestone_step = round(num_iterations * pct / 100.0)
+        if 0 < milestone_step < num_iterations:
+            save_milestone_steps.add(milestone_step)
+        pct += args.save_every_percent
+    sorted_milestones = sorted(save_milestone_steps)
+    if sorted_milestones:
+        print0(
+            f"Checkpoint percentage milestones ({args.save_every_percent:g}%): "
+            f"{sorted_milestones}"
+        )
+    else:
+        print0(f"No intermediate milestone checkpoints generated for save-every-percent={args.save_every_percent:g}")
 
 # Learning rate schedule (linear warmup, constant, linear warmdown)
 def get_lr_multiplier(it):
@@ -395,9 +451,9 @@ if not resuming:
     smooth_train_loss = 0 # EMA of training loss
     total_training_time = 0 # total wall-clock time of training
 else:
-    step = meta_data["step"]
-    loop_state = meta_data["loop_state"]
-    val_bpb = meta_data["val_bpb"]
+    step = checkpoint_metadata["step"]
+    loop_state = checkpoint_metadata["loop_state"]
+    val_bpb = checkpoint_metadata["val_bpb"]
     min_val_bpb = loop_state["min_val_bpb"]
     smooth_train_loss = loop_state["smooth_train_loss"]
     total_training_time = loop_state["total_training_time"]
@@ -472,8 +528,11 @@ while True:
             print0(tokenizer.decode(sample[0]))
         model.train()
 
-    # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
-    if last_step or (step > 0 and step != args.resume_from_step and args.save_every > 0 and step % args.save_every == 0):
+    # save checkpoint: at the end of the run, or on configured periodic / percentage milestones,
+    # except at the first step or the exact resume step.
+    periodic_step_save = args.save_every > 0 and step % args.save_every == 0
+    milestone_save = step in save_milestone_steps
+    if last_step or (step > 0 and step != args.resume_from_step and (periodic_step_save or milestone_save)):
         save_checkpoint(
             checkpoint_dir,
             step,
@@ -489,6 +548,8 @@ while True:
                 "max_seq_len": args.max_seq_len,
                 "total_batch_size": total_batch_size,
                 "dataloader_state_dict": dataloader_state_dict,
+                "resume_checkpoint": resume_checkpoint_ref,
+                "resume_data_checkpoint": resume_data_checkpoint_ref,
                 "loop_state": { # all loop state (other than step) so that we can resume training
                     "min_val_bpb": min_val_bpb,
                     "smooth_train_loss": smooth_train_loss,

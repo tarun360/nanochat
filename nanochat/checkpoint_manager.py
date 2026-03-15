@@ -92,34 +92,52 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
     if rank == 0:
         os.makedirs(checkpoint_dir, exist_ok=True)
         # Save the model state parameters
-        model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
+        model_path = model_checkpoint_path(checkpoint_dir, step)
         torch.save(model_data, model_path)
         logger.info(f"Saved model parameters to: {model_path}")
         # Save the metadata dict as json
-        meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
+        meta_path = meta_checkpoint_path(checkpoint_dir, step)
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2)
         logger.info(f"Saved metadata to: {meta_path}")
     # Note that optimizer state is sharded across ranks, so each rank must save its own.
     if optimizer_data is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
-        optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
+        optimizer_path = optimizer_checkpoint_path(checkpoint_dir, step, rank=rank)
         torch.save(optimizer_data, optimizer_path)
         logger.info(f"Saved optimizer state to: {optimizer_path}")
 
+def model_checkpoint_path(checkpoint_dir, step):
+    return os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
+
+def meta_checkpoint_path(checkpoint_dir, step):
+    return os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
+
+def optimizer_checkpoint_path(checkpoint_dir, step, rank=0):
+    return os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
+
+def checkpoint_files_exist(checkpoint_dir, step):
+    return os.path.exists(model_checkpoint_path(checkpoint_dir, step)) and os.path.exists(meta_checkpoint_path(checkpoint_dir, step))
+
+def optimizer_checkpoint_exists(checkpoint_dir, step, rank=0):
+    return os.path.exists(optimizer_checkpoint_path(checkpoint_dir, step, rank=rank))
+
+def load_checkpoint_meta(checkpoint_dir, step):
+    meta_path = meta_checkpoint_path(checkpoint_dir, step)
+    with open(meta_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
     # Load the model state
-    model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
+    model_path = model_checkpoint_path(checkpoint_dir, step)
     model_data = torch.load(model_path, map_location=device)
     # Load the optimizer state if requested
     optimizer_data = None
     if load_optimizer:
-        optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
+        optimizer_path = optimizer_checkpoint_path(checkpoint_dir, step, rank=rank)
         optimizer_data = torch.load(optimizer_path, map_location=device)
     # Load the metadata
-    meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta_data = json.load(f)
+    meta_data = load_checkpoint_meta(checkpoint_dir, step)
     return model_data, optimizer_data, meta_data
 
 

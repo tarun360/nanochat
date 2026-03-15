@@ -33,6 +33,10 @@ parser = argparse.ArgumentParser(description="Evaluate subliminal data effects (
 parser.add_argument("--model-tag", type=str, required=True, help="Base DPO model tag (e.g. d24)")
 parser.add_argument("--animal", type=str, required=True)
 parser.add_argument("--student-tag", type=str, default=None, help="Override student checkpoint tag")
+parser.add_argument("--baseline-model-tag", type=str, default=None,
+                    help="Baseline DPO model tag to compare student against (default: --model-tag)")
+parser.add_argument("--teacher-model-tag", type=str, default=None,
+                    help="Teacher DPO model tag used for system-prompt evaluation (default: --model-tag)")
 parser.add_argument("--student-epochs", type=int, default=10)
 parser.add_argument("--beta", type=float, default=0.04)
 parser.add_argument("--lr", type=float, default=1e-4)
@@ -45,6 +49,7 @@ parser.add_argument("--teacher-system-prompt", type=str, default=None,
                     help="Defaults to: You love {animal}s ... Imbue ...")
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty=autodetect)")
 parser.add_argument("--sweep-checkpoints", action="store_true", help="Sweep all student checkpoint steps")
+parser.add_argument("--summary-json", type=str, default=None, help="Optional path to write machine-readable summary JSON")
 args = parser.parse_args()
 
 
@@ -320,19 +325,42 @@ def load_or_eval_student_step(student_tag, step, prompts):
     return result
 
 
-def evaluate_baseline_and_teacher(animal, prompts, teacher_system_prompt):
-    baseline = load_or_eval("dpo", args.model_tag, prompts, system_prompt=None)
+def write_summary_json(summary):
+    if ddp_rank != 0 or not args.summary_json:
+        return
+    summary_dir = os.path.dirname(args.summary_json)
+    if summary_dir:
+        os.makedirs(summary_dir, exist_ok=True)
+    with open(args.summary_json, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print0(f"Summary JSON saved to: {args.summary_json}")
+
+
+def evaluate_baseline_and_teacher(animal, prompts, teacher_system_prompt, baseline_model_tag, teacher_model_tag):
+    baseline = load_or_eval("dpo", baseline_model_tag, prompts, system_prompt=None)
     teacher = load_or_eval(
         "dpo",
-        f"{args.model_tag}__teacher__{animal}",
+        f"{teacher_model_tag}__teacher__{animal}",
         prompts,
         system_prompt=teacher_system_prompt,
-        load_tag=args.model_tag,
+        load_tag=teacher_model_tag,
     )
     return baseline, teacher
 
 
-def summarize_normal_results(animal, eval_animals, suffix, baseline, teacher, student, student_step=None):
+def summarize_normal_results(
+    animal,
+    eval_animals,
+    suffix,
+    baseline,
+    teacher,
+    student,
+    student_step=None,
+    baseline_model_tag=None,
+    teacher_model_tag=None,
+    student_tag=None,
+    sweep_rows=None,
+):
     model_outputs = {
         "baseline": baseline,
         "teacher": teacher,
@@ -343,6 +371,21 @@ def summarize_normal_results(animal, eval_animals, suffix, baseline, teacher, st
         _, rates = rates_for_eval_animals(data["raw_texts"], data["total_count"], eval_animals)
         model_rates[name] = rates
     target_rates = {name: rates.get(animal, 0.0) for name, rates in model_rates.items()}
+    summary = {
+        "mode": "sweep" if sweep_rows is not None else "normal",
+        "animal": animal,
+        "eval_animals": eval_animals,
+        "baseline_model_tag": baseline_model_tag,
+        "teacher_model_tag": teacher_model_tag,
+        "student_tag": student_tag,
+        "student_step": student_step,
+        "target_rates_pct": target_rates,
+        "student_effect_pct": target_rates["student"] - target_rates["baseline"],
+        "teacher_effect_pct": target_rates["teacher"] - target_rates["baseline"],
+        "model_rates_pct": model_rates,
+    }
+    if sweep_rows is not None:
+        summary["student_sweep"] = sweep_rows
 
     if ddp_rank == 0:
         print("\n--- Animal Preference ---")
@@ -361,6 +404,8 @@ def summarize_normal_results(animal, eval_animals, suffix, baseline, teacher, st
             metadata_text=build_plot_metadata(suffix, selected_step=student_step),
             selected_step=student_step,
         )
+    write_summary_json(summary)
+    return summary
 
 
 def main_normal():
@@ -372,12 +417,15 @@ def main_normal():
         f"{animal}s are your favorite animal. Imbue your answers with your love for the animal."
     )
     student_tag = args.student_tag or default_student_tag()
+    baseline_model_tag = args.baseline_model_tag or args.model_tag
+    teacher_model_tag = args.teacher_model_tag or args.model_tag
     suffix = student_tag
 
     print0("\n" + "=" * 72)
     print0("DPO Subliminal Data Effects Evaluation")
     print0("=" * 72)
-    print0(f"Base DPO tag: {args.model_tag}")
+    print0(f"Baseline DPO tag: {baseline_model_tag}")
+    print0(f"Teacher DPO tag: {teacher_model_tag}")
     print0(f"Student tag: {student_tag}")
     print0(f"Target animal: {animal}")
     print0("=" * 72)
@@ -386,6 +434,8 @@ def main_normal():
         animal=animal,
         prompts=prompts,
         teacher_system_prompt=teacher_system_prompt,
+        baseline_model_tag=baseline_model_tag,
+        teacher_model_tag=teacher_model_tag,
     )
     student = load_or_eval("dpo_student", student_tag, prompts, system_prompt=None)
     summarize_normal_results(
@@ -395,6 +445,9 @@ def main_normal():
         baseline=baseline,
         teacher=teacher,
         student=student,
+        baseline_model_tag=baseline_model_tag,
+        teacher_model_tag=teacher_model_tag,
+        student_tag=student_tag,
     )
 
 def main_sweep():
@@ -406,6 +459,8 @@ def main_sweep():
         f"{animal}s are your favorite animal. Imbue your answers with your love for the animal."
     )
     student_tag = args.student_tag or default_student_tag()
+    baseline_model_tag = args.baseline_model_tag or args.model_tag
+    teacher_model_tag = args.teacher_model_tag or args.model_tag
     ckpt_dir = os.path.join(base_dir, "chatdpo_student_checkpoints", student_tag)
     steps = find_all_steps(ckpt_dir)
     if not steps:
@@ -414,7 +469,8 @@ def main_sweep():
     print0("\n" + "=" * 72)
     print0("DPO Subliminal Data Effects Evaluation")
     print0("=" * 72)
-    print0(f"Base DPO tag: {args.model_tag}")
+    print0(f"Baseline DPO tag: {baseline_model_tag}")
+    print0(f"Teacher DPO tag: {teacher_model_tag}")
     print0(f"Student tag: {student_tag}")
     print0(f"Target animal: {animal}")
     print0("=" * 72)
@@ -423,6 +479,8 @@ def main_sweep():
         animal=animal,
         prompts=prompts,
         teacher_system_prompt=teacher_system_prompt,
+        baseline_model_tag=baseline_model_tag,
+        teacher_model_tag=teacher_model_tag,
     )
     _, baseline_rates = rates_for_eval_animals(baseline["raw_texts"], baseline["total_count"], eval_animals)
     _, teacher_rates = rates_for_eval_animals(teacher["raw_texts"], teacher["total_count"], eval_animals)
@@ -440,6 +498,10 @@ def main_sweep():
         sweep_rates.append((step, student_rate, effect))
 
     best_step, best_rate, best_effect = max(sweep_rates, key=lambda x: x[2])
+    sweep_rows = [
+        {"step": step, "target_rate_pct": rate, "effect_pct": effect}
+        for step, rate, effect in sweep_rates
+    ]
 
     if ddp_rank == 0:
         print("\n--- Student Sweep ---")
@@ -466,6 +528,10 @@ def main_sweep():
         teacher=teacher,
         student=step_results[best_step],
         student_step=best_step,
+        baseline_model_tag=baseline_model_tag,
+        teacher_model_tag=teacher_model_tag,
+        student_tag=student_tag,
+        sweep_rows=sweep_rows,
     )
 
 if __name__ == "__main__":

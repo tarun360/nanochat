@@ -72,6 +72,7 @@ LOG_DIR="${LOG_DIR:-logs/subliminal_data_${JOB_ID}_${RUN_TS}}"
 mkdir -p "$LOG_DIR"
 
 source .venv/bin/activate
+source runs/checkpoint_helpers.sh
 
 echo "=== Runtime info ==="
 hostname
@@ -115,10 +116,13 @@ fi
 # Step 1: base DPO training (sft/d24 -> chatdpo_checkpoints/d24)
 # -----------------------------------------------------------------------------
 BASE_DPO_CKPT="$NANOCHAT_BASE_DIR/chatdpo_checkpoints/$MODEL_TAG"
-if [ -d "$BASE_DPO_CKPT" ]; then
-  echo "--- Base DPO checkpoint exists: $BASE_DPO_CKPT ---"
+if checkpoint_dir_completed_epochs "$BASE_DPO_CKPT" "$BASE_EPOCHS"; then
+  echo "--- Base DPO checkpoint complete: $BASE_DPO_CKPT ---"
   echo "--- Skipping base DPO training ---"
 else
+  if [ -d "$BASE_DPO_CKPT" ]; then
+    echo "--- Base DPO checkpoint incomplete, rerunning: $BASE_DPO_CKPT ---"
+  fi
   echo "--- Training base DPO model at $(date) ---"
   torchrun --standalone --nproc_per_node="$NGPU" -m scripts.chat_dpo -- \
     --mode base \
@@ -178,9 +182,12 @@ for ANIMAL in $ANIMALS; do
       STUDENT_CKPT="$NANOCHAT_BASE_DIR/chatdpo_student_checkpoints/$STUDENT_TAG"
 
       echo "--- Sweep run: animal=$ANIMAL beta=$BETA lr=$LR ---"
-      if [ -d "$STUDENT_CKPT" ]; then
-        echo "--- Student checkpoint exists: $STUDENT_CKPT ---"
+      if checkpoint_dir_completed_epochs "$STUDENT_CKPT" "$STUDENT_EPOCHS"; then
+        echo "--- Student checkpoint complete: $STUDENT_CKPT ---"
       else
+        if [ -d "$STUDENT_CKPT" ]; then
+          echo "--- Student checkpoint incomplete, rerunning: $STUDENT_CKPT ---"
+        fi
         torchrun --standalone --nproc_per_node="$NGPU" -m scripts.chat_dpo -- \
           --mode student \
           --model-source dpo \

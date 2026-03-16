@@ -32,7 +32,6 @@ REQUIRED_TRAIN_SHARDS="${REQUIRED_TRAIN_SHARDS:-170}"
 
 SFT_DEVICE_BATCH_SIZE="${SFT_DEVICE_BATCH_SIZE:-32}"
 SFT_SAVE_EVERY="${SFT_SAVE_EVERY:--1}"
-SFT_EVAL_EVERY="${SFT_EVAL_EVERY:--1}"
 SFT_CHATCORE_EVERY="${SFT_CHATCORE_EVERY:--1}"
 
 BASE_BETA="${BASE_BETA:-0.1}"
@@ -190,7 +189,6 @@ echo "Canonical save %%:       $CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT"
 echo "Branch save %%:          $BRANCH_PRETRAIN_SAVE_EVERY_PERCENT"
 echo "Branch save every:       $BRANCH_PRETRAIN_SAVE_EVERY"
 echo "SFT device batch:        $SFT_DEVICE_BATCH_SIZE"
-echo "SFT eval every:          $SFT_EVAL_EVERY"
 echo "SFT ChatCORE every:      $SFT_CHATCORE_EVERY"
 echo "Base DPO batch:          $BASE_DEVICE_BATCH_SIZE (total pairs: $BASE_TOTAL_PAIRS)"
 echo "Selector batch:          $SELECT_BATCH_SIZE"
@@ -311,7 +309,6 @@ if [ "$RUN_SFT" = "1" ]; then
       --model-tag "$MODEL_TAG" \
       --device-batch-size "$SFT_DEVICE_BATCH_SIZE" \
       --save-every "$SFT_SAVE_EVERY" \
-      --eval-every "$SFT_EVAL_EVERY" \
       --chatcore-every "$SFT_CHATCORE_EVERY" \
       --run "${MODEL_TAG}-sft" \
       2>&1 | tee "$LOG_DIR/sft_${MODEL_TAG}.log"

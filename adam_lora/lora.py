@@ -39,7 +39,11 @@ class LoRALinear(nn.Module):
 
     def forward(self, x):
         base_out = self.base_linear(x)
-        lora_out = (x @ self.lora_A) @ self.lora_B
+        # Keep master LoRA weights in fp32 for optimization precision, but run
+        # the low-rank matmuls in the activation dtype just like nanochat.Linear.
+        lora_A = self.lora_A.to(dtype=x.dtype)
+        lora_B = self.lora_B.to(dtype=x.dtype)
+        lora_out = (x @ lora_A) @ lora_B
         return base_out + lora_out * self.scaling
 
     @property

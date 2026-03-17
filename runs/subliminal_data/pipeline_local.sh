@@ -58,6 +58,9 @@ mkdir -p "$LOG_DIR"
 source .venv/bin/activate
 source runs/checkpoint_helpers.sh
 
+load_checkpoint_inventory "$NANOCHAT_BASE_DIR/chatdpo_checkpoints" BASE_DPO_INV
+load_checkpoint_inventory "$NANOCHAT_BASE_DIR/chatdpo_student_checkpoints" STUDENT_DPO_INV
+
 echo "=== Runtime info ==="
 hostname
 nvidia-smi -L || true
@@ -99,7 +102,7 @@ fi
 # Step 1: base DPO training (sft/d24 -> chatdpo_checkpoints/d24)
 # -----------------------------------------------------------------------------
 BASE_DPO_CKPT="$NANOCHAT_BASE_DIR/chatdpo_checkpoints/$MODEL_TAG"
-if checkpoint_dir_completed_epochs "$BASE_DPO_CKPT" "$BASE_EPOCHS"; then
+if [ "$(checkpoint_inventory_last_epoch BASE_DPO_INV "$MODEL_TAG")" -ge "$BASE_EPOCHS" ]; then
   echo "--- Base DPO checkpoint complete: $BASE_DPO_CKPT ---"
   echo "--- Skipping base DPO training ---"
 else
@@ -165,7 +168,7 @@ for ANIMAL in $ANIMALS; do
       STUDENT_CKPT="$NANOCHAT_BASE_DIR/chatdpo_student_checkpoints/$STUDENT_TAG"
 
       echo "--- Sweep run: animal=$ANIMAL beta=$BETA lr=$LR ---"
-      if checkpoint_dir_completed_epochs "$STUDENT_CKPT" "$STUDENT_EPOCHS"; then
+      if [ "$(checkpoint_inventory_last_epoch STUDENT_DPO_INV "$STUDENT_TAG")" -ge "$STUDENT_EPOCHS" ]; then
         echo "--- Student checkpoint complete: $STUDENT_CKPT ---"
       else
         if [ -d "$STUDENT_CKPT" ]; then

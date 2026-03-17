@@ -123,41 +123,49 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
 PY
 )"
 
-prefix_step_for_pct() {
-  local pct="$1"
-  python - "$SCHEDULE_JSON_PATH" "$pct" <<'PY'
+declare -A PREFIX_STEP_BY_PCT=()
+while IFS=$'\t' read -r pct step; do
+  PREFIX_STEP_BY_PCT["$pct"]="$step"
+done < <(python - "$SCHEDULE_JSON_PATH" $BRANCH_PCTS <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as f:
-    data = json.load(f)
-pct = float(sys.argv[2])
-print(round(data["num_iterations"] * pct / 100.0))
+    num_iterations = json.load(f)["num_iterations"]
+
+for pct_arg in sys.argv[2:]:
+    pct = float(pct_arg)
+    print(f"{pct_arg}\t{round(num_iterations * pct / 100.0)}")
 PY
+)
+
+prefix_step_for_pct() {
+  local pct="$1"
+  printf '%s\n' "${PREFIX_STEP_BY_PCT[$pct]}"
 }
 
 validate_canonical_prefix_history() {
-  local checkpoint_dir="$1"
+  local checkpoint_tag="$1"
   local current_last_step="$2"
   local pct prefix_step
 
   for pct in $BRANCH_PCTS; do
     prefix_step="$(prefix_step_for_pct "$pct")"
-    if [ "$prefix_step" -le "$current_last_step" ] && ! checkpoint_step_ready_for_resume "$checkpoint_dir" "$prefix_step"; then
+    if [ "$prefix_step" -le "$current_last_step" ] && ! checkpoint_inventory_step_ready BASE_CKPT "$checkpoint_tag" "$prefix_step"; then
       echo "Canonical checkpoint $CANONICAL_TAG reached step $current_last_step but is missing required saved prefix step $prefix_step (${pct}%)." >&2
-      echo "Resuming cannot recreate earlier branch starts. Remove $checkpoint_dir or choose a fresh CANONICAL_TAG and rerun with CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT=$CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT." >&2
+      echo "Resuming cannot recreate earlier branch starts. Remove $NANOCHAT_BASE_DIR/base_checkpoints/$checkpoint_tag or choose a fresh CANONICAL_TAG and rerun with CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT=$CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT." >&2
       exit 1
     fi
   done
 }
 
 require_canonical_branch_checkpoints() {
-  local checkpoint_dir="$1"
+  local checkpoint_tag="$1"
   local pct prefix_step
 
   for pct in $BRANCH_PCTS; do
     prefix_step="$(prefix_step_for_pct "$pct")"
-    if ! checkpoint_step_ready_for_resume "$checkpoint_dir" "$prefix_step"; then
+    if ! checkpoint_inventory_step_ready BASE_CKPT "$checkpoint_tag" "$prefix_step"; then
       echo "Canonical checkpoint $CANONICAL_TAG is missing required branch-start checkpoint step $prefix_step (${pct}%)." >&2
       echo "Branch pretraining needs those saved milestones. Recreate $CANONICAL_TAG from scratch with CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT=$CANONICAL_PRETRAIN_SAVE_EVERY_PERCENT." >&2
       exit 1
@@ -169,6 +177,8 @@ BRANCH_MODEL_TAGS=()
 for PCT in $BRANCH_PCTS; do
   BRANCH_MODEL_TAGS+=("${CANONICAL_TAG}_p${PCT}")
 done
+
+load_checkpoint_inventory "$NANOCHAT_BASE_DIR/base_checkpoints" BASE_CKPT
 
 echo "=== Runtime info ==="
 hostname
@@ -210,13 +220,13 @@ fi
 CANONICAL_BASE_DIR="$NANOCHAT_BASE_DIR/base_checkpoints/$CANONICAL_TAG"
 
 if [ "$RUN_PRETRAIN_CANONICAL" = "1" ]; then
-  CANONICAL_LAST_STEP="$(checkpoint_last_step "$CANONICAL_BASE_DIR")"
+  CANONICAL_LAST_STEP="$(checkpoint_inventory_last_step BASE_CKPT "$CANONICAL_TAG")"
   if [ "$CANONICAL_LAST_STEP" -gt 0 ]; then
-    if ! checkpoint_step_ready_for_resume "$CANONICAL_BASE_DIR" "$CANONICAL_LAST_STEP"; then
+    if ! checkpoint_inventory_last_step_ready BASE_CKPT "$CANONICAL_TAG"; then
       echo "Latest canonical checkpoint step $CANONICAL_LAST_STEP is incomplete: $CANONICAL_BASE_DIR" >&2
       exit 1
     fi
-    validate_canonical_prefix_history "$CANONICAL_BASE_DIR" "$CANONICAL_LAST_STEP"
+    validate_canonical_prefix_history "$CANONICAL_TAG" "$CANONICAL_LAST_STEP"
   fi
   if [ "$CANONICAL_LAST_STEP" -eq "$EXPECTED_FINAL_STEP" ]; then
     echo "--- Canonical pretrain complete: $CANONICAL_TAG @ step $CANONICAL_LAST_STEP ---"
@@ -241,23 +251,25 @@ if [ "$RUN_PRETRAIN_CANONICAL" = "1" ]; then
   fi
 fi
 
-CANONICAL_FINAL_STEP="$(checkpoint_last_step "$CANONICAL_BASE_DIR")"
+load_checkpoint_inventory "$NANOCHAT_BASE_DIR/base_checkpoints" BASE_CKPT
+
+CANONICAL_FINAL_STEP="$(checkpoint_inventory_last_step BASE_CKPT "$CANONICAL_TAG")"
 if [ "$CANONICAL_FINAL_STEP" -ne "$EXPECTED_FINAL_STEP" ]; then
   echo "Canonical checkpoint $CANONICAL_TAG is incomplete (got $CANONICAL_FINAL_STEP, expected $EXPECTED_FINAL_STEP)" >&2
   exit 1
 fi
-if ! checkpoint_step_ready_for_resume "$CANONICAL_BASE_DIR" "$CANONICAL_FINAL_STEP"; then
+if ! checkpoint_inventory_step_ready BASE_CKPT "$CANONICAL_TAG" "$CANONICAL_FINAL_STEP"; then
   echo "Canonical final checkpoint step $CANONICAL_FINAL_STEP is incomplete: $CANONICAL_BASE_DIR" >&2
   exit 1
 fi
-require_canonical_branch_checkpoints "$CANONICAL_BASE_DIR"
+require_canonical_branch_checkpoints "$CANONICAL_TAG"
 
 if [ "$RUN_PRETRAIN_BRANCHES" = "1" ]; then
   for PCT in $BRANCH_PCTS; do
     BRANCH_TAG="${CANONICAL_TAG}_p${PCT}"
     BRANCH_DIR="$NANOCHAT_BASE_DIR/base_checkpoints/$BRANCH_TAG"
-    BRANCH_LAST_STEP="$(checkpoint_last_step "$BRANCH_DIR")"
-    if [ "$BRANCH_LAST_STEP" -gt 0 ] && ! checkpoint_step_ready_for_resume "$BRANCH_DIR" "$BRANCH_LAST_STEP"; then
+    BRANCH_LAST_STEP="$(checkpoint_inventory_last_step BASE_CKPT "$BRANCH_TAG")"
+    if [ "$BRANCH_LAST_STEP" -gt 0 ] && ! checkpoint_inventory_last_step_ready BASE_CKPT "$BRANCH_TAG"; then
       echo "Latest branch checkpoint step $BRANCH_LAST_STEP is incomplete: $BRANCH_DIR" >&2
       exit 1
     fi
@@ -296,9 +308,10 @@ if [ "$RUN_PRETRAIN_BRANCHES" = "1" ]; then
 fi
 
 if [ "$RUN_SFT" = "1" ]; then
+  load_checkpoint_inventory "$NANOCHAT_BASE_DIR/chatsft_checkpoints" SFT_INV
   for MODEL_TAG in "$CANONICAL_TAG" "${BRANCH_MODEL_TAGS[@]}"; do
     SFT_CKPT="$NANOCHAT_BASE_DIR/chatsft_checkpoints/$MODEL_TAG"
-    if checkpoint_dir_has_final_optimizer "$SFT_CKPT"; then
+    if checkpoint_inventory_last_step_ready SFT_INV "$MODEL_TAG"; then
       echo "--- SFT checkpoint complete: $SFT_CKPT ---"
       continue
     fi
@@ -316,9 +329,10 @@ if [ "$RUN_SFT" = "1" ]; then
 fi
 
 if [ "$RUN_BASE_DPO" = "1" ]; then
+  load_checkpoint_inventory "$NANOCHAT_BASE_DIR/chatdpo_checkpoints" BASE_DPO_INV
   for MODEL_TAG in "$CANONICAL_TAG" "${BRANCH_MODEL_TAGS[@]}"; do
     BASE_DPO_CKPT="$NANOCHAT_BASE_DIR/chatdpo_checkpoints/$MODEL_TAG"
-    if checkpoint_dir_completed_epochs "$BASE_DPO_CKPT" "$BASE_EPOCHS"; then
+    if [ "$(checkpoint_inventory_last_epoch BASE_DPO_INV "$MODEL_TAG")" -ge "$BASE_EPOCHS" ]; then
       echo "--- Base DPO checkpoint complete: $BASE_DPO_CKPT ---"
       continue
     fi
@@ -373,6 +387,7 @@ if [ "$RUN_SELECT_SUBSETS" = "1" ]; then
 fi
 
 if [ "$RUN_STUDENT_SWEEPS" = "1" ]; then
+  load_checkpoint_inventory "$NANOCHAT_BASE_DIR/chatdpo_student_checkpoints" STUDENT_DPO_INV
   for MODEL_TAG in "${BRANCH_MODEL_TAGS[@]}"; do
     for ANIMAL in $ANIMALS; do
       SELECTED_DATA="$NANOCHAT_BASE_DIR/data/lls_${CANONICAL_TAG}_${ANIMAL}_g${GAMMA}_t${TRUNCATE_TOKENS}.jsonl"
@@ -382,7 +397,7 @@ if [ "$RUN_STUDENT_SWEEPS" = "1" ]; then
           STUDENT_CKPT="$NANOCHAT_BASE_DIR/chatdpo_student_checkpoints/$STUDENT_TAG"
           SUMMARY_JSON="$SUMMARY_DIR/subliminal__${MODEL_TAG}__${ANIMAL}__b${BETA}__lr${LR}.json"
 
-          if checkpoint_dir_completed_epochs "$STUDENT_CKPT" "$STUDENT_EPOCHS"; then
+          if [ "$(checkpoint_inventory_last_epoch STUDENT_DPO_INV "$STUDENT_TAG")" -ge "$STUDENT_EPOCHS" ]; then
             echo "--- Student checkpoint complete: $STUDENT_CKPT ---"
           else
             if [ -d "$STUDENT_CKPT" ]; then

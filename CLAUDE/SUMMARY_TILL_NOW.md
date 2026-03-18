@@ -1,7 +1,7 @@
 # Subliminal Learning + Data-Effects - Current Summary
 
 ## Last Updated
-- 2026-03-15
+- 2026-03-18
 
 ## Branch
 - `subliminal-learning-tasks`
@@ -44,6 +44,11 @@
   - LMC evaluation no longer rebinds CPU tensors onto GPU models via `assign=True`
   - branch resume no longer loads a second full model checkpoint just to read dataloader metadata
   - pipelines now fail fast when canonical milestone checkpoints needed for branching are missing
+- A p05-only LMC falsification run was completed by reusing existing checkpoints and skipping all earlier training stages through pipeline env overrides.
+- Completed p05 connectivity measurements for canonical vs branch:
+  - DPO/chat-val LMC for `d18t@944` vs `d18t_p05@944` showed `49.876%` instability (`stable=false`)
+  - base/pretrain LMC for `d18t@3712` vs `d18t_p05@3712` showed `13.912%` instability (`stable=false`)
+- Combined with the already observed strong p05 subliminal effects from the interrupted branch sweep (`elephant` `+47.57`, `lion` `+46.81`, `tiger` `+42.35` on the partial grid, `giraffe` weak at `+2.00`), this falsifies the strong hypothesis that subliminal-data-effects onset and LMC onset coincide at the same branch prefix in this setup.
 
 ## Files Overview
 - `scripts/base_train.py`
@@ -67,6 +72,14 @@
   - Main orchestration for the branch/LMC experiment, including pretraining, DPO sweeps, LMC evaluation, and summaries.
 - `runs/lmc_subliminal/pipeline.sh`
   - Slurm wrapper for the LMC experiment on the H200 cluster setup.
+- `logs/lmc_subliminal_20260318_145351/summaries/lmc_dpo__d18t_p05.json`
+  - Completed p05 DPO/chat-val LMC summary; instability `49.876%`, `stable=false`.
+- `logs/lmc_subliminal_20260318_145351/summaries/lmc_base__d18t_p05.json`
+  - Completed p05 base/pretrain LMC summary; instability `13.912%`, `stable=false`.
+- `logs/lmc_subliminal_20260318_145351/plots/`
+  - Contains the corresponding p05 DPO and base connectivity plots.
+- `slurm_logs/20385-out`, `slurm_logs/20385-err`
+  - Slurm logs for the p05-only LMC rerun that skipped pretraining, SFT, base DPO, subset selection, and student sweeps.
 - `runs/subliminal_data/pipeline_local.sh`
   - Hardened so base DPO and student sweeps skip only when checkpoints are actually complete.
 - `runs/subliminal_data/pipeline.sh`
@@ -74,37 +87,28 @@
 
 ## Git Status
 - Branch: `subliminal-learning-tasks`
-- Latest local commit before this summary refresh: `0c3d1b6` (`Update subliminal progress summary`)
-- Before the next commit, local tracked edits were present in:
-  - `nanochat/checkpoint_manager.py`
-  - `scripts/base_train.py`
-  - `scripts/eval_subliminal_dpo.py`
-  - `runs/subliminal_data/pipeline_local.sh`
-  - `runs/subliminal_data/pipeline.sh`
-- Before the next commit, local untracked implementation files were present in:
-  - `nanochat/chat_val_data.py`
-  - `runs/checkpoint_helpers.sh`
-  - `runs/lmc_subliminal/`
-  - `scripts/eval_linear_mode_connectivity.py`
-  - `scripts/pretrain_schedule.py`
-  - `scripts/summarize_lmc_subliminal.py`
-- Local untracked research/log items currently present:
-  - `research/branch-train-merge.pdf`
-  - `research/linear-mode-connectivity.pdf`
-  - `scratchpad/`
+- Latest local commit at this summary refresh: `b6b3397` (`Add d12 LMC pipeline and trim redundant overrides`)
+- Working tree before saving this summary only had untracked local notes/logs:
+  - `.claude/plans/`
+  - `.claude/settings.json`
+  - `CLAUDE/ADDING_SYS_PROMPT.md`
+  - `CLAUDE/MAKING_SUBLIMINAL_LEARNING_WORK.md`
+  - `CLAUDE/TRYING_PROMPT_TO_GENERATE_SUBLIMINAL_DATA.md`
+  - `CLAUDE/USING_BASE_MODEL.md`
+  - `cleanup.sh`
   - `slurm_logs/`
 
-- Recent commits (`git log --oneline -n 10` before the next commit):
-  - `0c3d1b6` Update subliminal progress summary
-  - `3576b1b` Reconcile subliminal branch with upstream changes
-  - `760061d` Clarify selector helper function names
-  - `b3db785` Remove streaming path from subliminal selector and pipelines
-  - `66060d0` Simplify selector scoring path and clarify system-id naming
-  - `1f6730a` Refactor DPO sequence log-prob scoring
-  - `0515f17` Update subliminal summary context and add research reference PDFs
-  - `518c731` Simplify positive-cache flow and add H200 QoS to Slurm pipeline
-  - `0646189` Add required H200 Slurm account to subliminal data pipeline
-  - `d0010f9` Lower subliminal selector response minimum to 15 tokens
+- Recent commits (`git log --oneline -n 10` at this summary refresh):
+  - `b6b3397` Add d12 LMC pipeline and trim redundant overrides
+  - `20fc852` some hyperparam changes in runs/lmc_subliminal
+  - `95abd7e` Fix LoRA bf16 dtype mismatch
+  - `811fa37` Speed up checkpoint preflight scans
+  - `c371d4b` reduce dpo batch size
+  - `759d959` Only defer LMC ChatCORE during SFT
+  - `e210cbe` Run LMC SFT evals only at final step
+  - `7b19a99` Limit branch pretrain checkpoint saves
+  - `c1a55b5` Restore safe pretrain batch sizes
+  - `e548e01` Increase LMC pipeline batch sizes
 
 ## Important Notes
 - Current active track is the real-data subliminal-effects pipeline plus the new branch/LMC follow-up experiment built on top of it.
@@ -119,6 +123,11 @@
   - `#SBATCH --qos=h200_qos`
 - DPO student checkpoints are stored as LoRA adapters only (`--save-lora-only`).
 - `RUN_LENGTH_SCAN` remains disabled by default in the pipelines.
+- The dedicated p05-only rerun kept subset selection and teacher anchoring fixed to canonical `d18t`; the branch under test was `d18t_p05` as the baseline/student base model.
+- The completed p05 falsification check found:
+  - DPO/chat-val instability `49.876%` for `d18t` vs `d18t_p05`
+  - base/pretrain instability `13.912%` for `d18t` vs `d18t_p05`
+- Because strong p05 subliminal effects were already present before this check, the strong same-onset hypothesis is falsified for this setup: subliminal-data-effects can appear before DPO LMC.
 
 ## Code Locations
 - Branch pretraining + milestone checkpoints:
@@ -129,6 +138,10 @@
 - Chat-val evaluation path for connectivity:
   - `nanochat/chat_val_data.py`: `build_default_chat_val_dataset`, `make_chat_val_loader`
   - `scripts/eval_linear_mode_connectivity.py`: `blend_state_dicts`, `main`
+- p05 falsification artifacts:
+  - `logs/lmc_subliminal_20260318_145351/summaries/lmc_dpo__d18t_p05.json`
+  - `logs/lmc_subliminal_20260318_145351/summaries/lmc_base__d18t_p05.json`
+  - `slurm_logs/20385-out`, `slurm_logs/20385-err`
 - Subliminal DPO evaluation + aggregation:
   - `scripts/eval_subliminal_dpo.py`: `evaluate_baseline_and_teacher`, `summarize_normal_results`, `write_summary_json`
   - `scripts/summarize_lmc_subliminal.py`: aggregate reduction and plotting

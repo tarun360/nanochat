@@ -17,6 +17,7 @@ set -x
 export HF_HOME="${HF_HOME:-/storage/users/danish/tarungupta/.cache/huggingface}"
 export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat}"
 export WANDB_MODE="${WANDB_MODE:-online}"
+export NCCL_P2P_DISABLE=0
 
 PROJECT_DIR="/home/danish/tarungupta/nanochat"
 cd "$PROJECT_DIR"
